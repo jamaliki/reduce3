@@ -282,7 +282,10 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
     };
     info += &timing("get coordinates", &mut tm);
     info += &timing("compute bond proxies", &mut tm);
-    let bonded = atominfo::bonded_lists(n, it.bonds.iter().map(|b| (b.i, b.j)));
+    // fixed mode: bonds to symmetry copies (disulfides, zinc) count too, as
+    // the ASU proxies do for Reduce2's own copies
+    let sym = it.sym_bonds.iter().filter(|b| !p.compat && b.i != b.j).map(|b| (b.i, b.j));
+    let bonded = atominfo::bonded_lists(n, it.bonds.iter().map(|b| (b.i, b.j)).chain(sym));
     info += &timing("compute bonded neighbor lists", &mut tm);
     let ex = atominfo::extra_atom_info(st, &flat, &it.etype, ml, &bonded, p.opt.probe.set_polar_hydrogen_radius);
     info += &ex.warnings;

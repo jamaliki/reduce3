@@ -938,6 +938,9 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
     it.log.push_str(&link_log);
     add_iron_sulfur_coordination(&mut it, st, flat, p.compat);
     add_zinc_coordination(&mut it, st, flat);
+    if !p.compat {
+        add_zinc_symmetry_coordination(&mut it, st, flat);
+    }
     adjust_for_ph_variants(&mut it, st, flat, &flat_index, ml, p);
     it
 }
@@ -1245,6 +1248,93 @@ fn add_iron_sulfur_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtom
 }
 
 /// Metal Coordination Library, zinc part: ZN with SG/ND1/NE2 partners within 3 A.
+/// Zinc coordination to symmetry copies (fixed mode). cctbx finds zinc
+/// partners among its non-bonded pairs, which include symmetry copies, but
+/// `add_zinc_coordination` looks within the model only. A Cys SG or His N
+/// within 3 A of a symmetry copy of a zinc (a crystal contact, as for His C16
+/// of 2F4Y) is bonded to it as a symmetry bond, so the residue's hydrogens and
+/// flips treat the atom as coordinated. One partner atom per residue, closest
+/// first, as within the model.
+fn add_zinc_symmetry_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms) {
+    const CUTOFF: f64 = 3.0;
+    let n = flat.pos.len();
+    let zincs: Vec<usize> = (0..n).filter(|&a| flat.name[a].trim() == "ZN").collect();
+    if zincs.is_empty() {
+        return;
+    }
+    let Some((uc, ops)) = crate::cell::crystal_operators(st) else { return };
+    let cands: Vec<usize> = (0..n).filter(|&a| matches!(flat.name[a].trim(), "SG" | "ND1" | "NE2")).collect();
+    if cands.is_empty() {
+        return;
+    }
+    let cell = |p: Vec3| ((p.x / CUTOFF).floor() as i64, (p.y / CUTOFF).floor() as i64, (p.z / CUTOFF).floor() as i64);
+    let mut grid: FxHashMap<(i64, i64, i64), Vec<usize>> = FxHashMap::default();
+    let (mut lo, mut hi) = (v3(f64::MAX, f64::MAX, f64::MAX), v3(f64::MIN, f64::MIN, f64::MIN));
+    for &a in &cands {
+        grid.entry(cell(flat.pos[a])).or_default().push(a);
+        let f = uc.fractionalize(flat.pos[a]);
+        lo = v3(lo.x.min(f.x), lo.y.min(f.y), lo.z.min(f.z));
+        hi = v3(hi.x.max(f.x), hi.y.max(f.y), hi.z.max(f.z));
+    }
+    // fractional margin covering the cutoff along each axis, generously
+    let margin = {
+        let r = uc.fractionalize(v3(CUTOFF, CUTOFF, CUTOFF)) - uc.fractionalize(v3(0.0, 0.0, 0.0));
+        r.x.abs().max(r.y.abs()).max(r.z.abs()) * 2.0 + 1e-6
+    };
+    let res_of = |a: usize| (flat.path[a].model, flat.path[a].chain, flat.path[a].rg);
+    let mut linked: FxHashSet<(usize, (u32, u32, u32))> = FxHashSet::default();
+    for b in &it.bonds {
+        if b.origin == ORIGIN_METAL {
+            let (z, o) = if flat.name[b.i as usize].trim() == "ZN" { (b.i, b.j) } else { (b.j, b.i) };
+            linked.insert((z as usize, res_of(o as usize)));
+        }
+    }
+    for &z in &zincs {
+        let fz = uc.fractionalize(flat.pos[z]);
+        let mut partners: Vec<(f64, usize)> = Vec::new();
+        for op in &ops {
+            let img = op.apply(fz);
+            let range = |l: f64, h: f64, p: f64| ((l - margin - p).ceil() as i64)..=((h + margin - p).floor() as i64);
+            for kx in range(lo.x, hi.x, img.x) {
+                for ky in range(lo.y, hi.y, img.y) {
+                    for kz in range(lo.z, hi.z, img.z) {
+                        if op.is_identity() && (kx, ky, kz) == (0, 0, 0) {
+                            continue;
+                        }
+                        let pz = uc.orthogonalize(img + v3(kx as f64, ky as f64, kz as f64));
+                        let (cx, cy, cz) = cell(pz);
+                        for dx in -1..=1 {
+                            for dy in -1..=1 {
+                                for dz in -1..=1 {
+                                    for &a in grid.get(&(cx + dx, cy + dy, cz + dz)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                                        if flat.path[a].model != flat.path[z].model {
+                                            continue;
+                                        }
+                                        let (za, aa) = (&flat.altloc[z], &flat.altloc[a]);
+                                        if !za.is_empty() && !aa.is_empty() && za != aa {
+                                            continue;
+                                        }
+                                        let d = flat.pos[a].dist(pz);
+                                        if d <= CUTOFF {
+                                            partners.push((d, a));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        partners.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        for (_, a) in partners {
+            if linked.insert((z, res_of(a))) {
+                it.sym_bonds.push(BondProxy { i: z as u32, j: a as u32, ideal: 2.30, origin: ORIGIN_METAL });
+            }
+        }
+    }
+}
+
 fn add_zinc_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms) {
     let n = flat.pos.len();
     let cands: Vec<usize> = (0..n).filter(|&a| matches!(flat.name[a].trim(), "SG" | "ND1" | "NE2")).collect();

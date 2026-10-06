@@ -257,9 +257,11 @@ Fixed mode carries on in these cases; compat mode stops or loses data exactly as
 
 ## Known limitations
 
-* Symmetry is used for disulfides only. Reduce2 also snaps atoms on special positions, and skips
-  iron-sulfur cluster coordination entirely when a symmetry copy comes within 3.5 A of a cluster;
-  Reduce3 does neither. Neither case occurs in the test set.
+* Symmetry is used for disulfides and, in fixed mode, zinc coordination (a Cys or His binding the
+  zinc of a neighboring copy). Reduce2 also bonds atoms to symmetry copies of other metal sites
+  through cctbx's asymmetric-unit mappings, snaps atoms on special positions, and skips iron-sulfur
+  cluster coordination entirely when a symmetry copy comes within 3.5 A of a cluster; Reduce3 does
+  none of these, so compat mode differs from Reduce2 where they occur.
 * With `keep_existing_H=True`, Reduce2 applies the low-pH/neutron dictionary values to a CCD-built
   residue only if one of its hydrogens was added (input hydrogens of PDB files have a padded
   element field it does not recognize). Reduce3 does not track that padding and applies them

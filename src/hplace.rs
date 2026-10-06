@@ -812,7 +812,9 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     }
     st.reset_i_seq();
     let mut bonds = Vec::new();
-    for b in &it.bonds {
+    // fixed mode: bonds to symmetry copies too (the optimizer's neighbor lists)
+    let sym = it.sym_bonds.iter().filter(|b| !p.compat && b.i != b.j);
+    for b in it.bonds.iter().chain(sym) {
         let (i, j) = (new_index[b.i as usize], new_index[b.j as usize]);
         if i != u32::MAX && j != u32::MAX {
             bonds.push((i, j, b.origin));
