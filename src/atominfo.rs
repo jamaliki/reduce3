@@ -75,7 +75,8 @@ pub fn extra_atom_info(
             EType::Typed(t) => ml.ener.get(t).ok_or_else(|| format!("'{}'", t)),
             EType::NoneType => Err("'None'".to_string()),
             EType::Unexpected => Err("'False'".to_string()),
-            EType::Unknown => Err("''".to_string()),
+            // cctbx's energy library has an all-empty entry for the empty type
+            EType::Unknown => ml.ener.get("").ok_or_else(|| "''".to_string()),
         };
         let radius: Result<(), String> = entry.as_ref().map_err(|m| m.clone()).and_then(|en| {
             let vdw = en.vdw_radius;
@@ -160,5 +161,5 @@ pub fn extra_atom_info(
 
 /// The Boost.Python message for assigning None to a double property.
 fn none_assignment_message() -> String {
-    "Python argument types in\n    None.None(ExtraAtomInfo, NoneType)\ndid not match C++ signature:\n    None(ExtraAtomInfo {lvalue}, double)".to_string()
+    "Python argument types in\n    None.None(ExtraAtomInfo, NoneType)\ndid not match C++ signature:\n    None(molprobity::probe::ExtraAtomInfo {lvalue}, double)".to_string()
 }

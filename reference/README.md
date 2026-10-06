@@ -5,7 +5,7 @@ in git (the cctbx environment and the outputs come to several hundred MB). To re
 
 ```bash
 cd reference
-micromamba create -p env -c conda-forge python=3.12 cctbx-base=2026.9 chem_data=2026.9
+micromamba create -p env -c conda-forge python=3.12 cctbx-base=2026.9 chem_data=2026.9 rdkit=2026.09
 mkdir -p pdbs out dumps
 for id in 1a28 1crn 1d3z 1dfu 1ehz 1ubq 1xso 2oob 3gfh 3vyk 4fen 6oge 7c31; do
   curl -sSfo pdbs/$id.pdb https://files.rcsb.org/download/$id.pdb
@@ -35,5 +35,17 @@ cargo build --release --features refcheck
 ```
 
 `hcheck` compares hydrogen placement, and `wcheck` compares the optimizer inputs Reduce3
-builds itself (bonded lists and atom info). `../docs/INTERPRETATION_SPEC.md` documents the
-cctbx interpretation behavior that Reduce3 reproduces.
+builds itself (bonded lists and atom info).
+
+Reduce2 builds restraints for residues that only the CCD describes through RDKit, which is
+why the environment above installs it. `harness/dump_ccd_restraints.py` writes those restraints
+for chosen or sampled CCD entries, and `ccdcheck` compares Reduce3's:
+
+```bash
+env/bin/python harness/dump_ccd_restraints.py --sample 600 > ccd.jsonl
+../target/release/reduce3 ccdcheck env/lib/python3.12/site-packages/chem_data ccd.jsonl
+```
+
+`../tools/gen_rdkit_valence.py` regenerates the RDKit valence table in `src/rdkit_valence.rs`.
+`../docs/INTERPRETATION_SPEC.md` documents the cctbx interpretation behavior that Reduce3
+reproduces.

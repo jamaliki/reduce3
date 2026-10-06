@@ -529,7 +529,7 @@ pub fn wcheck(pdb: &str, dump: &str, chem_data: &str) {
     st.sort_atoms_in_place();
     st.reset_i_seq();
     let flat = crate::interp::FlatAtoms::from_structure(&st);
-    let it = crate::interp::interpret(&st, &flat, &ml, &crate::interp::InterpParams { neutron: false, link_distance_cutoff: 3.0, compat: true });
+    let it = crate::interp::interpret(&st, &flat, &ml, &crate::interp::InterpParams { neutron: false, link_distance_cutoff: 3.0, compat: true, auto_comps: Default::default() });
     let n = flat.pos.len();
     let bonded = crate::atominfo::bonded_lists(n, it.bonds.iter().map(|b| (b.i, b.j)));
     let ex = crate::atominfo::extra_atom_info(&st, &flat, &it.etype, &ml, &bonded, true);
@@ -572,5 +572,88 @@ pub fn wcheck(pdb: &str, dump: &str, chem_data: &str) {
             }
         }
         println!("  warning lines mine {} theirs {}", ex.warnings.lines().count(), tw.lines().count());
+    }
+}
+
+/// Compare the CCD-derived dictionaries with `reference/harness/dump_ccd_restraints.py`.
+pub fn ccdcheck(chem_data: &str, jsonl: &str) {
+    let ml = crate::monlib::MonLib::load(std::path::Path::new(chem_data)).expect("chem_data");
+    let text = std::fs::read_to_string(jsonl).expect("jsonl");
+    let (mut n, mut same) = (0, 0);
+    let mut problems: std::collections::BTreeMap<&str, Vec<String>> = Default::default();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let d: serde_json::Value = serde_json::from_str(line).expect("json");
+        let id = d["id"].as_str().unwrap().to_string();
+        n += 1;
+        let mine = ml.ccd_comp(&id);
+        let ok = d["ok"].as_bool().unwrap();
+        let mut bad: Vec<(&str, String)> = Vec::new();
+        match (&mine, ok) {
+            (None, false) => {}
+            (Some(_), false) => bad.push(("accepted, Reduce2 rejects", id.clone())),
+            (None, true) => bad.push(("rejected, Reduce2 accepts", id.clone())),
+            (Some(c), true) => {
+                let s = |v: &serde_json::Value| v.as_str().unwrap_or("").to_string();
+                let f = |v: &serde_json::Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok())).unwrap();
+                let same = |x: f64, y: f64| x == y || (x.is_nan() && y.is_nan());
+                let atoms: Vec<(String, String)> = d["atoms"].as_array().unwrap().iter().map(|a| (s(&a[0]), s(&a[1]))).collect();
+                let mine_atoms: Vec<(String, String)> = c.atoms.iter().map(|a| (a.id.clone(), a.type_symbol.clone())).collect();
+                if atoms != mine_atoms {
+                    bad.push(("atoms", id.clone()));
+                }
+                let bonds = d["bonds"].as_array().unwrap();
+                if bonds.len() != c.bonds.len() {
+                    bad.push(("bond count", id.clone()));
+                } else {
+                    for (b, m) in bonds.iter().zip(&c.bonds) {
+                        if (s(&b[0]), s(&b[1]), s(&b[2])) != (m.a1.clone(), m.a2.clone(), m.type_.clone()) {
+                            bad.push(("bond atoms", format!("{} {}-{}", id, m.a1, m.a2)));
+                        } else if !same(f(&b[3]), m.value_dist.unwrap()) {
+                            bad.push(("bond value", format!("{} {}-{} {} vs {}", id, m.a1, m.a2, f(&b[3]), m.value_dist.unwrap())));
+                        }
+                    }
+                }
+                let angles = d["angles"].as_array().unwrap();
+                if angles.len() != c.angles.len() {
+                    bad.push(("angle count", id.clone()));
+                } else {
+                    for (a, m) in angles.iter().zip(&c.angles) {
+                        if (s(&a[0]), s(&a[1]), s(&a[2])) != (m.a1.clone(), m.a2.clone(), m.a3.clone()) {
+                            bad.push(("angle order", id.clone()));
+                            break;
+                        } else if !same(f(&a[3]), m.value.unwrap()) {
+                            bad.push(("angle value", format!("{} {}-{}-{} {} vs {}", id, m.a1, m.a2, m.a3, f(&a[3]), m.value.unwrap())));
+                        }
+                    }
+                }
+                let tors = d["tors"].as_array().unwrap();
+                if tors.len() != c.tors.len() {
+                    bad.push(("torsion count", id.clone()));
+                } else {
+                    for (t, m) in tors.iter().zip(&c.tors) {
+                        let names = [s(&t[1]), s(&t[2]), s(&t[3]), s(&t[4])];
+                        if names != m.a || s(&t[0]) != m.id {
+                            bad.push(("torsion order", id.clone()));
+                            break;
+                        }
+                        let (x, y) = (f(&t[5]), m.value.unwrap());
+                        if !same(x, y) {
+                            let kind = if x.abs() == 180.0 && y.abs() == 180.0 { "torsion +-180" } else { "torsion value" };
+                            bad.push((kind, format!("{} {} {} vs {}", id, m.id, x, y)));
+                        }
+                    }
+                }
+            }
+        }
+        if bad.is_empty() {
+            same += 1;
+        }
+        for (k, v) in bad {
+            problems.entry(k).or_default().push(v);
+        }
+    }
+    println!("{} entries, {} identical", n, same);
+    for (k, v) in problems {
+        println!("  {}: {} (e.g. {})", k, v.len(), v.iter().take(4).cloned().collect::<Vec<_>>().join("; "));
     }
 }

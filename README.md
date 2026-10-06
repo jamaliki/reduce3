@@ -4,8 +4,11 @@ Reduce3 is a Rust reimplementation of cctbx **Reduce2** (`mmtbx.reduce2`). It ad
 macromolecular model and optimizes the rotatable and flippable groups (OH/SH/NH3+/methyl rotations,
 Asn/Gln/His flips) by Probe dot scoring. It covers the whole pipeline:
 
-* restraint interpretation (monomer library, links, modifications, disulfides, zinc coordination,
-  automatic linking such as N-glycosylation and glycosidic bonds),
+* restraint interpretation (monomer library, links, modifications, disulfides including those to
+  symmetry copies, zinc and iron-sulfur cluster coordination, automatic linking such as
+  N-glycosylation and glycosidic bonds),
+* Reduce2's fallback for residues that only the wwPDB chemical component dictionary describes
+  (restraints built from the CCD entry, as Reduce2 does through RDKit, but without needing RDKit),
 * riding-hydrogen placement,
 * Probe contact scoring, the Movers and the clique optimizer,
 * PDB and mmCIF input and output, with the same formatting as iotbx.
@@ -52,7 +55,9 @@ parsed, without writing or re-reading text:
 * implement `cifsource::CifSource` (categories as tables of values) for the program's parsed
   mmCIF data block, and call `reduce3::run_cif(&block, &monlib, &params)`;
 * stream the result into the program's own document type by implementing `cifsource::CifSink`
-  and calling `mmcif::write_cif(&output.structure, &mut sink)`.
+  and calling `mmcif::write_cif(&output.structure, &mut sink)` (Reduce2's layout), or
+  `mmcif::write_cif_preserving(&output.structure, &block, code, &mut sink)` to write the model back
+  into its source block with every other category kept.
 
 The mmCIF reader and writer use the same two traits, so this path builds exactly the model a
 file would and emits exactly the items and loops `reduce3` writes. A source that already holds
@@ -73,6 +78,8 @@ without flips.
 | `approach=optimize` and `approach=remove` (1crn) | byte-identical |
 | Hydrogen placement vs. dumps, 13 structures | same atoms, names, riding types; coordinates equal to 0.0000 Å, about 98% of them bit-identical |
 | Optimizer on Reduce2's own intermediate state (26 dumps) | same report, coordinates and deletions in all 26 |
+| Residues only the CCD describes: 1fdo (6MO, Fe4S4 cluster), 2atz (DGT, disulfide to a symmetry copy), 3fx8 (FE2), with and without flips | **byte-identical** in all 6 (Reduce2 run with RDKit) |
+| Restraints Reduce2 builds from the CCD, per entry (`reference/harness/dump_ccd_restraints.py`) | identical acceptance, values and order in a 3,600-entry sample of the CCD entries that neither library describes |
 
 Bit-exact agreement needed two things beyond porting the code:
 
@@ -183,11 +190,28 @@ Where the speed comes from:
     integer. Chain ids were also upper-cased, and the `.` "any altloc" wildcard was ignored. All
     of these are fixed.
 
+**Restraints and output**
+
+22. Residues with CCD-built restraints get the bond and angle values of the GeoStd low-pH or
+    neutron variant of their dictionary, but cctbx applied them only to the first residue of each
+    name. Every residue gets them now, and in neutron mode the bonds it changes take neutron
+    distances, like the bonds it adds.
+23. The output dropped everything but the coordinates: Reduce2's mmCIF has none of the input's
+    other categories (`_struct_conn`, `_entity`, the sequence schemes, ...), and its PDB has no
+    SSBOND, LINK or CONECT records. Fixed mode writes mmCIF input back into its own data block,
+    with every category kept, `_atom_site` rebuilt with the input's items and label identifiers
+    (new hydrogens take their residue's), atom ids renumbered and `_atom_site_anisotrop` and
+    `_atom_type` updated. PDB output keeps SSBOND and LINK and renumbers CONECT.
+
 ## Known limitations
 
-* Crystallographic symmetry contacts are not considered. Reduce2 makes disulfides across symmetry
-  operators and snaps atoms on special positions; Reduce3 makes neither. Neither case occurs in the
-  test set.
+* Symmetry is used for disulfides only. Reduce2 also snaps atoms on special positions, and skips
+  iron-sulfur cluster coordination entirely when a symmetry copy comes within 3.5 A of a cluster;
+  Reduce3 does neither. Neither case occurs in the test set.
+* With `keep_existing_H=True`, Reduce2 applies the low-pH/neutron dictionary values to a CCD-built
+  residue only if one of its hydrogens was added (input hydrogens of PDB files have a padded
+  element field it does not recognize). Reduce3 does not track that padding and applies them
+  whenever the residue has hydrogens.
 * User-supplied restraint CIF files are supported by the library code but not yet exposed on the
   command line.
 * Reduce2 options that only produce side files are accepted and ignored: `comparison_file`,
@@ -204,6 +228,7 @@ Where the speed comes from:
 | `src/pipeline.rs` | program flow (`Program.run`) |
 | `src/hplace.rs`, `src/riding.rs` | `place_hydrogens`, riding connectivity and parameterization |
 | `src/interp.rs`, `src/autolink.rs`, `src/monlib.rs`, `src/names.rs` | restraint interpretation, automatic links, monomer library, atom-name mapping |
+| `src/ccdrestraints.rs`, `src/rdkit_valence.rs` | restraints built from the CCD (Reduce2's RDKit fallback), RDKit's valence verdicts |
 | `src/atominfo.rs`, `src/probe.rs` | `getExtraAtomInfo`, Probe dot scoring |
 | `src/movers.rs`, `src/optimizer.rs` | Movers, optimizer (exact VE and the compat OptimizerC port) |
 | `src/pdbio.rs`, `src/mmcif.rs`, `src/cif.rs`, `src/model.rs` | I/O and the iotbx-style hierarchy |

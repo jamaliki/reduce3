@@ -200,6 +200,7 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
             Atom::new(&format_pdb_atom_name(&get(r, c_name), &type_symbol), &type_symbol, v3(num(r, c_x)?, num(r, c_y)?, num(r, c_z)?));
         atom.occ = num(r, c_occ)?;
         atom.b = num(r, c_b)?;
+        atom.src = r as u32;
         if let Some(ci) = c_id {
             let id = get(r, ci);
             atom.serial = id.trim().parse::<i64>().ok().and_then(|v| hy36_encode(5, v)).unwrap_or_else(|| id.to_string());
@@ -264,7 +265,7 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         crystal = Some(CrystalSymmetry { cell: [a, b, c, al, be, ga], space_group: sg });
     }
     let had = crystal.is_some();
-    let mut st = Structure { models, crystal, had_cell_record: had, links: Vec::new() };
+    let mut st = Structure { models, crystal, had_cell_record: had, links: Vec::new(), pdb_records: PdbRecords::default() };
     st.reset_i_seq();
     Ok(st)
 }
@@ -607,4 +608,251 @@ pub fn write_cif<K: CifSink + ?Sized>(st: &Structure, sink: &mut K) {
         }
         sink.end_loop();
     }
+}
+
+/// `_atom_site` items that describe the residue rather than the atom: a new
+/// hydrogen takes them from an input atom of its residue.
+const RESIDUE_ITEMS: &[&str] = &[
+    "group_pdb",
+    "label_comp_id",
+    "label_asym_id",
+    "label_entity_id",
+    "label_seq_id",
+    "auth_comp_id",
+    "auth_asym_id",
+    "auth_seq_id",
+    "pdbx_pdb_ins_code",
+    "pdbx_pdb_model_num",
+    "pdbx_label_index",
+    "pdbx_pdb_residue_no",
+    "pdbx_pdb_residue_name",
+    "pdbx_pdb_strand_id",
+    "pdbx_sifts_xref_db_acc",
+    "pdbx_sifts_xref_db_name",
+    "pdbx_sifts_xref_db_num",
+    "pdbx_sifts_xref_db_res",
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum AtomItem {
+    Id,
+    TypeSymbol,
+    Name,
+    AltId,
+    Coord(usize),
+    Occupancy,
+    BIso,
+    Charge,
+    Residue,
+    Other,
+}
+
+/// A value to send: from the source table, or made here.
+enum Val {
+    Source(usize, usize),
+    Made(String),
+    Missing(CifCell<'static>),
+}
+
+fn send_row<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, vals: &[Val], sink: &mut K) {
+    let cells: Vec<(Option<CifCell<'static>>, std::borrow::Cow<'_, str>)> = vals
+        .iter()
+        .map(|v| match v {
+            Val::Source(r, c) => (t.missing(*r, *c), t.cell(*r, *c)),
+            Val::Made(s) => (None, std::borrow::Cow::Borrowed(s.as_str())),
+            Val::Missing(m) => (Some(*m), std::borrow::Cow::Borrowed("")),
+        })
+        .collect();
+    let row: Vec<CifCell<'_>> = cells.iter().map(|(m, s)| m.unwrap_or(CifCell::Text(s))).collect();
+    sink.row(&row);
+}
+
+/// Send a source category unchanged.
+fn send_table<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, sink: &mut K) {
+    let tags: Vec<String> = t.tags().iter().map(|s| s.to_string()).collect();
+    let ncol = tags.len();
+    if t.is_loop() {
+        let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+        sink.begin_loop(&refs, t.row_count());
+        for r in 0..t.row_count() {
+            let vals: Vec<Val> = (0..ncol).map(|c| Val::Source(r, c)).collect();
+            send_row(t, &vals, sink);
+        }
+        sink.end_loop();
+    } else if t.row_count() > 0 {
+        for (c, tag) in tags.iter().enumerate() {
+            let cell = t.cell(0, c);
+            sink.item(tag, t.missing(0, c).unwrap_or(CifCell::Text(&cell)));
+        }
+    }
+}
+
+/// Write the model into its source data block: every category of the source in
+/// its order, with `_atom_site` rebuilt and `_atom_site_anisotrop` renumbered.
+///
+/// Input atoms keep their source values, including the label identifiers that
+/// `_struct_conn`, the sequence schemes and other categories refer to; only the
+/// atom ids are renumbered (1 to N over all models), and coordinates,
+/// occupancies and B values are rewritten where Reduce3 changed them. A new
+/// hydrogen takes the residue items ([`RESIDUE_ITEMS`]) from an input atom of
+/// its residue and is unknown (`?`) in every other item it has no value for.
+/// `_atom_type` gains the elements it lacks. The other categories are sent
+/// unchanged (or copied by the sink itself, see [`CifSink::copy_category`]).
+pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
+    st: &Structure,
+    source: &S,
+    code: &str,
+    sink: &mut K,
+) -> Result<(), String> {
+    let atoms = source.table("atom_site").ok_or_else(|| "the source has no _atom_site loop".to_string())?;
+    let tags: Vec<String> = atoms.tags().iter().map(|t| t.to_string()).collect();
+    let item_of = |t: &str| t.split_once('.').map(|x| x.1).unwrap_or("").to_ascii_lowercase();
+    let roles: Vec<AtomItem> = tags
+        .iter()
+        .map(|t| match item_of(t).as_str() {
+            "id" => AtomItem::Id,
+            "type_symbol" => AtomItem::TypeSymbol,
+            "label_atom_id" | "auth_atom_id" => AtomItem::Name,
+            "label_alt_id" => AtomItem::AltId,
+            "cartn_x" => AtomItem::Coord(0),
+            "cartn_y" => AtomItem::Coord(1),
+            "cartn_z" => AtomItem::Coord(2),
+            "occupancy" => AtomItem::Occupancy,
+            "b_iso_or_equiv" => AtomItem::BIso,
+            "pdbx_formal_charge" => AtomItem::Charge,
+            i if RESIDUE_ITEMS.contains(&i) => AtomItem::Residue,
+            _ => AtomItem::Other,
+        })
+        .collect();
+    let c_id = roles.iter().position(|&r| r == AtomItem::Id);
+    // output atoms in hierarchy order, each with an input row to take values from
+    let mut out: Vec<(&AtomGroup, &Atom, Option<usize>)> = Vec::new();
+    for m in &st.models {
+        for c in &m.chains {
+            for rg in &c.residue_groups {
+                let rg_row = rg.atom_groups.iter().flat_map(|g| &g.atoms).find(|a| a.src != Atom::NEW).map(|a| a.src as usize);
+                for ag in &rg.atom_groups {
+                    let ag_row = ag.atoms.iter().find(|a| a.src != Atom::NEW).map(|a| a.src as usize).or(rg_row);
+                    for a in &ag.atoms {
+                        out.push((ag, a, if a.src != Atom::NEW { Some(a.src as usize) } else { ag_row }));
+                    }
+                }
+            }
+        }
+    }
+    sink.begin_block(code);
+    for cat in source.categories() {
+        match cat.to_ascii_lowercase().as_str() {
+            "atom_site" => {
+                let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+                sink.begin_loop(&refs, out.len());
+                for (k, &(ag, a, row)) in out.iter().enumerate() {
+                    let input = a.src != Atom::NEW;
+                    let vals: Vec<Val> = roles
+                        .iter()
+                        .enumerate()
+                        .map(|(c, &role)| match role {
+                            AtomItem::Id => Val::Made((k + 1).to_string()),
+                            AtomItem::Coord(i) => {
+                                let v = [a.xyz.x, a.xyz.y, a.xyz.z][i];
+                                match row {
+                                    Some(r) if input && atoms.number(r, c) == Some(v) => Val::Source(r, c),
+                                    _ => Val::Made(format!("{:.3}", v)),
+                                }
+                            }
+                            AtomItem::Occupancy | AtomItem::BIso => {
+                                let v = if role == AtomItem::Occupancy { a.occ } else { a.b };
+                                match row {
+                                    Some(r) if input && atoms.number(r, c) == Some(v) => Val::Source(r, c),
+                                    _ => Val::Made(format!("{:.2}", v)),
+                                }
+                            }
+                            AtomItem::Name => match row {
+                                Some(r) if input && atoms.cell(r, c).trim() == a.name.trim() => Val::Source(r, c),
+                                _ => Val::Made(a.name.trim().to_string()),
+                            },
+                            _ if input => Val::Source(row.unwrap_or(0), c),
+                            AtomItem::TypeSymbol => Val::Made(a.elem().to_string()),
+                            AtomItem::AltId if ag.altloc.is_empty() => Val::Missing(CifCell::NotApplicable),
+                            AtomItem::AltId => Val::Made(ag.altloc.clone()),
+                            AtomItem::Residue => match row {
+                                Some(r) => Val::Source(r, c),
+                                None => Val::Missing(CifCell::Unknown),
+                            },
+                            AtomItem::Charge | AtomItem::Other => Val::Missing(CifCell::Unknown),
+                        })
+                        .collect();
+                    send_row(&atoms, &vals, sink);
+                }
+                sink.end_loop();
+            }
+            "atom_site_anisotrop" => {
+                let Some(an) = source.table(&cat) else { continue };
+                let (Some(c_id), Some(an_id)) = (c_id, an.column("id")) else { continue };
+                let by_id: rustc_hash::FxHashMap<String, usize> =
+                    (0..an.row_count()).map(|r| (an.cell(r, an_id).into_owned(), r)).collect();
+                let rows: Vec<(usize, usize)> = out
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, a, _))| a.src != Atom::NEW)
+                    .filter_map(|(k, (_, a, _))| by_id.get(&*atoms.cell(a.src as usize, c_id)).map(|&r| (k, r)))
+                    .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                let an_tags: Vec<String> = an.tags().iter().map(|s| s.to_string()).collect();
+                let refs: Vec<&str> = an_tags.iter().map(|s| s.as_str()).collect();
+                sink.begin_loop(&refs, rows.len());
+                for (k, r) in rows {
+                    let vals: Vec<Val> =
+                        (0..an_tags.len()).map(|c| if c == an_id { Val::Made((k + 1).to_string()) } else { Val::Source(r, c) }).collect();
+                    send_row(&an, &vals, sink);
+                }
+                sink.end_loop();
+            }
+            "atom_type" => {
+                let Some(t) = source.table(&cat) else { continue };
+                let present: Vec<String> = match t.column("symbol") {
+                    Some(c) => (0..t.row_count()).map(|r| t.cell(r, c).trim().to_ascii_uppercase()).collect(),
+                    None => Vec::new(),
+                };
+                let mut missing: Vec<String> = Vec::new();
+                for (_, a, _) in &out {
+                    let e = a.elem().to_ascii_uppercase();
+                    if !present.contains(&e) && !missing.contains(&e) {
+                        missing.push(e);
+                    }
+                }
+                let Some(c_sym) = t.column("symbol").filter(|_| !missing.is_empty()) else {
+                    if !sink.copy_category(&cat) {
+                        send_table(&t, sink);
+                    }
+                    continue;
+                };
+                let t_tags: Vec<String> = t.tags().iter().map(|s| s.to_string()).collect();
+                let refs: Vec<&str> = t_tags.iter().map(|s| s.as_str()).collect();
+                sink.begin_loop(&refs, t.row_count() + missing.len());
+                for r in 0..t.row_count() {
+                    let vals: Vec<Val> = (0..t_tags.len()).map(|c| Val::Source(r, c)).collect();
+                    send_row(&t, &vals, sink);
+                }
+                for e in missing {
+                    let vals: Vec<Val> = (0..t_tags.len())
+                        .map(|c| if c == c_sym { Val::Made(e.clone()) } else { Val::Missing(CifCell::Unknown) })
+                        .collect();
+                    send_row(&t, &vals, sink);
+                }
+                sink.end_loop();
+            }
+            _ => {
+                if sink.copy_category(&cat) {
+                    continue;
+                }
+                if let Some(t) = source.table(&cat) {
+                    send_table(&t, sink);
+                }
+            }
+        }
+    }
+    Ok(())
 }

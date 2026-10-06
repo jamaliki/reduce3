@@ -73,6 +73,9 @@ pub struct Comp {
     pub source: PathBuf,
     pub applied_mods: Vec<String>,
     pub is_terminus: bool,
+    /// Built from the CCD for a residue the libraries lack (Reduce2's
+    /// `auto_<resname>` dictionary); its atoms have no energy types.
+    pub from_ccd: bool,
 }
 
 impl Comp {
@@ -317,6 +320,8 @@ pub struct MonLib {
     pub ener: FxHashMap<String, EnerAtom>,
     comp_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
     ccd_cache: RwLock<FxHashMap<String, Option<Arc<CcdEntry>>>>,
+    ccd_comp_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
+    variant_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
     /// User-supplied dictionaries (restraint CIF files), which win over the library.
     user_comps: FxHashMap<String, Arc<Comp>>,
 }
@@ -381,6 +386,8 @@ impl MonLib {
             ener: FxHashMap::default(),
             comp_cache: RwLock::new(FxHashMap::default()),
             ccd_cache: RwLock::new(FxHashMap::default()),
+            ccd_comp_cache: RwLock::new(FxHashMap::default()),
+            variant_cache: RwLock::new(FxHashMap::default()),
             user_comps: FxHashMap::default(),
         };
         let read = |p: PathBuf| -> Result<String, String> {
@@ -617,6 +624,53 @@ impl MonLib {
             }
         }
         self.comp_cache.write().unwrap().insert(id, found.clone());
+        found
+    }
+
+    /// Restraints built from the CCD for a residue that neither library
+    /// describes (Reduce2's fallback; see [`crate::ccdrestraints`]).
+    pub fn ccd_comp(&self, comp_id: &str) -> Option<Arc<Comp>> {
+        let id = comp_id.trim().to_ascii_uppercase();
+        if id.is_empty() || id == "UNL" {
+            return None;
+        }
+        if let Some(c) = self.ccd_comp_cache.read().unwrap().get(&id) {
+            return c.clone();
+        }
+        let first = id.chars().next().unwrap().to_ascii_lowercase().to_string();
+        let p = self.root.join("chemical_components").join(first).join(format!("data_{}.cif", id));
+        let comp = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| crate::ccdrestraints::comp_from_ccd(&t, &p))
+            .map(Arc::new);
+        self.ccd_comp_cache.write().unwrap().insert(id, comp.clone());
+        comp
+    }
+
+    /// The GeoStd neutron or low-pH variant of a residue dictionary
+    /// (`get_comp_comp_id_direct(resname, pH_range=...)`, neutron first), which
+    /// cctbx applies to residues whose hydrogens have no energy type.
+    pub fn ph_variant(&self, comp_id: &str) -> Option<Arc<Comp>> {
+        let id = comp_id.trim().to_ascii_uppercase();
+        if id.is_empty() {
+            return None;
+        }
+        if let Some(c) = self.variant_cache.read().unwrap().get(&id) {
+            return c.clone();
+        }
+        let first = id.chars().next().unwrap().to_ascii_lowercase().to_string();
+        let dir = self.root.join("geostd").join(first);
+        let mut found = None;
+        for suffix in ["_neutron", "_pH_low"] {
+            let p = dir.join(format!("data_{}{}.cif", id, suffix));
+            let Ok(t) = std::fs::read_to_string(&p) else { continue };
+            let doc = cif::parse(&t);
+            found = parse_comp_doc(&doc, &p).into_iter().find(|c| c.id.eq_ignore_ascii_case(&id)).map(Arc::new);
+            if found.is_some() {
+                break;
+            }
+        }
+        self.variant_cache.write().unwrap().insert(id, found.clone());
         found
     }
 

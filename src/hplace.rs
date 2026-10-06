@@ -118,7 +118,13 @@ fn pad_name(n: &str) -> String {
 
 /// Add every missing dictionary H at a bogus position (mean of the atom
 /// group + 0.5 on each axis).
-fn add_missing_h(st: &mut Structure, ml: &MonLib, p: &HPlaceParams, no_h_placed: &mut Vec<String>) {
+fn add_missing_h(
+    st: &mut Structure,
+    ml: &MonLib,
+    p: &HPlaceParams,
+    no_h_placed: &mut Vec<String>,
+    auto_comps: &mut FxHashMap<String, Arc<Comp>>,
+) {
     for m in &mut st.models {
         for c in &mut m.chains {
             for rg in &mut c.residue_groups {
@@ -133,9 +139,19 @@ fn add_missing_h(st: &mut Structure, ml: &MonLib, p: &HPlaceParams, no_h_placed:
                     }
                     let names: Vec<String> = ag.atoms.iter().map(|a| a.name.clone()).collect();
                     let actual: FxHashSet<String> = ag.atoms.iter().map(|a| a.name.trim().to_ascii_uppercase()).collect();
-                    let Some(comp) = residue_dictionary(ml, &ag.resname, &names) else {
-                        no_h_placed.push(ag.resname.clone());
-                        continue;
+                    // `mon_lib_query`: the libraries, else restraints built from the CCD
+                    let comp = match residue_dictionary(ml, &ag.resname, &names) {
+                        Some(c) => c,
+                        None => match ml.ccd_comp(&ag.resname) {
+                            Some(c) => {
+                                auto_comps.entry(ag.resname.trim().to_ascii_uppercase()).or_insert_with(|| c.clone());
+                                c
+                            }
+                            None => {
+                                no_h_placed.push(ag.resname.clone());
+                                continue;
+                            }
+                        },
                     };
                     let mut removed: Vec<String> = Vec::new();
                     if comp.test_for_peptide() {
@@ -585,15 +601,25 @@ fn chiral_volume(c: Vec3, a: Vec3, b: Vec3, h: Vec3) -> f64 {
     (a - c).dot((b - c).cross(h - c))
 }
 
+/// A residue's dictionary as the monomer server has it after interpretation:
+/// the libraries, or the CCD-built one registered during placement.
+fn server_comp(ml: &MonLib, auto_comps: &FxHashMap<String, Arc<Comp>>, resname: &str) -> Option<Arc<Comp>> {
+    ml.comp(resname).or_else(|| auto_comps.get(&resname.trim().to_ascii_uppercase()).cloned())
+}
+
 /// Per residue name: the number of heavy-atom bonds of each dictionary atom
 /// (what riding uses to tell a missing heavy neighbor from a complete parent).
-pub fn expected_heavy_table(ml: &MonLib, resnames: &[String]) -> FxHashMap<String, Option<FxHashMap<String, usize>>> {
+pub fn expected_heavy_table(
+    ml: &MonLib,
+    auto_comps: &FxHashMap<String, Arc<Comp>>,
+    resnames: &[String],
+) -> FxHashMap<String, Option<FxHashMap<String, usize>>> {
     let mut heavy_cache: FxHashMap<String, Option<FxHashMap<String, usize>>> = FxHashMap::default();
     for r in resnames.iter() {
         if heavy_cache.contains_key(r) {
             continue;
         }
-        let v = ml.comp(r).map(|c| {
+        let v = server_comp(ml, auto_comps, r).map(|c| {
             let mut counts: FxHashMap<String, usize> = c.atoms.iter().map(|a| (a.id.trim().to_string(), 0)).collect();
             for b in &c.bonds {
                 let (x, y) = (c.atom(&b.a1), c.atom(&b.a2));
@@ -645,7 +671,8 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         st.retain_atoms(|a| !a.is_hydrogen());
     }
     let mut no_h_placed = Vec::new();
-    add_missing_h(st, ml, p, &mut no_h_placed);
+    let mut auto_comps: FxHashMap<String, Arc<Comp>> = FxHashMap::default();
+    add_missing_h(st, ml, p, &mut no_h_placed, &mut auto_comps);
     place_n_terminal_propeller(st, ml, p);
     st.sort_atoms_in_place();
     st.reset_serial();
@@ -660,7 +687,8 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     crate::model::mem_checkpoint("placement: H added");
     let flat = FlatAtoms::from_structure(st);
     let n = flat.pos.len();
-    let mut it = interp::interpret(st, &flat, ml, &InterpParams { neutron: p.neutron, link_distance_cutoff: 3.0, compat: p.compat });
+    let ip = InterpParams { neutron: p.neutron, link_distance_cutoff: 3.0, compat: p.compat, auto_comps: auto_comps.clone() };
+    let mut it = interp::interpret(st, &flat, ml, &ip);
     log += &it.log;
     let mut w = Work { flat, removed: vec![false; n] };
 
@@ -670,7 +698,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let occ: Vec<f64> = w.flat.path.iter().map(|&pp| st.atom(pp).occ).collect();
     let rg_of: Vec<u64> = w.flat.path.iter().map(|pp| ((pp.model as u64) << 40) | ((pp.chain as u64) << 20) | pp.rg as u64).collect();
     let resnames: Vec<String> = w.flat.path.iter().map(|&pp| st.atom_group(pp).resname.trim().to_string()).collect();
-    let heavy_cache = expected_heavy_table(ml, &resnames);
+    let heavy_cache = expected_heavy_table(ml, &auto_comps, &resnames);
     let expected_heavy = |a: u32| -> Option<usize> {
         let m = heavy_cache.get(&resnames[a as usize])?.as_ref()?;
         m.get(w.flat.name[a as usize].trim()).copied()
@@ -715,7 +743,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         .copied()
         .filter(|&h| resclass::get_class(&st.atom_group(w.flat.path[h as usize]).resname) != ResClass::CommonWater)
         .collect();
-    let placed_anchorless = place_anchorless_h(&it, ml, st, &mut w, &unpara, &nbrs);
+    let placed_anchorless = place_anchorless_h(&it, ml, &auto_comps, st, &mut w, &unpara, &nbrs);
     for &h in &unpara {
         if placed_anchorless.contains(&h) {
             continue;
@@ -886,7 +914,15 @@ fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms) {
     }
 }
 
-fn place_anchorless_h(it: &Interp, ml: &MonLib, st: &Structure, w: &mut Work, iseqs: &[u32], nbrs: &[Vec<u32>]) -> Vec<u32> {
+fn place_anchorless_h(
+    it: &Interp,
+    ml: &MonLib,
+    auto_comps: &FxHashMap<String, Arc<Comp>>,
+    st: &Structure,
+    w: &mut Work,
+    iseqs: &[u32],
+    nbrs: &[Vec<u32>],
+) -> Vec<u32> {
     let heavy = |i: u32| -> Vec<u32> {
         let mut v: Vec<u32> = nbrs[i as usize].iter().copied().filter(|&m| !w.flat.is_h[m as usize]).collect();
         v.sort_unstable();
@@ -895,7 +931,7 @@ fn place_anchorless_h(it: &Interp, ml: &MonLib, st: &Structure, w: &mut Work, is
     };
     let dict_heavy_degree = |a: u32| -> Option<usize> {
         let ag = st.atom_group(w.flat.path[a as usize]);
-        let c = ml.comp(ag.resname.trim())?;
+        let c = server_comp(ml, auto_comps, ag.resname.trim())?;
         let name = w.flat.name[a as usize].trim();
         c.atom(name)?;
         let mut n = 0;
@@ -1163,15 +1199,25 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
         .map(|b| (b.i, b.j, b.ideal, b.origin))
         .collect();
     live.sort_unstable_by_key(|x| (x.0, x.1));
+    // then the bonds to symmetry copies (cctbx's asu proxies)
+    let n_simple = live.len();
+    live.extend(
+        it.sym_bonds
+            .iter()
+            .filter(|b| !w.removed[b.i as usize] && !w.removed[b.j as usize])
+            .map(|b| (b.i, b.j, b.ideal, b.origin)),
+    );
     // origin of the link an atom takes part in (0: none; the last proxy wins)
     let mut exclusion = vec![0u16; n];
     let mut link_partners: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    for &(i, j, _, o) in &live {
+    for (k, &(i, j, _, o)) in live.iter().enumerate() {
         if o != 0 {
             exclusion[i as usize] = o;
             exclusion[j as usize] = o;
-            link_partners.entry(i).or_default().push(j);
-            link_partners.entry(j).or_default().push(i);
+            if k < n_simple {
+                link_partners.entry(i).or_default().push(j);
+                link_partners.entry(j).or_default().push(i);
+            }
         }
     }
     // adjacency in proxy order, and the atoms in order of first appearance

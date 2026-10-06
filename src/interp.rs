@@ -70,6 +70,9 @@ pub struct Interp {
     const_keys: FxHashMap<[u32; 4], usize>,
     pub planes: Vec<Vec<u32>>,
     plane_keys: FxHashSet<Vec<u32>>,
+    /// Bonds to a symmetry copy (cctbx `bond_asu_proxy`): disulfides across
+    /// crystal symmetry, with `j` the atom whose copy is bonded.
+    pub sym_bonds: Vec<BondProxy>,
     pub etype: Vec<EType>,
     pub dict: Vec<AtomDictInfo>,
     /// Residue dictionaries that could not be found (residue names).
@@ -94,6 +97,7 @@ impl Interp {
             const_keys: FxHashMap::default(),
             planes: Vec::new(),
             plane_keys: FxHashSet::default(),
+            sym_bonds: Vec::new(),
             etype: vec![EType::Unknown; n],
             dict: vec![AtomDictInfo::default(); n],
             missing_residues: Vec::new(),
@@ -239,6 +243,9 @@ pub struct InterpParams {
     pub link_distance_cutoff: f64,
     /// Reproduce Reduce2's quirks (see `autolink`).
     pub compat: bool,
+    /// Dictionaries built from the CCD during H placement, by residue name
+    /// (Reduce2's `auto_<resname>` restraint objects).
+    pub auto_comps: FxHashMap<String, Arc<Comp>>,
 }
 
 /// Flat per-atom view used during interpretation.
@@ -423,6 +430,7 @@ fn rna_pucker(flat: &FlatAtoms, cur: &ResInterp, next_p: Option<u32>) -> Option<
 /// terminal and other modifications.
 fn interpret_residue(
     ml: &MonLib,
+    auto_comps: &FxHashMap<String, Arc<Comp>>,
     flat: &FlatAtoms,
     res: &ConfResidue,
     neutron_unused: bool,
@@ -450,7 +458,7 @@ fn interpret_residue(
             na_interp = true;
         }
     }
-    let comp0 = ml.comp(&work);
+    let comp0 = ml.comp(&work).or_else(|| auto_comps.get(&resname).cloned());
     let Some(comp0) = comp0 else {
         return ResInterp {
             comp: None,
@@ -776,7 +784,7 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
         for residues in model_confs {
             // interpret all residues of this chain conformer first (pucker needs next P)
             let mut interps: Vec<ResInterp> =
-                residues.iter().map(|r| interpret_residue(ml, flat, r, p.neutron, &mut log)).collect();
+                residues.iter().map(|r| interpret_residue(ml, &p.auto_comps, flat, r, p.neutron, &mut log)).collect();
             for k in 0..interps.len() {
                 if interps[k].is_rna_dna && interps[k].comp.is_some() && interps[k].id_to_atom.contains_key("O2'") {
                     let next_p = interps.get(k + 1).and_then(|nx| nx.id_to_atom.get("P").copied());
@@ -826,6 +834,8 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
                         Some(id) => {
                             let ca = comp.atom(id).unwrap();
                             it.etype[a as usize] = match &ca.type_energy {
+                                // CCD-built dictionaries leave the type empty
+                                _ if comp.from_ccd => EType::Unknown,
                                 Some(t) => EType::Typed(t.clone()),
                                 None => EType::NoneType,
                             };
@@ -850,7 +860,7 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
         }
     }
     it.log = log;
-    add_disulfides(&mut it, flat, &cys_sg);
+    add_disulfides(&mut it, st, flat, &cys_sg);
     let mut link_log = String::new();
     crate::autolink::auto_link(
         &mut it,
@@ -861,11 +871,154 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
         &mut link_log,
     );
     it.log.push_str(&link_log);
+    add_iron_sulfur_coordination(&mut it, st, flat, p.compat);
     add_zinc_coordination(&mut it, st, flat);
+    adjust_for_ph_variants(&mut it, st, flat, &flat_index, ml, p);
     it
 }
 
-fn add_disulfides(it: &mut Interp, flat: &FlatAtoms, sgs: &[u32]) {
+/// cctbx `pH_dependent_restraints.adjust_geometry_proxies_registeries`, which
+/// pdb_interpretation runs when hydrogens have no energy type (residues with
+/// CCD-built dictionaries): bonds and angles of such a residue take the values
+/// of the GeoStd neutron or low-pH variant of its dictionary, where there is
+/// one, and missing ones are added. Reduce2 adjusts only the first residue of
+/// each name; fixed mode adjusts every residue, and in neutron mode uses the
+/// neutron distance for the bonds it changes as well as for those it adds.
+fn adjust_for_ph_variants(
+    it: &mut Interp,
+    st: &Structure,
+    flat: &FlatAtoms,
+    flat_index: &FxHashMap<AtomPath, u32>,
+    ml: &MonLib,
+    p: &InterpParams,
+) {
+    let unknown: Vec<u32> = (0..flat.pos.len() as u32).filter(|&k| it.etype[k as usize] == EType::Unknown).collect();
+    if !unknown.iter().any(|&k| flat.is_h[k as usize]) {
+        return;
+    }
+    let mut checked: Vec<String> = Vec::new();
+    let mut done: FxHashSet<(u32, u32, u32)> = FxHashSet::default();
+    // atoms of added bonds -> their dictionary energy type (None: not in the dictionary)
+    let mut added_energy: Vec<(u32, Option<Option<String>>)> = Vec::new();
+    for &k in &unknown {
+        let pth = flat.path[k as usize];
+        let resname = st.atom_group(pth).resname.clone();
+        if p.compat {
+            if checked.contains(&resname) {
+                continue;
+            }
+            checked.push(resname.clone());
+        } else if !done.insert((pth.model, pth.chain, pth.rg)) {
+            continue;
+        }
+        let Some(v) = ml.ph_variant(&resname) else { continue };
+        // the residue group's atoms by atom group: (stripped name, flat index)
+        let rg = st.residue_group(pth);
+        let groups: Vec<Vec<(String, u32)>> = rg
+            .atom_groups
+            .iter()
+            .enumerate()
+            .map(|(g, ag)| {
+                ag.atoms
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, a)| {
+                        let path = AtomPath { model: pth.model, chain: pth.chain, rg: pth.rg, ag: g as u32, atom: i as u32 };
+                        flat_index.get(&path).map(|&f| (a.name.trim().to_string(), f))
+                    })
+                    .collect()
+            })
+            .collect();
+        // `_get_atom_neutron`: the atom by name, or its D form for bonds under 1 A
+        let atom = |g: usize, name: &str, bondlength: Option<f64>| -> Option<(u32, bool)> {
+            let find = |n: &str| groups[g].iter().find(|(x, _)| x == n).map(|x| x.1);
+            if let Some(a) = find(name) {
+                return Some((a, false));
+            }
+            if bondlength.is_some_and(|b| b < 1.0) {
+                return find(&name.replace('H', "D")).map(|a| (a, true));
+            }
+            None
+        };
+        let ng = groups.len();
+        for b in &v.bonds {
+            let Some(dist) = b.value_dist else { continue };
+            for g1 in 0..ng {
+                for g2 in 0..=g1 {
+                    let Some((a1, n1)) = atom(g1, &b.a1, b.value_dist) else { continue };
+                    let Some((a2, n2)) = atom(g2, &b.a2, b.value_dist) else { continue };
+                    let neutron_value = b.value_dist_neutron.unwrap_or(dist);
+                    if it.has_bond(a1, a2) {
+                        let ideal = if !p.compat && p.neutron { neutron_value } else { dist };
+                        it.upsert_bond(a1, a2, ideal, ORIGIN_COVALENT);
+                    } else if a1 != a2 {
+                        it.add_bond(a1, a2, if n1 || n2 { neutron_value } else { dist }, ORIGIN_COVALENT);
+                        for (a, name) in [(a1, &b.a1), (a2, &b.a2)] {
+                            added_energy.retain(|x| x.0 != a);
+                            added_energy.push((a, v.atom(name).map(|c| c.type_energy.clone())));
+                        }
+                    }
+                }
+            }
+        }
+        // angles: atoms -> (value, esd), both directions, in first-insertion order
+        let mut lookup: Vec<([u32; 3], (f64, f64))> = Vec::new();
+        let mut index: FxHashMap<[u32; 3], usize> = FxHashMap::default();
+        for a in &v.angles {
+            let (Some(value), Some(esd)) = (a.value, a.esd) else { continue };
+            for g1 in 0..ng {
+                for g2 in 0..=g1 {
+                    let Some((i1, _)) = atom(g1, &a.a1, Some(0.5)) else { continue };
+                    let Some((i3, _)) = atom(g2, &a.a3, Some(0.5)) else { continue };
+                    let Some((i2, _)) = [g1, g2].iter().find_map(|&g| atom(g, &a.a2, None)) else { continue };
+                    for key in [[i1, i2, i3], [i3, i2, i1]] {
+                        match index.get(&key) {
+                            Some(&x) => lookup[x].1 = (value, esd),
+                            None => {
+                                index.insert(key, lookup.len());
+                                lookup.push((key, (value, esd)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut used: FxHashSet<[u32; 3]> = FxHashSet::default();
+        for proxy in it.angles.iter_mut() {
+            if used.contains(&proxy.i) {
+                continue;
+            }
+            if let Some(&x) = index.get(&proxy.i) {
+                proxy.ideal = lookup[x].1 .0;
+                proxy.esd = lookup[x].1 .1;
+                used.insert(proxy.i);
+                used.insert([proxy.i[2], proxy.i[1], proxy.i[0]]);
+            }
+        }
+        let mut reversed_done: FxHashSet<[u32; 3]> = FxHashSet::default();
+        for (key, (value, esd)) in lookup {
+            if used.contains(&key) || reversed_done.contains(&key) {
+                continue;
+            }
+            it.add_angle(key[0], key[1], key[2], value, esd);
+            reversed_done.insert([key[2], key[1], key[0]]);
+        }
+    }
+    let unknown_set: FxHashSet<u32> = unknown.into_iter().collect();
+    for (a, te) in added_energy {
+        // an atom missing from the variant dictionary stops cctbx (AttributeError)
+        let Some(te) = te else { continue };
+        if unknown_set.contains(&a) {
+            it.etype[a as usize] = match te {
+                Some(t) => EType::Typed(t),
+                None => EType::NoneType,
+            };
+        }
+    }
+}
+
+
+fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32]) {
     // exclude SG near atoms that are not H D T S O P N C SE (typically metals)
     let ok_el = ["H", "D", "T", "S", "O", "P", "N", "C", "SE"];
     let n = flat.pos.len();
@@ -917,6 +1070,112 @@ fn add_disulfides(it: &mut Interp, flat: &FlatAtoms, sgs: &[u32]) {
                 it.add_bond(a, b, 2.031, ORIGIN_SS);
             }
         }
+    }    // disulfides to symmetry copies (`create_disulfides` over the asu mappings)
+    let Some((uc, ops)) = crate::cell::crystal_operators(st) else { return };
+    let frac: Vec<Vec3> = sgs.iter().map(|&a| uc.fractionalize(flat.pos[a as usize])).collect();
+    for x in 0..sgs.len() {
+        let a = sgs[x];
+        if excluded.contains(&a) {
+            continue;
+        }
+        for y in x..sgs.len() {
+            let b = sgs[y];
+            if excluded.contains(&b) || flat.path[a as usize].model != flat.path[b as usize].model {
+                continue;
+            }
+            let (aa, ab) = (&flat.altloc[a as usize], &flat.altloc[b as usize]);
+            if !aa.is_empty() && !ab.is_empty() && aa != ab {
+                continue;
+            }
+            for op in &ops {
+                let img = op.apply(frac[y]);
+                let d = frac[x] - img;
+                let base = v3(d.x.round(), d.y.round(), d.z.round());
+                let mut hit = false;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let shift = base + v3(dx as f64, dy as f64, dz as f64);
+                            if op.is_identity() && shift.x == 0.0 && shift.y == 0.0 && shift.z == 0.0 {
+                                continue; // the same copy: a simple disulfide
+                            }
+                            if uc.orthogonalize(img + shift).dist(flat.pos[a as usize]) <= 3.0 {
+                                hit = true;
+                            }
+                        }
+                    }
+                }
+                if hit {
+                    it.sym_bonds.push(BondProxy { i: a, j: b, ideal: 2.031, origin: ORIGIN_SS });
+                }
+            }
+        }
+    }
+}
+
+
+/// Metal Coordination Library, iron-sulfur cluster part
+/// (`mcl_sf4_coordination.get_sulfur_iron_cluster_coordination`): over the
+/// non-bonded pairs within 3.5 A between an SF4/F3S/FES residue and another
+/// residue, closest first, each other residue's first S or N bonds to the
+/// cluster Fe. cctbx keys the residues by atom-group id, without the model;
+/// fixed mode tells models apart.
+fn add_iron_sulfur_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms, compat: bool) {
+    let cluster = |a: usize| matches!(st.atom_group(flat.path[a]).resname.trim(), "SF4" | "F3S" | "FES");
+    let n = flat.pos.len();
+    let in_cluster: Vec<usize> = (0..n).filter(|&a| cluster(a)).collect();
+    if in_cluster.is_empty() {
+        return;
+    }
+    let mut nbrs: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for b in &it.bonds {
+        nbrs[b.i as usize].push(b.j);
+        nbrs[b.j as usize].push(b.i);
+    }
+    // 1-2 and 1-3 pairs are not non-bonded pairs
+    let excluded = |a: usize, b: usize| -> bool {
+        nbrs[a].contains(&(b as u32)) || nbrs[a].iter().any(|&m| nbrs[m as usize].contains(&(b as u32)))
+    };
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for &c in &in_cluster {
+        for o in 0..n {
+            if cluster(o) || flat.path[o].model != flat.path[c].model {
+                continue;
+            }
+            let (ac, ao) = (&flat.altloc[c], &flat.altloc[o]);
+            if !ac.is_empty() && !ao.is_empty() && ac != ao {
+                continue;
+            }
+            let d = flat.pos[c].dist(flat.pos[o]);
+            if d < 3.5 && !excluded(c, o) {
+                pairs.push((d, c.min(o), c.max(o)));
+            }
+        }
+    }
+    pairs.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap().then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    let mut done: Vec<(u32, String, String, String, String, String)> = Vec::new();
+    for (_, i, j) in pairs {
+        let (fe, aa) = if cluster(i) { (i, j) } else { (j, i) };
+        if !matches!(flat.element[aa].as_str(), "S" | "N") || flat.element[fe] != "FE" {
+            continue;
+        }
+        let pth = flat.path[aa];
+        let ag = st.atom_group(pth);
+        let rg = st.residue_group(pth);
+        let key = (
+            if compat { 0 } else { pth.model },
+            st.chain(pth).id.clone(),
+            rg.resseq.clone(),
+            rg.icode.clone(),
+            ag.altloc.clone(),
+            ag.resname.clone(),
+        );
+        if done.contains(&key) {
+            continue;
+        }
+        done.push(key);
+        // the S-Fe-S angles cctbx adds as well do not involve hydrogens
+        it.add_bond(fe as u32, aa as u32, 2.268, ORIGIN_METAL);
     }
 }
 

@@ -292,6 +292,7 @@ pub fn read_pdb(text: &str) -> Structure {
                     hetero: rec.starts_with("HETATM"),
                     uij: None,
                     i_seq: 0,
+                    src: raw.len() as u32,
                 };
                 let idx = raw.len();
                 // chain boundary detection
@@ -318,6 +319,7 @@ pub fn read_pdb(text: &str) -> Structure {
                 }
                 prev_chain_segid = Some(key);
                 in_model = true;
+                st.pdb_records.serials.push(col(line, 7, 11).to_string());
                 raw.push(RawAtom { atom, altloc, resname, chain, resseq, icode });
             }
             "ANISOU" => {
@@ -375,6 +377,7 @@ pub fn read_pdb(text: &str) -> Structure {
                 };
                 let d = col(line, 74, 78).trim().parse::<f64>().ok();
                 st.links.push(LinkRecord { atom1: l1, atom2: l2, distance: d, kind: "LINK".into() });
+                st.pdb_records.links.push(line.to_string());
             }
             "SSBOND" => {
                 let l1 = AtomLabel {
@@ -395,9 +398,13 @@ pub fn read_pdb(text: &str) -> Structure {
                 };
                 let d = col(line, 74, 78).trim().parse::<f64>().ok();
                 st.links.push(LinkRecord { atom1: l1, atom2: l2, distance: d, kind: "SSBOND".into() });
+                st.pdb_records.links.push(line.to_string());
             }
             "REMARK" | "END   " | "END" | "MASTER" | "ATOM 1" => {}
             _ => {
+                if rec.starts_with("CONECT") {
+                    st.pdb_records.conect.push(line.to_string());
+                }
                 if !line.trim().is_empty() {
                     // any other record type ends the current chain (iotbx transition)
                     if prev_chain_segid.is_some() && !in_model_atom_record(rec) {
@@ -590,9 +597,88 @@ pub fn write_pdb(st: &Structure, write_cryst: bool) -> String {
     out
 }
 
+/// `write_pdb` plus the input's SSBOND and LINK records (before CRYST1) and its
+/// CONECT records, renumbered to the output serials of the first model;
+/// partners that are no longer there are left out.
+pub fn write_pdb_preserving(st: &Structure) -> String {
+    let body = write_pdb(st, true);
+    let recs = &st.pdb_records;
+    if recs.links.is_empty() && recs.conect.is_empty() {
+        return body;
+    }
+    let mut out = String::with_capacity(body.len() + 81 * (recs.links.len() + recs.conect.len()));
+    for l in &recs.links {
+        out.push_str(l.trim_end());
+        out.push('\n');
+    }
+    let mut conect = String::new();
+    if !recs.conect.is_empty() {
+        let mut src_of: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for (k, s) in recs.serials.iter().enumerate() {
+            src_of.entry(s.trim()).or_insert(k as u32);
+        }
+        let mut serial_of: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        if let Some(m) = st.models.first() {
+            let mut serial = 1i64;
+            for a in m.chains.iter().flat_map(|c| &c.residue_groups).flat_map(|r| &r.atom_groups).flat_map(|g| &g.atoms) {
+                if a.src != Atom::NEW {
+                    serial_of.insert(a.src, crate::model::hy36_encode(5, serial).unwrap_or_else(|| "*****".into()));
+                }
+                serial += 1;
+            }
+        }
+        let new_serial = |field: &str| src_of.get(field.trim()).and_then(|k| serial_of.get(k)).cloned();
+        for line in &recs.conect {
+            let fields: Vec<&str> = (0..5).filter_map(|k| line.get(6 + 5 * k..(11 + 5 * k).min(line.len()))).collect();
+            let Some(base) = fields.first().and_then(|f| new_serial(f)) else { continue };
+            let partners: Vec<String> = fields[1..].iter().filter(|f| !f.trim().is_empty()).filter_map(|f| new_serial(f)).collect();
+            if partners.is_empty() {
+                continue;
+            }
+            let _ = write!(conect, "CONECT{:>5}", base);
+            for p in partners {
+                let _ = write!(conect, "{:>5}", p);
+            }
+            conect.push('\n');
+        }
+    }
+    match body.strip_suffix("END\n") {
+        Some(head) => {
+            out.push_str(head);
+            out.push_str(&conect);
+            out.push_str("END\n");
+        }
+        None => {
+            out.push_str(&body);
+            out.push_str(&conect);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conect_records_follow_the_new_serials() {
+        let txt = "SSBOND   1 CYS A    1    CYS A    1                          1555   2555  2.03  \n\
+ATOM     10  N   CYS A   1       1.000   1.000   1.000  1.00 10.00           N  \n\
+ATOM     11  SG  CYS A   1       2.000   1.000   1.000  1.00 10.00           S  \n\
+ATOM     12  H   CYS A   1       0.500   1.000   1.000  1.00 10.00           H  \n\
+HETATM   20 ZN    ZN A 101       4.000   1.000   1.000  1.00 10.00          ZN  \n\
+CONECT   11   20\n\
+CONECT   12   10\n\
+END\n";
+        let mut st = read_pdb(txt);
+        // the H goes, which shifts nothing before it but drops its CONECT
+        st.retain_atoms(|a| a.name.trim() != "H");
+        let out = write_pdb_preserving(&st);
+        assert!(out.starts_with("SSBOND   1 CYS A    1"));
+        let conect: Vec<&str> = out.lines().filter(|l| l.starts_with("CONECT")).collect();
+        assert_eq!(conect, ["CONECT    2    3"]);
+        assert!(out.ends_with("CONECT    2    3\nEND\n"));
+    }
 
     #[test]
     fn roundtrip_simple() {

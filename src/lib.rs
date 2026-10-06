@@ -10,6 +10,7 @@
 pub mod atominfo;
 pub mod atomtypes;
 pub mod autolink;
+pub mod ccdrestraints;
 pub mod cell;
 pub mod cif;
 pub mod cifsource;
@@ -17,6 +18,7 @@ pub mod geom;
 pub mod hplace;
 pub mod interp;
 mod linkdata;
+mod rdkit_valence;
 pub mod monlib;
 pub mod names;
 pub mod riding;

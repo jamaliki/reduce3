@@ -324,3 +324,102 @@ pub fn roundtrip_sites(pos: &mut [Vec3], uc: &UnitCell, times: usize) {
         *p = x;
     }
 }
+
+/// A crystallographic symmetry operator in fractional coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SymOp {
+    pub r: [[f64; 3]; 3],
+    pub t: [f64; 3],
+}
+
+impl SymOp {
+    /// Parse an operator such as `-x+1/2,y,-z` or `x-y,x,z+1/6`.
+    pub fn parse(s: &str) -> Option<SymOp> {
+        let mut op = SymOp { r: [[0.0; 3]; 3], t: [0.0; 3] };
+        let rows: Vec<&str> = s.split(',').collect();
+        if rows.len() != 3 {
+            return None;
+        }
+        for (k, row) in rows.iter().enumerate() {
+            let b = row.trim().as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                let sign = match b[i] {
+                    b'-' => {
+                        i += 1;
+                        -1.0
+                    }
+                    b'+' => {
+                        i += 1;
+                        1.0
+                    }
+                    _ => 1.0,
+                };
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'/' || b[i] == b'.') {
+                    i += 1;
+                }
+                let number = &row.trim()[start..i];
+                if i < b.len() && matches!(b[i], b'x' | b'y' | b'z' | b'X' | b'Y' | b'Z') {
+                    let c = if number.is_empty() { 1.0 } else { number.parse::<f64>().ok()? };
+                    let axis = (b[i].to_ascii_lowercase() - b'x') as usize;
+                    op.r[k][axis] += sign * c;
+                    i += 1;
+                } else if !number.is_empty() {
+                    let v = match number.split_once('/') {
+                        Some((p, q)) => p.parse::<f64>().ok()? / q.parse::<f64>().ok()?,
+                        None => number.parse::<f64>().ok()?,
+                    };
+                    op.t[k] += sign * v;
+                } else {
+                    return None;
+                }
+            }
+        }
+        Some(op)
+    }
+
+    /// The image of a fractional site.
+    pub fn apply(&self, f: Vec3) -> Vec3 {
+        let a = [f.x, f.y, f.z];
+        let row = |k: usize| self.r[k][0] * a[0] + self.r[k][1] * a[1] + self.r[k][2] * a[2] + self.t[k];
+        v3(row(0), row(1), row(2))
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.r == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] && self.t == [0.0; 3]
+    }
+}
+
+/// The model's crystal symmetry: the symmetry-averaged cell and the space
+/// group operators. None without a usable CRYST1 (cctbx then boxes the model
+/// in P1, which has no contacts between copies).
+pub fn crystal_operators(st: &Structure) -> Option<(UnitCell, Vec<SymOp>)> {
+    let cs = st.crystal.as_ref()?;
+    let p = cs.cell;
+    let dummy_len = p[..3].iter().all(|&v| v == 0.0 || v == 1.0);
+    let dummy_ang = p[3..].iter().all(|&v| v == 0.0 || v == 90.0);
+    let sg = cs.space_group.replace(' ', "");
+    if dummy_len && dummy_ang && (sg.is_empty() || sg == "P1") {
+        return None;
+    }
+    let info = space_group_info(&cs.space_group, &p)?;
+    let uc = UnitCell::new(p).and_then(|u| u.averaged(cryst1_rotations(&cs.space_group, &p)?))?;
+    let ops: Option<Vec<SymOp>> = info.ops.iter().map(|s| SymOp::parse(s)).collect();
+    Some((uc, ops?))
+}
+
+#[cfg(test)]
+mod symop_tests {
+    use super::*;
+
+    #[test]
+    fn parses_operators() {
+        let op = SymOp::parse("-x+y,-x,z+2/3").unwrap();
+        assert_eq!(op.r, [[-1.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]);
+        assert_eq!(op.t, [0.0, 0.0, 2.0 / 3.0]);
+        assert!(SymOp::parse("x,y,z").unwrap().is_identity());
+        let f = SymOp::parse("-x+1/2,y,-z").unwrap().apply(v3(0.1, 0.2, 0.3));
+        assert!((f.x - 0.4).abs() < 1e-12 && (f.y - 0.2).abs() < 1e-12 && (f.z + 0.3).abs() < 1e-12);
+    }
+}

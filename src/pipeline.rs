@@ -218,7 +218,12 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
         }
         None => {
             // _ReinterpretModel: process the model with its hydrogens
-            let it = interp::interpret(st, &flat, ml, &InterpParams { neutron: p.opt.use_neutron_distances, link_distance_cutoff: 3.0, compat: p.compat });
+            let it = interp::interpret(st, &flat, ml, &InterpParams {
+                    neutron: p.opt.use_neutron_distances,
+                    link_distance_cutoff: 3.0,
+                    compat: p.compat,
+                    auto_comps: Default::default(),
+                });
             (it, None)
         }
     };
@@ -239,7 +244,7 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
             let rg_of: Vec<u64> =
                 flat.path.iter().map(|pp| ((pp.model as u64) << 40) | ((pp.chain as u64) << 20) | pp.rg as u64).collect();
             let resnames: Vec<String> = flat.path.iter().map(|&pp| st.atom_group(pp).resname.trim().to_string()).collect();
-            let table = hplace::expected_heavy_table(ml, &resnames);
+            let table = hplace::expected_heavy_table(ml, &Default::default(), &resnames);
             let expected_heavy = |a: u32| -> Option<usize> {
                 table.get(&resnames[a as usize])?.as_ref()?.get(flat.name[a as usize].trim()).copied()
             };

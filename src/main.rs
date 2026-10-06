@@ -247,7 +247,26 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         }
         desc.push('\n');
         desc.push_str(&out.description);
-        let model_text = if write_pdb_format { pdbio::write_pdb(&out.structure, true) } else { mmcif::write_mmcif(&out.structure) };
+        let model_text = if write_pdb_format && cli.params.compat {
+            pdbio::write_pdb(&out.structure, true)
+        } else if write_pdb_format {
+            // keep SSBOND, LINK and CONECT (fixed mode)
+            pdbio::write_pdb_preserving(&out.structure)
+        } else if is_cif && !cli.params.compat {
+            // keep every category of the input block (fixed mode)
+            let text = std::fs::read_to_string(&cli.input).map_err(|e| format!("cannot read {}: {}", cli.input.display(), e))?;
+            let doc = reduce3::cif::parse(&text);
+            let block = doc
+                .blocks
+                .iter()
+                .find(|b| b.category("_atom_site").is_some())
+                .ok_or_else(|| "no _atom_site loop found in the mmCIF file".to_string())?;
+            let mut w = reduce3::cifsource::CifText::with_capacity(text.len() + out.structure.atoms_size() * 100);
+            mmcif::write_cif_preserving(&out.structure, block, block.name, &mut w)?;
+            w.out
+        } else {
+            mmcif::write_mmcif(&out.structure)
+        };
         std::fs::write(&output, model_text).map_err(|e| format!("cannot write {}: {}", output.display(), e))?;
         std::fs::write(&description, desc).map_err(|e| format!("cannot write {}: {}", description.display(), e))?;
         say(&format!("Wrote {} and {} ({:.3} s)", output.display(), description.display(), t0.elapsed().as_secs_f64()));
@@ -272,6 +291,11 @@ fn main() -> ExitCode {
     if args.len() > 4 && args[1] == "hcheck" {
         let fixed = args.iter().any(|a| a == "--fixed");
         refcheck::hcheck(&args[2], &args[3], &args[4], !fixed);
+        return ExitCode::SUCCESS;
+    }
+    #[cfg(feature = "refcheck")]
+    if args.len() > 3 && args[1] == "ccdcheck" {
+        refcheck::ccdcheck(&args[2], &args[3]);
         return ExitCode::SUCCESS;
     }
     #[cfg(feature = "refcheck")]

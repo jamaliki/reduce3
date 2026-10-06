@@ -23,6 +23,9 @@ pub struct Atom {
     pub uij: Option<[f64; 6]>,
     /// Index in the flattened atom array (set by `Structure::reset_i_seq`).
     pub i_seq: usize,
+    /// Where the atom came from: its row in the source `_atom_site` loop, or
+    /// its ATOM/HETATM record number in a PDB file; [`Atom::NEW`] if added.
+    pub src: u32,
 }
 
 impl Atom {
@@ -39,8 +42,12 @@ impl Atom {
             hetero: false,
             uij: None,
             i_seq: 0,
+            src: Atom::NEW,
         }
     }
+
+    /// `src` of an atom that is not from the input.
+    pub const NEW: u32 = u32::MAX;
     #[inline]
     pub fn name_trim(&self) -> &str {
         self.name.trim()
@@ -242,6 +249,18 @@ pub struct AtomLabel {
     pub icode: String,
 }
 
+/// Records of an input PDB file that refer to atoms, which fixed mode writes
+/// back (Reduce2 drops them).
+#[derive(Clone, Debug, Default)]
+pub struct PdbRecords {
+    /// SSBOND and LINK lines, verbatim, in input order.
+    pub links: Vec<String>,
+    /// CONECT lines, verbatim.
+    pub conect: Vec<String>,
+    /// The input serial of each ATOM/HETATM record (indexed by `Atom::src`).
+    pub serials: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Structure {
     pub models: Vec<Model>,
@@ -249,6 +268,7 @@ pub struct Structure {
     /// True when the input carried a crystal symmetry record (even a dummy one).
     pub had_cell_record: bool,
     pub links: Vec<LinkRecord>,
+    pub pdb_records: PdbRecords,
 }
 
 /// Index path of an atom inside a structure.

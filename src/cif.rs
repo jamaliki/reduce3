@@ -15,6 +15,10 @@ pub struct Category<'a> {
     pub tags: Vec<String>,
     /// Row-major values; `values.len() == rows * tags.len()`.
     pub values: Vec<&'a str>,
+    /// The full tags as the source spells them (`_atom_site.Cartn_x`).
+    pub spelling: Vec<&'a str>,
+    /// Written as a `loop_` (otherwise as scalar items).
+    pub is_loop: bool,
 }
 
 impl<'a> Category<'a> {
@@ -215,7 +219,7 @@ impl<'a> BlockBuilder<'a> {
     fn new(name: &'a str) -> Self {
         BlockBuilder { name, categories: Vec::new(), index: FxHashMap::default() }
     }
-    fn add_item(&mut self, tag: &str, value: &'a str) {
+    fn add_item(&mut self, tag: &'a str, value: &'a str) {
         let (cat, item) = split_tag(tag);
         match self.index.get(&cat) {
             Some(&i) => {
@@ -226,20 +230,21 @@ impl<'a> BlockBuilder<'a> {
                     } else {
                         c.tags.push(item);
                         c.values.push(value);
+                        c.spelling.push(tag);
                     }
                 }
             }
             None => {
                 self.index.insert(cat.clone(), self.categories.len());
-                self.categories.push(Category { name: cat, tags: vec![item], values: vec![value] });
+                self.categories.push(Category { name: cat, tags: vec![item], values: vec![value], spelling: vec![tag], is_loop: false });
             }
         }
     }
-    fn add_loop(&mut self, tags: Vec<String>, values: Vec<&'a str>) {
+    fn add_loop(&mut self, tags: Vec<&'a str>, values: Vec<&'a str>) {
         if tags.is_empty() {
             return;
         }
-        let (cat, _) = split_tag(&tags[0]);
+        let (cat, _) = split_tag(tags[0]);
         let items: Vec<String> = tags.iter().map(|t| split_tag(t).1).collect();
         let ncol = items.len();
         let mut values = values;
@@ -253,7 +258,7 @@ impl<'a> BlockBuilder<'a> {
             }
             _ => {
                 self.index.insert(cat.clone(), self.categories.len());
-                self.categories.push(Category { name: cat, tags: items, values });
+                self.categories.push(Category { name: cat, tags: items, values, spelling: tags, is_loop: true });
             }
         }
     }
@@ -298,7 +303,7 @@ pub fn parse(text: &str) -> Document<'_> {
                 let mut values = Vec::new();
                 loop {
                     match lx.next() {
-                        Some(Tok::Tag(t)) if values.is_empty() => tags.push(t.to_string()),
+                        Some(Tok::Tag(t)) if values.is_empty() => tags.push(t),
                         Some(Tok::Value(v)) | Some(Tok::Quoted(v)) => values.push(v),
                         other => {
                             pending = other;

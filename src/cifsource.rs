@@ -5,7 +5,9 @@
 //! [`CifSink`] is the write side: Reduce3 streams its output model as items and
 //! loops, which a text writer formats and an in-memory document builder can
 //! store directly. Reduce3's own mmCIF reader and writer use the same two traits,
-//! so every path builds and emits exactly the same data.
+//! so every path builds and emits exactly the same data. A source that lists its
+//! categories can also be written back whole, with only the coordinates replaced
+//! ([`crate::mmcif::write_cif_preserving`]).
 
 use crate::cif;
 use std::borrow::Cow;
@@ -28,6 +30,21 @@ pub trait CifTable {
     fn number(&self, row: usize, column: usize) -> Option<f64> {
         cif::parse_f64(&self.cell(row, column))
     }
+    /// The full tags (`_category.item`) in source order, as the source spells
+    /// them.
+    fn tags(&self) -> Vec<Cow<'_, str>>;
+    /// Whether the category is a `loop_` rather than scalar items.
+    fn is_loop(&self) -> bool;
+    /// The missing-value state of a value, or `None` when it is present. The
+    /// default reads `?` and `.` from [`CifTable::cell`]; sources that keep a
+    /// quoted `'?'` apart from an unknown value should override it.
+    fn missing(&self, row: usize, column: usize) -> Option<CifCell<'static>> {
+        match &*self.cell(row, column) {
+            "?" => Some(CifCell::Unknown),
+            "." => Some(CifCell::NotApplicable),
+            _ => None,
+        }
+    }
 }
 
 /// One parsed CIF data block.
@@ -39,6 +56,8 @@ pub trait CifSource {
     /// The category `category`, given without the leading underscore (for
     /// example `atom_site`), or `None` when the block has no such category.
     fn table(&self, category: &str) -> Option<Self::Table<'_>>;
+    /// The block's categories in source order, without the leading underscore.
+    fn categories(&self) -> Vec<String>;
 }
 
 /// A value emitted by Reduce3.
@@ -66,6 +85,12 @@ pub trait CifSink {
     fn row(&mut self, values: &[CifCell<'_>]);
     /// The end of the current loop.
     fn end_loop(&mut self);
+    /// Copy the source category `category` unchanged by the sink's own means
+    /// (for example by sharing the parsed entries); `false` asks the writer to
+    /// send its items or rows instead.
+    fn copy_category(&mut self, _category: &str) -> bool {
+        false
+    }
 }
 
 /// True when the text writer puts `value` in quotes: it is empty, starts with
@@ -91,10 +116,20 @@ impl CifText {
         CifText { out: String::with_capacity(capacity) }
     }
 
-    fn value(&mut self, v: CifCell<'_>) {
+    /// Write a value; true when it was a text field, which ends a line.
+    fn value(&mut self, v: CifCell<'_>) -> bool {
         match v {
             CifCell::Unknown => self.out.push('?'),
             CifCell::NotApplicable => self.out.push('.'),
+            CifCell::Text(s) if s.contains(['\n', '\r']) || (s.contains('\'') && s.contains('"') && needs_quotes(s)) => {
+                if !self.out.ends_with('\n') {
+                    self.out.push('\n');
+                }
+                self.out.push(';');
+                self.out.push_str(s);
+                self.out.push_str("\n;\n");
+                return true;
+            }
             CifCell::Text(s) if !needs_quotes(s) => self.out.push_str(s),
             CifCell::Text(s) => {
                 let q = if s.contains('\'') { '"' } else { '\'' };
@@ -103,6 +138,7 @@ impl CifText {
                 self.out.push(q);
             }
         }
+        false
     }
 }
 
@@ -117,8 +153,12 @@ impl CifSink for CifText {
         for _ in tag.len()..34 {
             self.out.push(' ');
         }
-        self.value(value);
-        self.out.push('\n');
+        if tag.len() >= 34 {
+            self.out.push(' ');
+        }
+        if !self.value(value) {
+            self.out.push('\n');
+        }
     }
     fn begin_loop(&mut self, tags: &[&str], _rows: usize) {
         self.out.push_str("loop_\n");
@@ -130,11 +170,14 @@ impl CifSink for CifText {
     }
     fn row(&mut self, values: &[CifCell<'_>]) {
         self.out.push_str("  ");
+        let mut line_ended = false;
         for &v in values {
-            self.out.push(' ');
-            self.value(v);
+            self.out.push_str(if line_ended { "   " } else { " " });
+            line_ended = self.value(v);
         }
-        self.out.push('\n');
+        if !line_ended {
+            self.out.push('\n');
+        }
     }
     fn end_loop(&mut self) {
         self.out.push('\n');
@@ -151,6 +194,12 @@ impl<'b> CifTable for &cif::Category<'b> {
     fn cell(&self, row: usize, column: usize) -> Cow<'_, str> {
         Cow::Borrowed(self.get(row, column))
     }
+    fn tags(&self) -> Vec<Cow<'_, str>> {
+        self.spelling.iter().map(|t| Cow::Borrowed(*t)).collect()
+    }
+    fn is_loop(&self) -> bool {
+        self.is_loop
+    }
 }
 
 impl<'b> CifSource for cif::Block<'b> {
@@ -160,5 +209,8 @@ impl<'b> CifSource for cif::Block<'b> {
         Self: 'a;
     fn table(&self, category: &str) -> Option<&cif::Category<'b>> {
         self.category(&format!("_{}", category))
+    }
+    fn categories(&self) -> Vec<String> {
+        self.categories.iter().map(|c| c.name.trim_start_matches('_').to_string()).collect()
     }
 }
