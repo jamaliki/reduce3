@@ -142,7 +142,7 @@ fn add_missing_h(
                     // `mon_lib_query`: the libraries, else restraints built from the CCD
                     let comp = match residue_dictionary(ml, &ag.resname, &names) {
                         Some(c) => c,
-                        None => match ml.ccd_comp(&ag.resname) {
+                        None => match ml.ccd_comp(&ag.resname, p.compat) {
                             Some(c) => {
                                 auto_comps.entry(ag.resname.trim().to_ascii_uppercase()).or_insert_with(|| c.clone());
                                 c

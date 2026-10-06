@@ -17,6 +17,7 @@ pub mod cifsource;
 pub mod geom;
 pub mod hplace;
 pub mod interp;
+mod h_distances;
 mod linkdata;
 mod rdkit_valence;
 pub mod monlib;

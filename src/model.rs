@@ -574,6 +574,64 @@ pub fn hy36_decode(s: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    use crate::geom::v3;
+
+    fn atom(name: &str, element: &str) -> Atom {
+        Atom::new(name, element, v3(0.0, 0.0, 0.0))
+    }
+
+    fn residue(resseq: &str, groups: Vec<(&str, &str, Vec<Atom>)>) -> ResidueGroup {
+        ResidueGroup {
+            resseq: resseq.to_string(),
+            icode: " ".into(),
+            link_to_previous: true,
+            atom_groups: groups
+                .into_iter()
+                .map(|(altloc, resname, atoms)| AtomGroup { altloc: altloc.into(), resname: resname.into(), atoms })
+                .collect(),
+        }
+    }
+
+    fn layout(st: &Structure) -> Vec<String> {
+        let mut out = Vec::new();
+        for m in &st.models {
+            for c in &m.chains {
+                for rg in &c.residue_groups {
+                    for ag in &rg.atom_groups {
+                        for a in &ag.atoms {
+                            out.push(format!("{}/{}/{}{}/{}", c.id, rg.resseq.trim(), ag.altloc, ag.resname.trim(), a.name.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn held_atoms_go_back_where_they_were() {
+        let chain_a = Chain {
+            id: "A".into(),
+            residue_groups: vec![
+                residue("   1", vec![("", "ALA", vec![atom(" N  ", "N"), atom(" CA ", "C")])]),
+                residue("   2", vec![("", "UNX", vec![atom(" UNK", "X")])]),
+                residue("   3", vec![("", "GLY", vec![atom(" N  ", "N"), atom(" X1 ", "X")]), ("A", "GLY", vec![atom(" CA ", "C")])]),
+            ],
+        };
+        let chain_x = Chain { id: "X".into(), residue_groups: vec![residue("   9", vec![("", "UNX", vec![atom(" UNK", "X")])])] };
+        let mut st = Structure { models: vec![Model { id: String::new(), chains: vec![chain_a, chain_x] }], ..Default::default() };
+        let before = layout(&st);
+        let held = st.take_atoms(|_, a| a.elem() == "X");
+        assert_eq!(held.len(), 3);
+        assert_eq!(layout(&st), ["A/1/ALA/N", "A/1/ALA/CA", "A/3/GLY/N", "A/3/AGLY/CA"]);
+        // processing adds a hydrogen meanwhile
+        st.models[0].chains[0].residue_groups[0].atom_groups[0].atoms.push(atom(" H  ", "H"));
+        st.restore_atoms(held);
+        let mut expected = before;
+        expected.insert(2, "A/1/ALA/H".into());
+        assert_eq!(layout(&st), expected);
+    }
+
     use super::*;
     #[test]
     fn hy36_roundtrip() {
@@ -609,4 +667,163 @@ pub fn mem_checkpoint(tag: &str) {
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
     eprintln!("[mem] {:>8.2}s {:>8} MB  {}", t0.elapsed().as_secs_f64(), rss / 1024, tag);
+}
+
+/// Atoms taken out of a structure and put back later, in their own chains,
+/// residue groups and atom groups (fixed mode keeps atoms of unknown element,
+/// which Reduce2 deletes).
+#[derive(Clone, Debug, Default)]
+pub struct HeldAtoms {
+    groups: Vec<HeldGroup>,
+}
+
+/// A place in the hierarchy: an id and which occurrence of that id it is, so
+/// that repeated chain ids and residue numbers stay apart.
+type Place<K> = (K, usize);
+
+#[derive(Clone, Debug)]
+struct HeldGroup {
+    model: (String, usize),
+    chain: Place<String>,
+    chain_before: Option<Place<String>>,
+    residue: Place<(String, String)>,
+    residue_before: Option<Place<(String, String)>>,
+    link_to_previous: bool,
+    altloc: String,
+    resname: String,
+    atoms: Vec<Atom>,
+}
+
+impl HeldAtoms {
+    pub fn len(&self) -> usize {
+        self.groups.iter().map(|g| g.atoms.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+    /// Add atoms held from the same structure.
+    pub fn extend(&mut self, other: HeldAtoms) {
+        self.groups.extend(other.groups);
+    }
+}
+
+fn occurrence<T, K: PartialEq>(items: &[T], key: impl Fn(&T) -> K, want: &K, n: usize) -> Option<usize> {
+    items.iter().enumerate().filter(|(_, x)| key(x) == *want).map(|(i, _)| i).nth(n)
+}
+
+impl Structure {
+    /// Take out the atoms `pick` selects (given each atom's group), remembering
+    /// where they were.
+    pub fn take_atoms(&mut self, mut pick: impl FnMut(&AtomGroup, &Atom) -> bool) -> HeldAtoms {
+        let mut held = HeldAtoms::default();
+        for (mi, m) in self.models.iter().enumerate() {
+            let mut chain_seen: Vec<String> = Vec::new();
+            let mut chain_before: Option<Place<String>> = None;
+            for c in &m.chains {
+                let chain = (c.id.clone(), chain_seen.iter().filter(|x| **x == c.id).count());
+                chain_seen.push(c.id.clone());
+                let mut rg_seen: Vec<(String, String)> = Vec::new();
+                let mut residue_before: Option<Place<(String, String)>> = None;
+                for rg in &c.residue_groups {
+                    let key = (rg.resseq.clone(), rg.icode.clone());
+                    let residue = (key.clone(), rg_seen.iter().filter(|x| **x == key).count());
+                    rg_seen.push(key);
+                    for ag in &rg.atom_groups {
+                        let atoms: Vec<Atom> = ag.atoms.iter().filter(|a| pick(ag, a)).cloned().collect();
+                        if !atoms.is_empty() {
+                            held.groups.push(HeldGroup {
+                                model: (m.id.clone(), mi),
+                                chain: chain.clone(),
+                                chain_before: chain_before.clone(),
+                                residue: residue.clone(),
+                                residue_before: residue_before.clone(),
+                                link_to_previous: rg.link_to_previous,
+                                altloc: ag.altloc.clone(),
+                                resname: ag.resname.clone(),
+                                atoms,
+                            });
+                        }
+                    }
+                    residue_before = Some(residue);
+                }
+                chain_before = Some(chain);
+            }
+        }
+        if !held.is_empty() {
+            for m in &mut self.models {
+                for c in &mut m.chains {
+                    for rg in &mut c.residue_groups {
+                        for ag in &mut rg.atom_groups {
+                            let taken: Vec<bool> = ag.atoms.iter().map(|a| pick(ag, a)).collect();
+                            let mut k = 0;
+                            ag.atoms.retain(|_| {
+                                k += 1;
+                                !taken[k - 1]
+                            });
+                        }
+                    }
+                }
+            }
+            self.retain_atoms(|_| true);
+        }
+        held
+    }
+
+    /// Put held atoms back, recreating any group that no longer exists right
+    /// after the group that preceded it.
+    pub fn restore_atoms(&mut self, held: HeldAtoms) {
+        for g in held.groups {
+            let mi = match self.models.iter().position(|m| m.id == g.model.0) {
+                Some(i) => i,
+                None => {
+                    let at = g.model.1.min(self.models.len());
+                    self.models.insert(at, Model { id: g.model.0.clone(), chains: Vec::new() });
+                    at
+                }
+            };
+            let chains = &mut self.models[mi].chains;
+            let ci = match occurrence(chains, |c| c.id.clone(), &g.chain.0, g.chain.1) {
+                Some(i) => i,
+                None => {
+                    let at = g
+                        .chain_before
+                        .as_ref()
+                        .and_then(|(id, n)| occurrence(chains, |c| c.id.clone(), id, *n))
+                        .map_or(0, |i| i + 1);
+                    chains.insert(at, Chain { id: g.chain.0.clone(), residue_groups: Vec::new() });
+                    at
+                }
+            };
+            let rgs = &mut chains[ci].residue_groups;
+            let key = |r: &ResidueGroup| (r.resseq.clone(), r.icode.clone());
+            let ri = match occurrence(rgs, key, &g.residue.0, g.residue.1) {
+                Some(i) => i,
+                None => {
+                    let at = g.residue_before.as_ref().and_then(|(k, n)| occurrence(rgs, key, k, *n)).map_or(0, |i| i + 1);
+                    rgs.insert(
+                        at,
+                        ResidueGroup {
+                            resseq: g.residue.0 .0.clone(),
+                            icode: g.residue.0 .1.clone(),
+                            link_to_previous: g.link_to_previous,
+                            atom_groups: Vec::new(),
+                        },
+                    );
+                    at
+                }
+            };
+            let ags = &mut rgs[ri].atom_groups;
+            match ags.iter_mut().find(|ag| ag.altloc == g.altloc && ag.resname == g.resname) {
+                Some(ag) => ag.atoms.extend(g.atoms),
+                None => {
+                    let ag = AtomGroup { altloc: g.altloc, resname: g.resname, atoms: g.atoms };
+                    if ag.altloc.is_empty() {
+                        ags.insert(0, ag);
+                    } else {
+                        ags.push(ag);
+                    }
+                }
+            }
+        }
+    }
 }

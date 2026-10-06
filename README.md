@@ -15,8 +15,8 @@ Asn/Gln/His flips) by Probe dot scoring. It covers the whole pipeline:
 
 It has two modes:
 
-* **fixed** (default) corrects the Reduce2 bugs listed below and optimizes every clique exactly, in
-  parallel.
+* **fixed** (default) corrects the Reduce2 bugs listed below, goes on where Reduce2 gives up (see
+  "Where Reduce2 gives up"), and optimizes every clique exactly, in parallel.
 * **compat** (`--compat`) reproduces Reduce2 exactly, bugs included. It exists to validate the port.
 
 ## Build
@@ -45,7 +45,9 @@ Reduce2's `name=value` parameters work the same way, with the same defaults: `ap
 `set_flip_states`, `model_id`, `alt_id`, `bonded_neighbor_depth`, `verbosity`,
 `stop_on_any_missing_hydrogen`, `ignore_missing_restraints`, `output.filename`,
 `output.description_file_name`, `output.write_files`, and all `probe.*` scoring parameters.
-Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything.
+Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue
+without restraints does not stop the run (so `ignore_missing_restraints` has no effect there);
+`stop_on_any_missing_hydrogen=True` makes it stop.
 
 ## Library use
 
@@ -203,6 +205,28 @@ Where the speed comes from:
     (new hydrogens take their residue's), atom ids renumbered and `_atom_site_anisotrop` and
     `_atom_type` updated. PDB output keeps SSBOND and LINK and renumbers CONECT.
 
+## Where Reduce2 gives up
+
+Fixed mode carries on in these cases; compat mode stops or loses data exactly as Reduce2 does.
+
+* **CCD entries RDKit rejects.** Reduce2 builds restraints for a residue that only the CCD describes
+  through RDKit, and gets none when RDKit cannot read the entry: an unknown formal charge (the Fe
+  of A1IW2 in 9hpx, the Ru of RU7 in 5v4h), an aromatic or delocalized bond order, a valence RDKit
+  rejects, or missing coordinates. Fixed mode builds them from the CCD geometry in all these cases,
+  taking model coordinates where ideal ones are missing and leaving out only restraints it cannot
+  measure.
+* **Hydrogen bond lengths for those residues.** Reduce2 makes every bond 0.9 times its CCD length,
+  which assumes the CCD has neutron-length X-H bonds; entries with X-ray-length coordinates come out
+  near 0.87 A. Fixed mode gives bonds to hydrogen GeoStd's X-ray and neutron lengths for the parent
+  element and its bond count (`src/h_distances.rs`; C-H 0.97/0.93, N-H 0.86, O-H 0.85 A for X-ray),
+  so neutron runs get neutron lengths too.
+* **Atoms of unknown element** (element X, such as UNX in 1h0h and 4iio). Reduce2 deletes them.
+  Fixed mode keeps them unchanged; they get no hydrogens and take no part in scoring.
+* **Residues no dictionary describes** (UNL, or a code missing from the CCD). Reduce2 stops
+  ("Restraints were not found"), and with `ignore_missing_restraints=True` deletes their input
+  hydrogens. Fixed mode reports them, keeps their input hydrogens (not scored), and places the
+  hydrogens of everything else.
+
 ## Known limitations
 
 * Symmetry is used for disulfides only. Reduce2 also snaps atoms on special positions, and skips
@@ -228,7 +252,7 @@ Where the speed comes from:
 | `src/pipeline.rs` | program flow (`Program.run`) |
 | `src/hplace.rs`, `src/riding.rs` | `place_hydrogens`, riding connectivity and parameterization |
 | `src/interp.rs`, `src/autolink.rs`, `src/monlib.rs`, `src/names.rs` | restraint interpretation, automatic links, monomer library, atom-name mapping |
-| `src/ccdrestraints.rs`, `src/rdkit_valence.rs` | restraints built from the CCD (Reduce2's RDKit fallback), RDKit's valence verdicts |
+| `src/ccdrestraints.rs`, `src/rdkit_valence.rs`, `src/h_distances.rs` | restraints built from the CCD (Reduce2's RDKit fallback and the fixed-mode builder), RDKit's valence verdicts, GeoStd X-H lengths |
 | `src/atominfo.rs`, `src/probe.rs` | `getExtraAtomInfo`, Probe dot scoring |
 | `src/movers.rs`, `src/optimizer.rs` | Movers, optimizer (exact VE and the compat OptimizerC port) |
 | `src/pdbio.rs`, `src/mmcif.rs`, `src/cif.rs`, `src/model.rs` | I/O and the iotbx-style hierarchy |

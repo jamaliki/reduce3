@@ -585,7 +585,7 @@ pub fn ccdcheck(chem_data: &str, jsonl: &str) {
         let d: serde_json::Value = serde_json::from_str(line).expect("json");
         let id = d["id"].as_str().unwrap().to_string();
         n += 1;
-        let mine = ml.ccd_comp(&id);
+        let mine = ml.ccd_comp(&id, true);
         let ok = d["ok"].as_bool().unwrap();
         let mut bad: Vec<(&str, String)> = Vec::new();
         match (&mine, ok) {

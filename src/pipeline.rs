@@ -5,7 +5,7 @@
 use crate::atominfo;
 use crate::hplace::{self, HPlaceParams, NTermCharge};
 use crate::interp::{self, FlatAtoms, InterpParams};
-use crate::model::Structure;
+use crate::model::{HeldAtoms, Structure};
 use crate::monlib::MonLib;
 use crate::movers::RidingRef;
 use crate::optimizer::{self, ConformerInput, OptParams};
@@ -97,10 +97,37 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
     };
     let mut desc = String::new();
     let mut log = String::new();
-    // element X atoms are dropped first
-    st.retain_atoms(|a| a.elem() != "X");
+    // atoms of unknown element (X): Reduce2 drops them first; fixed mode sets
+    // them aside (after any model selection) and puts them back unchanged
+    if p.compat {
+        st.retain_atoms(|a| a.elem() != "X");
+    }
     if let Some(mid) = p.model_id {
         select_model(&mut st, mid, p.compat)?;
+    }
+    let mut held = if p.compat { HeldAtoms::default() } else { st.take_atoms(|_, a| a.elem() == "X") };
+    if !held.is_empty() {
+        let note = format!("Kept {} atoms of unknown element (X) unchanged; they get no hydrogens and are not scored\n", held.len());
+        log += &note;
+        desc += &note;
+    }
+    // input hydrogens of residues that no dictionary describes: Reduce2 deletes
+    // them and cannot place new ones; fixed mode keeps them as they are
+    if !p.compat && p.approach == Approach::Add && !p.keep_existing_h {
+        let mut described: rustc_hash::FxHashMap<String, bool> = rustc_hash::FxHashMap::default();
+        let kept = st.take_atoms(|ag, a| {
+            a.is_hydrogen()
+                && !*described.entry(ag.resname.clone()).or_insert_with(|| {
+                    let names: Vec<String> = ag.atoms.iter().map(|x| x.name.clone()).collect();
+                    hplace::residue_dictionary(ml, &ag.resname, &names).is_some() || ml.ccd_comp(&ag.resname, false).is_some()
+                })
+        });
+        if !kept.is_empty() {
+            let note = format!("Kept {} input hydrogens of residues without restraints unchanged; they are not scored\n", kept.len());
+            log += &note;
+            desc += &note;
+        }
+        held.extend(kept);
     }
     st.reset_i_seq();
     let cell = if p.compat { crate::cell::processing_cell(&st) } else { None };
@@ -121,10 +148,19 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                 };
                 let placed = hplace::place_hydrogens(&mut st, ml, &hp);
                 log += &placed.log;
-                if !p.ignore_missing_restraints && !placed.no_h_placed.is_empty() {
+                if !placed.no_h_placed.is_empty() {
                     let mut bad: Vec<String> = placed.no_h_placed.clone();
                     bad.dedup();
-                    return Err(format!("Restraints were not found for the following residues: {}", bad.join(" ")));
+                    // fixed mode places what it can unless asked to stop
+                    let stop = if p.compat { !p.ignore_missing_restraints } else { p.stop_on_any_missing_hydrogen };
+                    if stop {
+                        return Err(format!("Restraints were not found for the following residues: {}", bad.join(" ")));
+                    }
+                    if !p.compat {
+                        let note = format!("No restraints were found for residues {}: they get no new hydrogens\n", bad.join(" "));
+                        log += &note;
+                        desc += &note;
+                    }
                 }
                 if p.stop_on_any_missing_hydrogen && !placed.site_labels_no_para.is_empty() {
                     return Err(format!(
@@ -176,6 +212,7 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
             st.retain_atoms(|a| a.elem() != "H");
         }
     }
+    st.restore_atoms(held);
     st.sort_atoms_in_place();
     st.reset_serial();
     st.reset_i_seq();

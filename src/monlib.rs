@@ -628,22 +628,24 @@ impl MonLib {
     }
 
     /// Restraints built from the CCD for a residue that neither library
-    /// describes (Reduce2's fallback; see [`crate::ccdrestraints`]).
-    pub fn ccd_comp(&self, comp_id: &str) -> Option<Arc<Comp>> {
+    /// describes (Reduce2's fallback with `strict`, the fixed-mode one without;
+    /// see [`crate::ccdrestraints::comp_from_ccd`]).
+    pub fn ccd_comp(&self, comp_id: &str, strict: bool) -> Option<Arc<Comp>> {
         let id = comp_id.trim().to_ascii_uppercase();
         if id.is_empty() || id == "UNL" {
             return None;
         }
-        if let Some(c) = self.ccd_comp_cache.read().unwrap().get(&id) {
+        let key = format!("{}{}", if strict { "strict:" } else { "" }, id);
+        if let Some(c) = self.ccd_comp_cache.read().unwrap().get(&key) {
             return c.clone();
         }
         let first = id.chars().next().unwrap().to_ascii_lowercase().to_string();
         let p = self.root.join("chemical_components").join(first).join(format!("data_{}.cif", id));
         let comp = std::fs::read_to_string(&p)
             .ok()
-            .and_then(|t| crate::ccdrestraints::comp_from_ccd(&t, &p))
+            .and_then(|t| crate::ccdrestraints::comp_from_ccd(&t, &p, strict))
             .map(Arc::new);
-        self.ccd_comp_cache.write().unwrap().insert(id, comp.clone());
+        self.ccd_comp_cache.write().unwrap().insert(key, comp.clone());
         comp
     }
 

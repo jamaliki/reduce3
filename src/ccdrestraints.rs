@@ -372,9 +372,20 @@ fn rounded(v: f64, decimals: usize) -> f64 {
     format!("{:.*}", decimals, v).parse().unwrap_or(v)
 }
 
-/// Build the dictionary from a CCD file's text, or `None` where Reduce2's
-/// construction fails.
-pub fn comp_from_ccd(text: &str, source: &Path) -> Option<Comp> {
+/// Build the dictionary from a CCD file's text. With `strict`, exactly as
+/// Reduce2 does, `None` where its RDKit construction fails. Otherwise (fixed
+/// mode) whenever the entry has coordinates: unknown formal charges, any bond
+/// order and any valence are accepted, each atom takes its ideal coordinates or
+/// else its model ones, and restraints that cannot be measured (an atom without
+/// coordinates, coincident or collinear atoms) are left out. Bonds to hydrogen
+/// get GeoStd's X-ray and neutron lengths for the parent element and bond count
+/// ([`crate::h_distances`]): Reduce2's 0.9 times the CCD length assumes the CCD
+/// has neutron-length X-H bonds, and comes out near 0.87 A for entries whose
+/// coordinates use X-ray lengths. Other bonds keep their CCD length.
+pub fn comp_from_ccd(text: &str, source: &Path, strict: bool) -> Option<Comp> {
+    if !strict {
+        return comp_from_ccd_lenient(text, source);
+    }
     let doc = cif::parse(text);
     let block = doc.blocks.first()?;
     let cc = block.category("_chem_comp")?;
@@ -495,6 +506,108 @@ pub fn comp_from_ccd(text: &str, source: &Path) -> Option<Comp> {
     Some(comp)
 }
 
+fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
+    let doc = cif::parse(text);
+    let block = doc.blocks.first()?;
+    let cc = block.category("_chem_comp")?;
+    let atoms = block.category("_chem_comp_atom")?;
+    let col = |tag: &str| atoms.col(tag);
+    let (c_id, c_type) = (col("atom_id")?, col("type_symbol")?);
+    let n = atoms.nrows();
+    let xyz = |r: usize, names: [&str; 3]| -> Option<P3> {
+        let v: Vec<f64> = names.iter().map(|t| cif::parse_f64(atoms.get(r, col(t)?))).collect::<Option<_>>()?;
+        Some([v[0], v[1], v[2]])
+    };
+    let ids: Vec<String> = (0..n).map(|r| atoms.get(r, c_id).to_string()).collect();
+    let pos: Vec<Option<P3>> = (0..n)
+        .map(|r| {
+            xyz(r, ["pdbx_model_Cartn_x_ideal", "pdbx_model_Cartn_y_ideal", "pdbx_model_Cartn_z_ideal"])
+                .or_else(|| xyz(r, ["model_Cartn_x", "model_Cartn_y", "model_Cartn_z"]))
+        })
+        .collect();
+    if pos.iter().all(|p| p.is_none()) {
+        return None;
+    }
+    let index_of = |name: &str| -> Option<usize> { ids.iter().rposition(|x| x == name) };
+    let mut comp = Comp {
+        id: cc.get_tag(0, "id").unwrap_or("").to_string(),
+        group: cc.get_tag(0, "type").unwrap_or("").to_string(),
+        source: source.to_path_buf(),
+        from_ccd: true,
+        ..Default::default()
+    };
+    for r in 0..n {
+        comp.atoms.push(CompAtom {
+            id: ids[r].clone(),
+            type_symbol: atoms.get(r, c_type).to_ascii_uppercase(),
+            type_energy: None,
+        });
+    }
+    let mut nbrs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let flat: Vec<P3> = pos.iter().map(|p| p.unwrap_or([0.0; 3])).collect();
+    let mut pairs: Vec<(usize, usize, String)> = Vec::new();
+    if let Some(bonds) = block.category("_chem_comp_bond") {
+        let (b1, b2, bo) = (bonds.col("atom_id_1"), bonds.col("atom_id_2"), bonds.col("value_order"));
+        for r in 0..bonds.nrows() {
+            let field = |c: Option<usize>| c.map_or("?", |c| bonds.get(r, c));
+            let (Some(i), Some(j)) = (index_of(field(b1)), index_of(field(b2))) else { continue };
+            if i == j || nbrs[i].contains(&j) || pos[i].is_none() || pos[j].is_none() {
+                continue;
+            }
+            nbrs[i].push(j);
+            nbrs[j].push(i);
+            pairs.push((i, j, field(bo).to_string()));
+        }
+    }
+    let is_h = |k: usize| matches!(comp.atoms[k].type_symbol.as_str(), "H" | "D");
+    for (i, j, order) in pairs {
+        let length = bond_length(&flat, i, j);
+        let (xray, neutron) = match (is_h(i), is_h(j)) {
+            (true, false) | (false, true) => {
+                let parent = if is_h(i) { j } else { i };
+                // bonds to metals (an arene on Ru, say) do not change the hybridization
+                let degree = nbrs[parent]
+                    .iter()
+                    .filter(|&&k| atomic_number(&comp.atoms[k].type_symbol).is_none_or(|z| !is_metal(z)))
+                    .count();
+                crate::h_distances::lookup(&comp.atoms[parent].type_symbol, degree)
+                    .unwrap_or((rounded(length * 0.9, 3), rounded(length, 3)))
+            }
+            _ => (rounded(length, 3), rounded(length, 3)),
+        };
+        comp.bonds.push(CompBond {
+            a1: ids[i].clone(),
+            a2: ids[j].clone(),
+            type_: order,
+            value_dist: Some(xray),
+            esd: Some(0.1),
+            value_dist_neutron: Some(neutron),
+        });
+    }
+    for [a, b, c] in enumerate_angles(&nbrs) {
+        let Some(v) = angle_deg(&flat, a, b, c).filter(|v| v.is_finite()) else { continue };
+        comp.angles.push(CompAngle {
+            a1: ids[a].clone(),
+            a2: ids[b].clone(),
+            a3: ids[c].clone(),
+            value: Some(rounded(v, 1)),
+            esd: Some(1.0),
+        });
+    }
+    for [a, b, c, d] in enumerate_torsions(&nbrs) {
+        let Some(v) = dihedral_deg(&flat, a, b, c, d).filter(|v| v.is_finite()) else { continue };
+        comp.tors.push(CompTor {
+            id: format!("Var_{:03}", comp.tors.len()),
+            a: [ids[a].clone(), ids[b].clone(), ids[c].clone(), ids[d].clone()],
+            value: Some(rounded(v, 1)),
+            esd: Some(1.0),
+            period: 1,
+            alt_values: None,
+        });
+    }
+    Some(comp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,7 +629,7 @@ mod tests {
             "TST O O 0 0.000 0.000 0.000\nTST H1 H 0 1.000 0.000 0.000\nTST H2 H 0 0.000 1.000 0.000",
             "TST O H1 SING\nTST O H2 SING",
         );
-        let c = comp_from_ccd(&text, Path::new("x")).unwrap();
+        let c = comp_from_ccd(&text, Path::new("x"), true).unwrap();
         assert!(c.from_ccd && c.group == "NON-POLYMER" && c.atoms.iter().all(|a| a.type_energy.is_none()));
         assert_eq!(c.bonds.iter().map(|b| b.value_dist.unwrap()).collect::<Vec<_>>(), [0.9, 0.9]);
         assert_eq!(c.angles.len(), 1);
@@ -527,14 +640,29 @@ mod tests {
     #[test]
     fn rejects_what_rdkit_rejects() {
         let atoms = "TST C1 C 0 0 0 0\nTST C2 C 0 1.5 0 0";
-        assert!(comp_from_ccd(&ccd(atoms, "TST C1 C2 AROM"), Path::new("x")).is_none(), "bond order");
-        assert!(comp_from_ccd(&ccd("TST C1 C ? 0 0 0\nTST C2 C 0 1.5 0 0", "TST C1 C2 SING"), Path::new("x")).is_none(), "charge");
-        assert!(comp_from_ccd(&ccd("TST C1 X 0 0 0 0\nTST C2 C 0 1.5 0 0", "TST C1 C2 SING"), Path::new("x")).is_none(), "element");
+        assert!(comp_from_ccd(&ccd(atoms, "TST C1 C2 AROM"), Path::new("x"), true).is_none(), "bond order");
+        assert!(comp_from_ccd(&ccd("TST C1 C ? 0 0 0\nTST C2 C 0 1.5 0 0", "TST C1 C2 SING"), Path::new("x"), true).is_none(), "charge");
+        assert!(comp_from_ccd(&ccd("TST C1 X 0 0 0 0\nTST C2 C 0 1.5 0 0", "TST C1 C2 SING"), Path::new("x"), true).is_none(), "element");
         // three bonds on a neutral O: too many, unless one goes to a metal
         let o3 = "TST O O 0 0 0 0\nTST C1 C 0 1 0 0\nTST C2 C 0 0 1 0\nTST C3 C 0 0 0 1";
-        assert!(comp_from_ccd(&ccd(o3, "TST O C1 SING\nTST O C2 SING\nTST O C3 SING"), Path::new("x")).is_none());
+        assert!(comp_from_ccd(&ccd(o3, "TST O C1 SING\nTST O C2 SING\nTST O C3 SING"), Path::new("x"), true).is_none());
         let o2m = "TST O O 0 0 0 0\nTST C1 C 0 1 0 0\nTST C2 C 0 0 1 0\nTST FE FE 0 0 0 2";
-        assert!(comp_from_ccd(&ccd(o2m, "TST O C1 SING\nTST O C2 SING\nTST O FE SING"), Path::new("x")).is_some());
+        assert!(comp_from_ccd(&ccd(o2m, "TST O C1 SING\nTST O C2 SING\nTST O FE SING"), Path::new("x"), true).is_some());
+    }
+
+    #[test]
+    fn fixed_mode_accepts_what_rdkit_rejects() {
+        // an unknown charge on the metal (A1IW2, RU7) and an aromatic bond order
+        let atoms = "TST FE FE ? 0 0 0\nTST S S 0 2.2 0 0\nTST C C 0 2.9 1.5 0\nTST H H 0 2.6 2.4 0.5";
+        let bonds = "TST FE S SING\nTST S C AROM\nTST C H SING";
+        assert!(comp_from_ccd(&ccd(atoms, bonds), Path::new("x"), true).is_none());
+        let c = comp_from_ccd(&ccd(atoms, bonds), Path::new("x"), false).unwrap();
+        assert_eq!(c.bonds.len(), 3);
+        assert_eq!(c.angles.len(), 2);
+        assert_eq!(c.tors.len(), 1);
+        // C-H takes GeoStd's length for a C with two bonds, not 0.9 x the CCD's 1.072 A
+        assert_eq!((c.bonds[2].value_dist, c.bonds[2].value_dist_neutron), (Some(0.913), Some(1.066)));
+        assert_eq!(c.bonds[0].value_dist, Some(2.2));
     }
 
     #[test]
