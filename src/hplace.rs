@@ -1105,13 +1105,16 @@ fn reset_h_adp_occ(st: &mut Structure, w: &Work, it: &Interp, scale: f64, cell: 
     }
 }
 
+type ProchiralGroup = (String, Vec<String>, Vec<String>, FxHashMap<String, Vec3>);
+
 fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], done: &mut FxHashSet<u32>) {
-    let mut cache: FxHashMap<(String, usize), Vec<(String, Vec<String>, Vec<String>, FxHashMap<String, Vec3>)>> = FxHashMap::default();
+    let mut cache: FxHashMap<(String, usize), Vec<ProchiralGroup>> = FxHashMap::default();
     // flat index by path, to honor removals
     let mut idx: FxHashMap<AtomPath, u32> = FxHashMap::default();
     for (k, pth) in w.flat.path.iter().enumerate() {
         idx.insert(*pth, k as u32);
     }
+    let mut swaps: Vec<(AtomPath, AtomPath)> = Vec::new();
     for mi in 0..st.models.len() {
         for ci in 0..st.models[mi].chains.len() {
             let alts = st.models[mi].chains[ci].conformer_altlocs();
@@ -1119,7 +1122,7 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
                 for ri in 0..st.models[mi].chains[ci].residue_groups.len() {
                     // conformer residues: blank + this altloc, grouped by resname
                     let rg = &st.models[mi].chains[ci].residue_groups[ri];
-                    let mut groups: Vec<(String, Vec<AtomPath>)> = Vec::new();
+                    let mut groups: Vec<(&str, Vec<AtomPath>)> = Vec::new();
                     for (gi, ag) in rg.atom_groups.iter().enumerate() {
                         if !(ag.altloc.is_empty() || ag.altloc == *alt) {
                             continue;
@@ -1127,7 +1130,7 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
                         let e = match groups.iter_mut().position(|g| g.0 == ag.resname) {
                             Some(k) => k,
                             None => {
-                                groups.push((ag.resname.clone(), Vec::new()));
+                                groups.push((ag.resname.as_str(), Vec::new()));
                                 groups.len() - 1
                             }
                         };
@@ -1142,57 +1145,51 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
                         }
                     }
                     for (resname, paths) in groups {
-                        let rn = resname.trim().to_string();
-                        let mut refs = Vec::new();
+                        let rn = resname.trim();
                         for &k in kinds {
                             let n_heavy = if k == 2 { 2 } else { 1 };
-                            let key = (rn.clone(), k);
-                            if !cache.contains_key(&key) {
-                                cache.insert(key.clone(), h_references(ml, &rn, k, n_heavy));
-                            }
-                            for g in &cache[&key] {
-                                refs.push((k, g.clone()));
+                            if !cache.contains_key(&(rn.to_string(), k)) {
+                                cache.insert((rn.to_string(), k), h_references(ml, rn, k, n_heavy));
                             }
                         }
+                        let refs: Vec<(usize, &ProchiralGroup)> =
+                            kinds.iter().flat_map(|&k| cache[&(rn.to_string(), k)].iter().map(move |g| (k, g))).collect();
                         if refs.is_empty() {
                             continue;
                         }
-                        let mut atoms: FxHashMap<String, AtomPath> = FxHashMap::default();
-                        for &pth in &paths {
-                            atoms.insert(st.atom(pth).name.trim().to_string(), pth);
-                        }
+                        let atoms: FxHashMap<&str, AtomPath> = paths.iter().map(|&pth| (st.atom(pth).name.trim(), pth)).collect();
                         for (k, (p, hv, hs, sites)) in refs {
-                            if !std::iter::once(&p).chain(hv.iter()).chain(hs.iter()).all(|n| atoms.contains_key(n)) {
+                            if !std::iter::once(p).chain(hv.iter()).chain(hs.iter()).all(|n| atoms.contains_key(n.as_str())) {
                                 continue;
                             }
-                            let pp = atoms[&p];
+                            let at = |n: &String| atoms[n.as_str()];
+                            let pp = at(p);
                             let pidx = idx[&pp];
                             if done.contains(&pidx) {
                                 continue;
                             }
                             let ppos = st.atom(pp).xyz;
-                            if hv.iter().chain(hs.iter()).any(|n| st.atom(atoms[n]).xyz.dist(ppos) > 2.4) {
+                            if hv.iter().chain(hs.iter()).any(|n| st.atom(at(n)).xyz.dist(ppos) > 2.4) {
                                 continue;
                             }
                             done.insert(pidx);
-                            let (refn, swap) = if k == 2 {
-                                ([hv[0].clone(), hv[1].clone(), hs[0].clone()], (hs[0].clone(), hs[1].clone()))
-                            } else {
-                                ([hs[0].clone(), hs[1].clone(), hv[0].clone()], (hs[1].clone(), hs[2].clone()))
-                            };
-                            let v_ideal = chiral_volume(sites[&p], sites[&refn[0]], sites[&refn[1]], sites[&refn[2]]);
-                            let v_model = chiral_volume(ppos, st.atom(atoms[&refn[0]]).xyz, st.atom(atoms[&refn[1]]).xyz, st.atom(atoms[&refn[2]]).xyz);
+                            let (refn, swap) = if k == 2 { ([&hv[0], &hv[1], &hs[0]], (&hs[0], &hs[1])) } else { ([&hs[0], &hs[1], &hv[0]], (&hs[1], &hs[2])) };
+                            let v_ideal = chiral_volume(sites[p], sites[refn[0]], sites[refn[1]], sites[refn[2]]);
+                            let v_model = chiral_volume(ppos, st.atom(at(refn[0])).xyz, st.atom(at(refn[1])).xyz, st.atom(at(refn[2])).xyz);
                             if v_ideal.abs() < 0.5 || v_model.abs() < 0.5 {
                                 continue;
                             }
                             if (v_ideal > 0.0) != (v_model > 0.0) {
-                                let (a1, a2) = (atoms[&swap.0], atoms[&swap.1]);
-                                let n1 = st.atom(a1).name.clone();
-                                let n2 = st.atom(a2).name.clone();
-                                st.atom_mut(a1).name = n2;
-                                st.atom_mut(a2).name = n1;
+                                // lookups use the names from before any swap, so
+                                // the swaps can wait for the end of the residue
+                                swaps.push((at(swap.0), at(swap.1)));
                             }
                         }
+                    }
+                    for (a1, a2) in swaps.drain(..) {
+                        let n1 = st.atom(a1).name.clone();
+                        let n2 = std::mem::replace(&mut st.atom_mut(a2).name, n1);
+                        st.atom_mut(a1).name = n2;
                     }
                 }
             }

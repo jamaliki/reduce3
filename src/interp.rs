@@ -435,7 +435,7 @@ fn interpret_residue(
     res: &ConfResidue,
     neutron_unused: bool,
     log: &mut String,
-) -> ResInterp {
+) -> (ResInterp, Vec<Option<String>>) {
     let _ = neutron_unused;
     let resname = res.resname.trim().to_ascii_uppercase();
     let names: Vec<String> = res.atoms.iter().map(|&a| flat.name[a as usize].clone()).collect();
@@ -462,7 +462,7 @@ fn interpret_residue(
     // whose library entry uses other atom names
     let comp0 = auto_comps.get(&resname).cloned().or_else(|| ml.comp(&work));
     let Some(comp0) = comp0 else {
-        return ResInterp {
+        let ri = ResInterp {
             comp: None,
             id_to_atom: FxHashMap::default(),
             is_peptide: false,
@@ -470,6 +470,7 @@ fn interpret_residue(
             is_rna2p: None,
             is_water,
         };
+        return (ri, Vec::new());
     };
     let _ = d_aa;
     // shared dictionary; a modified copy is made only when a mod applies
@@ -559,14 +560,87 @@ fn interpret_residue(
         }
     }
     let is_rna_dict = comp.test_for_rna_dna();
-    ResInterp {
-        comp: Some(comp),
-        id_to_atom,
-        is_peptide: is_peptide_dict && !is_na,
-        is_rna_dna: is_na || is_rna_dict.is_some(),
-        is_rna2p: None,
-        is_water,
+    (
+        ResInterp {
+            comp: Some(comp),
+            id_to_atom,
+            is_peptide: is_peptide_dict && !is_na,
+            is_rna_dna: is_na || is_rna_dict.is_some(),
+            is_rna2p: None,
+            is_water,
+        },
+        mapping.ids,
+    )
+}
+
+/// What `interpret_residue` derives from a residue's name and atom names (and
+/// the dictionaries), the same for every residue that shares them.
+struct ResTemplate {
+    resname: String,
+    names: Vec<String>,
+    comp: Option<Arc<Comp>>,
+    /// Dictionary id of each atom position.
+    ids: Vec<Option<String>>,
+    is_peptide: bool,
+    is_rna_dna: bool,
+    is_water: bool,
+    log: String,
+}
+
+/// `interpret_residue` through a per-run memo keyed by residue name and atom
+/// names: a hit rebuilds the atom map in the same order and replays the log.
+fn interpret_residue_memo(
+    memo: &mut FxHashMap<u64, Vec<ResTemplate>>,
+    ml: &MonLib,
+    auto_comps: &FxHashMap<String, Arc<Comp>>,
+    flat: &FlatAtoms,
+    res: &ConfResidue,
+    neutron: bool,
+    log: &mut String,
+) -> ResInterp {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    res.resname.hash(&mut h);
+    for &a in &res.atoms {
+        flat.name[a as usize].hash(&mut h);
     }
+    let key = h.finish();
+    let same = |t: &ResTemplate| {
+        t.resname == res.resname && t.names.len() == res.atoms.len() && t.names.iter().zip(&res.atoms).all(|(n, &a)| *n == flat.name[a as usize])
+    };
+    if let Some(t) = memo.get(&key).and_then(|b| b.iter().find(|t| same(t))) {
+        log.push_str(&t.log);
+        let mut id_to_atom: FxHashMap<String, u32> = FxHashMap::default();
+        if t.comp.is_some() {
+            for (k, id) in t.ids.iter().enumerate() {
+                if let Some(id) = id {
+                    id_to_atom.insert(id.clone(), res.atoms[k]);
+                }
+            }
+        }
+        return ResInterp {
+            comp: t.comp.clone(),
+            id_to_atom,
+            is_peptide: t.is_peptide,
+            is_rna_dna: t.is_rna_dna,
+            is_rna2p: None,
+            is_water: t.is_water,
+        };
+    }
+    let mut own_log = String::new();
+    let (ri, ids) = interpret_residue(ml, auto_comps, flat, res, neutron, &mut own_log);
+    log.push_str(&own_log);
+    memo.entry(key).or_default().push(ResTemplate {
+        resname: res.resname.clone(),
+        names: res.atoms.iter().map(|&a| flat.name[a as usize].clone()).collect(),
+        comp: ri.comp.clone(),
+        ids,
+        is_peptide: ri.is_peptide,
+        is_rna_dna: ri.is_rna_dna,
+        is_water: ri.is_water,
+        log: own_log,
+    });
+    ri
 }
 
 /// After NH1/NH2 mods, the model's unexpected H1/H2/H3 map to HN/HN1/HN2 in order.
@@ -845,13 +919,14 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
     }
     let confs = conformer_residues(st, &flat_index);
     let mut log = String::new();
+    let mut memo: FxHashMap<u64, Vec<ResTemplate>> = FxHashMap::default();
     let mut cys_sg: Vec<u32> = Vec::new();
     let mut cys_sg_seen: FxHashSet<u32> = FxHashSet::default();
     for model_confs in &confs {
         for residues in model_confs {
             // interpret all residues of this chain conformer first (pucker needs next P)
             let mut interps: Vec<ResInterp> =
-                residues.iter().map(|r| interpret_residue(ml, &p.auto_comps, flat, r, p.neutron, &mut log)).collect();
+                residues.iter().map(|r| interpret_residue_memo(&mut memo, ml, &p.auto_comps, flat, r, p.neutron, &mut log)).collect();
             for k in 0..interps.len() {
                 if interps[k].is_rna_dna && interps[k].comp.is_some() && interps[k].id_to_atom.contains_key("O2'") {
                     let next_p = interps.get(k + 1).and_then(|nx| nx.id_to_atom.get("P").copied());
