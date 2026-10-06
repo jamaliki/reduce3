@@ -1,32 +1,9 @@
 //! Reduce3: a fast Rust reimplementation of cctbx Reduce2 (hydrogen addition
 //! and optimization of rotatable and flippable groups).
 
-pub mod atominfo;
-pub mod atomtypes;
-pub mod autolink;
-pub mod cell;
-pub mod cif;
-pub mod geom;
-pub mod hplace;
-pub mod interp;
-mod linkdata;
-pub mod monlib;
-pub mod names;
-pub mod riding;
-pub mod mmcif;
-pub mod model;
-pub mod movers;
-pub mod optimizer;
-pub mod pipeline;
-pub mod pdbio;
-pub mod probe;
-pub mod resclass;
-mod resclass_data;
-mod spacegroup_data;
+use reduce3::{hplace, mmcif, model, monlib, pdbio, pipeline};
 #[cfg(feature = "refcheck")]
-pub mod refcheck;
-pub mod world;
-
+use reduce3::refcheck;
 use pipeline::{Approach, Params};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

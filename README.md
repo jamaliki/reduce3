@@ -44,6 +44,20 @@ Reduce2's `name=value` parameters work the same way, with the same defaults: `ap
 `output.description_file_name`, `output.write_files`, and all `probe.*` scoring parameters.
 Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything.
 
+## Library use
+
+Reduce3 is also a Rust library. It can work on a model that another program has already
+parsed, without writing or re-reading text:
+
+* implement `cifsource::CifSource` (categories as tables of values) for the program's parsed
+  mmCIF data block, and call `reduce3::run_cif(&block, &monlib, &params)`;
+* stream the result into the program's own document type by implementing `cifsource::CifSink`
+  and calling `mmcif::write_cif(&output.structure, &mut sink)`.
+
+The mmCIF reader and writer use the same two traits, so this path builds exactly the model a
+file would and emits exactly the items and loops `reduce3` writes. A source that already holds
+parsed numbers can hand them over through `CifTable::number` instead of text.
+
 ## Validation against Reduce2 (cctbx 2026.9)
 
 The reference data come from the original Reduce2 run on 13 structures: 1a28, 1crn, 1d3z (NMR,
@@ -193,6 +207,7 @@ Where the speed comes from:
 | `src/atominfo.rs`, `src/probe.rs` | `getExtraAtomInfo`, Probe dot scoring |
 | `src/movers.rs`, `src/optimizer.rs` | Movers, optimizer (exact VE and the compat OptimizerC port) |
 | `src/pdbio.rs`, `src/mmcif.rs`, `src/cif.rs`, `src/model.rs` | I/O and the iotbx-style hierarchy |
+| `src/cifsource.rs`, `src/lib.rs` | library interface for already-parsed CIF data |
 | `src/cell.rs` | cctbx unit-cell arithmetic used by compat mode |
 | `tools/` | table generators and the end-to-end comparison script |
 | `reference/` | scripts that produce the Reduce2 reference data |
