@@ -1,0 +1,13 @@
+Reduce3
+Copyright 2026 The Reduce3 Authors
+
+This product is a Rust reimplementation of Reduce2 (mmtbx.reduce2) and related code
+from the Computational Crystallography Toolbox (cctbx,
+https://github.com/cctbx/cctbx_project). It also contains tables generated from cctbx
+sources (residue classes, space-group operations, glycosidic chirality values, default
+bond lengths, nucleic-acid atom-name aliases). That material is distributed under the
+cctbx license, reproduced in LICENSE-cctbx.txt:
+
+  cctbx Copyright (c) 2006 - 2026, The Regents of the University of California,
+  through Lawrence Berkeley National Laboratory (subject to receipt of any required
+  approvals from the U.S. Dept. of Energy). All rights reserved.
