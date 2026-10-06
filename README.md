@@ -112,17 +112,24 @@ runs; Reduce2 is a single run, and its time includes about 1.5 s of Python/cctbx
 
 | Structure | Atoms in | Reduce2 | Reduce3 fixed | Reduce3 compat | Speed-up (fixed) |
 |---|---:|---:|---:|---:|---:|
-| 1crn | 327 | 1.73 s | 0.013 s | 0.014 s | 133× |
-| 1ubq | 660 | 1.93 s | 0.017 s | 0.020 s | 112× |
-| 7c31 | 1,532 | 2.53 s | 0.022 s | 0.026 s | 117× |
-| 1ehz | 1,821 | 2.92 s | 0.028 s | 0.035 s | 105× |
-| 4fen | 2,084 | 17.27 s | 0.036 s | 1.89 s | 484× |
-| 1xso | 2,541 | 5.86 s | 0.041 s | 0.050 s | 145× |
-| 3gfh | 3,291 | 4.76 s | 0.042 s | 0.051 s | 114× |
-| 1a28 | 4,262 | 6.22 s | 0.054 s | 0.068 s | 116× |
-| 6oge | 11,494 | 12.73 s | 0.120 s | 0.172 s | 106× |
-| 1d3z (10 models) | 12,310 | 12.48 s | 0.078 s | 0.067 s | 161× |
+| 1crn | 327 | 1.73 s | 0.010 s | 0.010 s | 173× |
+| 1ubq | 660 | 1.93 s | 0.012 s | 0.015 s | 161× |
+| 7c31 | 1,532 | 2.53 s | 0.015 s | 0.022 s | 169× |
+| 1ehz | 1,821 | 2.92 s | 0.020 s | 0.026 s | 146× |
+| 4fen | 2,084 | 17.27 s | 0.028 s | 1.50 s | 617× |
+| 1xso | 2,541 | 5.86 s | 0.028 s | 0.043 s | 209× |
+| 3gfh | 3,291 | 4.76 s | 0.027 s | 0.040 s | 176× |
+| 1a28 | 4,262 | 6.22 s | 0.036 s | 0.054 s | 173× |
+| 6oge | 11,494 | 12.73 s | 0.077 s | 0.142 s | 165× |
+| 1d3z (10 models) | 12,310 | 12.48 s | 0.053 s | 0.040 s | 235× |
 | 3j3q (HIV capsid, mmCIF) | 2,440,800 | not run | 24 s (about 10 GB peak memory) | | |
+
+**Many models.** Batch mode (`--batch`, `--out-dir`) loads the monomer library once and runs one
+model per core. For a 225-residue AlphaFold model (AF-A0A2K6V5L6-F1, v6, 1,940 atoms) on a 16-core
+Apple-silicon Mac, a model takes 16 ms (PDB) or 18 ms (mmCIF, every category kept) of one core once
+the dictionaries are loaded, and batch mode runs about 650 such models per second from PDB files
+and 570 from mmCIF. The whole local PDB archive (250,059 entries; 242,013 run, the others over
+5,000 residues or C-alpha traces) took 2.5 hours on 12 workers with one process per entry.
 
 Where the speed comes from:
 
@@ -133,8 +140,15 @@ Where the speed comes from:
   1.6 s to 0.03 s.
 * Compat mode runs a direct port of Reduce2's `OptimizerC` (vertex cuts, brute force, caches), so
   its cost follows Reduce2's search. That is why 4fen takes 1.9 s there.
+* A clique too dense for exact search within a work budget is optimized by block coordinate
+  ascent instead (see "Dense cliques" above), so no structure stalls the optimizer.
 * Interpretation, riding placement and scoring are flat-array code with spatial grids, so every
-  stage is linear in the number of atoms.
+  stage is linear in the number of atoms. Work that is the same for every residue of a kind
+  (residue interpretation, dictionary coordinates) is done once per run or once per process, each
+  Mover atom's static neighbors are found once for all of its positions, and dot targets are
+  prepared once per atom position rather than per dot.
+* Numbers are written by an exact fixed-point formatter (the same text as `format!`), and the
+  command-line tool allocates with mimalloc.
 
 ## Reduce2 bugs fixed in the default mode
 
