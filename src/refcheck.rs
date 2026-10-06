@@ -657,3 +657,63 @@ pub fn ccdcheck(chem_data: &str, jsonl: &str) {
         println!("  {}: {} (e.g. {})", k, v.len(), v.iter().take(4).cloned().collect::<Vec<_>>().join("; "));
     }
 }
+
+/// Compare the energy types the fixed-mode CCD builder assigns with GeoStd's,
+/// over every residue both describe: the Probe properties of the types (H-bond
+/// role, van der Waals radius) and the type names.
+pub fn typecheck(chem_data: &str) {
+    let root = std::path::Path::new(chem_data);
+    let ml = crate::monlib::MonLib::load(root).expect("chem_data");
+    let mut ids: Vec<String> = Vec::new();
+    for d in std::fs::read_dir(root.join("geostd")).expect("geostd").flatten() {
+        if !d.path().is_dir() {
+            continue;
+        }
+        for f in std::fs::read_dir(d.path()).expect("dir").flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            if let Some(id) = name.strip_prefix("data_").and_then(|x| x.strip_suffix(".cif")) {
+                if !id.contains("_pH_") && !id.contains("_neutron") {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    ids.sort();
+    let props = |t: &str| ml.ener.get(t).map(|e| (e.hb_type.clone(), e.vdw_radius));
+    let (mut residues, mut atoms, mut same_props, mut same_name) = (0usize, 0usize, 0usize, 0usize);
+    let (mut h_total, mut h_only_reference, mut h_only_mine) = (0usize, 0usize, 0usize);
+    let mut confusions: std::collections::BTreeMap<(String, String), usize> = Default::default();
+    for id in &ids {
+        let Some(reference) = ml.comp(id) else { continue };
+        let Some(mine) = ml.ccd_comp(id, false) else { continue };
+        residues += 1;
+        let hs = |c: &crate::monlib::Comp| -> Vec<String> {
+            c.atoms.iter().filter(|a| a.type_symbol == "H" || a.type_symbol == "D").map(|a| a.id.clone()).collect()
+        };
+        let (rh, mh) = (hs(&reference), hs(&mine));
+        h_total += rh.len();
+        h_only_reference += rh.iter().filter(|h| !mh.contains(h)).count();
+        h_only_mine += mh.iter().filter(|h| !rh.contains(h)).count();
+        for a in &reference.atoms {
+            let (Some(rt), Some(m)) = (&a.type_energy, mine.atom(&a.id)) else { continue };
+            let Some(mt) = &m.type_energy else { continue };
+            atoms += 1;
+            if rt == mt {
+                same_name += 1;
+            }
+            if props(rt) == props(mt) {
+                same_props += 1;
+            } else {
+                *confusions.entry((rt.clone(), mt.clone())).or_default() += 1;
+            }
+        }
+    }
+    let pct = |x: usize| 100.0 * x as f64 / atoms.max(1) as f64;
+    println!("{} residues, {} atoms: same Probe properties {:.2}%, same type {:.2}%", residues, atoms, pct(same_props), pct(same_name));
+    println!("hydrogens: {} in GeoStd, {} of them missing here, {} here that GeoStd lacks", h_total, h_only_reference, h_only_mine);
+    let mut worst: Vec<_> = confusions.into_iter().collect();
+    worst.sort_by(|a, b| b.1.cmp(&a.1));
+    for ((r, m), c) in worst.iter().take(25) {
+        println!("  GeoStd {:6} -> {:6} {:7} ({:?} -> {:?})", r, m, c, props(r), props(m));
+    }
+}

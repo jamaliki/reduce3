@@ -294,6 +294,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     #[cfg(feature = "refcheck")]
+    if args.len() > 2 && args[1] == "typecheck" {
+        refcheck::typecheck(&args[2]);
+        return ExitCode::SUCCESS;
+    }
+    #[cfg(feature = "refcheck")]
     if args.len() > 3 && args[1] == "ccdcheck" {
         refcheck::ccdcheck(&args[2], &args[3]);
         return ExitCode::SUCCESS;

@@ -220,6 +220,15 @@ Fixed mode carries on in these cases; compat mode stops or loses data exactly as
   near 0.87 A. Fixed mode gives bonds to hydrogen GeoStd's X-ray and neutron lengths for the parent
   element and its bond count (`src/h_distances.rs`; C-H 0.97/0.93, N-H 0.86, O-H 0.85 A for X-ray),
   so neutron runs get neutron lengths too.
+* **Atom types for those residues.** Reduce2 leaves their atoms untyped, so Probe treats them all
+  alike: no hydrogen-bond donors or acceptors, element radii, no polar-hydrogen radius. Fixed mode
+  gives them CCP4/GeoStd energy types from the CCD chemistry (element, charge, bonded hydrogens,
+  bond orders, aromatic and conjugated rings), so donors, acceptors and radii follow GeoStd. Over
+  the 47,921 residues both GeoStd and the CCD describe, the types give the same Probe properties
+  as GeoStd's for 97.6% of 2.2 million atoms (`typecheck`; much of the rest is GeoStd typing some
+  entries inconsistently). Like GeoStd, fixed mode also builds them at physiological protonation:
+  carboxylic, phosphoric and sulfonic acids lose their acidic hydrogen, which the CCD's neutral form
+  carries. The hydrogen sets then agree with GeoStd's for 99.5% of a million hydrogens.
 * **Atoms of unknown element** (element X, such as UNX in 1h0h and 4iio). Reduce2 deletes them.
   Fixed mode keeps them unchanged; they get no hydrogens and take no part in scoring.
 * **Residues no dictionary describes** (UNL, or a code missing from the CCD). Reduce2 stops

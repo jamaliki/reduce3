@@ -46,6 +46,14 @@ env/bin/python harness/dump_ccd_restraints.py --sample 600 > ccd.jsonl
 ../target/release/reduce3 ccdcheck env/lib/python3.12/site-packages/chem_data ccd.jsonl
 ```
 
-`../tools/gen_rdkit_valence.py` regenerates the RDKit valence table in `src/rdkit_valence.rs`.
+`typecheck` compares the energy types fixed mode gives CCD-built residues with GeoStd's, over
+every residue both describe:
+
+```bash
+../target/release/reduce3 typecheck env/lib/python3.12/site-packages/chem_data
+```
+
+`../tools/gen_rdkit_valence.py` regenerates the RDKit valence table in `src/rdkit_valence.rs`,
+and `../tools/gen_h_distances.py` the GeoStd X-H lengths in `src/h_distances.rs`.
 `../docs/INTERPRETATION_SPEC.md` documents the cctbx interpretation behavior that Reduce3
 reproduces.

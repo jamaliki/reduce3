@@ -834,9 +834,9 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
                         Some(id) => {
                             let ca = comp.atom(id).unwrap();
                             it.etype[a as usize] = match &ca.type_energy {
-                                // CCD-built dictionaries leave the type empty
-                                _ if comp.from_ccd => EType::Unknown,
                                 Some(t) => EType::Typed(t.clone()),
+                                // Reduce2's CCD-built dictionaries leave the type empty
+                                None if comp.from_ccd => EType::Unknown,
                                 None => EType::NoneType,
                             };
                             it.dict[a as usize] = AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*id).clone()) };

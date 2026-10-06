@@ -506,6 +506,170 @@ pub fn comp_from_ccd(text: &str, source: &Path, strict: bool) -> Option<Comp> {
     Some(comp)
 }
 
+/// An atom of a CCD entry, as the energy typer sees it.
+pub struct TypingAtom<'a> {
+    pub element: &'a str,
+    pub charge: i32,
+    pub aromatic: bool,
+    /// (neighbour, bond order: 1, 2 or 3)
+    pub bonds: Vec<(usize, u8)>,
+}
+
+/// CCP4/GeoStd energy types (`ener_lib` `_lib_atom.type`) from CCD chemistry:
+/// element, charge, aromaticity, bond orders and bonded hydrogens. The types
+/// are chosen for the properties Probe scoring reads from them (van der Waals
+/// radius and hydrogen-bond role); GeoStd's finer distinctions that do not
+/// change those (ring size, sp2 C-H subtypes) are not all made. `None` where no
+/// type fits.
+pub fn energy_types(atoms: &[TypingAtom<'_>]) -> Vec<Option<String>> {
+    let is_h = |k: usize| matches!(atoms[k].element, "H" | "D");
+    let n_h = |k: usize| atoms[k].bonds.iter().filter(|(j, _)| is_h(*j)).count();
+    let max_order = |k: usize| atoms[k].bonds.iter().map(|b| b.1).max().unwrap_or(0);
+    let doubles = |k: usize| atoms[k].bonds.iter().filter(|b| b.1 == 2).count();
+    // sp2 or aromatic: the N of an amide or an aniline is not an amine
+    let unsaturated = |k: usize| atoms[k].aromatic || max_order(k) >= 2;
+    let next_to_unsaturated = |k: usize| atoms[k].bonds.iter().any(|&(j, _)| !is_h(j) && unsaturated(j));
+    let heavy = |k: usize| atoms[k].bonds.iter().filter(|(j, _)| !is_h(*j)).count();
+    let heavy_type = |k: usize| -> Option<String> {
+        let a = &atoms[k];
+        let h = n_h(k);
+        let t = match a.element {
+            "C" => {
+                if a.aromatic {
+                    if h > 0 { "CR16" } else { "CR6" }
+                } else if max_order(k) == 3 || doubles(k) >= 2 {
+                    if h > 0 { "CSP1" } else { "CSP" }
+                } else if max_order(k) == 2 {
+                    ["C", "C1", "C2"][h.min(2)]
+                } else {
+                    ["CT", "CH1", "CH2", "CH3"][h.min(3)]
+                }
+            }
+            "N" => {
+                if a.aromatic {
+                    if h > 0 { "NR16" } else { "NR6" }
+                } else if h > 0 {
+                    if !unsaturated(k) && (a.charge > 0 || h >= 3) {
+                        ["NT1", "NT2", "NT3"][(h - 1).min(2)]
+                    } else if unsaturated(k) || next_to_unsaturated(k) {
+                        ["NH1", "NH2", "NH2"][(h - 1).min(2)]
+                    } else {
+                        ["NT1", "NT2", "NT3"][(h - 1).min(2)]
+                    }
+                } else if max_order(k) >= 2 {
+                    if heavy(k) <= 1 { "NS" } else { "N" }
+                } else {
+                    "NT"
+                }
+            }
+            "O" => {
+                if h > 0 {
+                    "OH1"
+                } else if max_order(k) == 2 {
+                    "O"
+                } else if a.bonds.iter().any(|&(j, _)| atoms[j].element == "P") {
+                    "OP"
+                } else if a.charge < 0 {
+                    "OC"
+                } else if heavy(k) >= 2 {
+                    "OS"
+                } else {
+                    "O"
+                }
+            }
+            "S" => {
+                if h > 0 {
+                    "SH1"
+                } else {
+                    match heavy(k) {
+                        1 => "S1",
+                        2 => "S2",
+                        3 => "S3",
+                        _ => "S",
+                    }
+                }
+            }
+            e => return Some(e.to_string()),
+        };
+        Some(t.to_string())
+    };
+    (0..atoms.len())
+        .map(|k| {
+            if !is_h(k) {
+                return heavy_type(k);
+            }
+            let Some(&(p, _)) = atoms[k].bonds.iter().find(|(j, _)| !is_h(*j)) else {
+                return Some("H".into());
+            };
+            let parent = &atoms[p];
+            let ph = n_h(p);
+            let t = match parent.element {
+                "C" if parent.aromatic => "HCR6",
+                "C" => ["HCH1", "HCH1", "HCH2", "HCH3"][ph.min(3)],
+                "N" if parent.aromatic => "HNR6",
+                "N" => match heavy_type(p).as_deref() {
+                    Some("NT3") => "HNT3",
+                    Some("NT2") => "HNT2",
+                    Some("NT1") => "HNT1",
+                    _ if ph >= 2 => "HNH2",
+                    _ => "HNH1",
+                },
+                "O" => "HOH1",
+                "S" => "HSH1",
+                _ => "H",
+            };
+            Some(t.to_string())
+        })
+        .collect()
+}
+
+/// Atoms on small rings (5 to 7 members) whose members can all be conjugated:
+/// aromatic in the CCD, or with a double bond, or N, O or S (whose lone pair
+/// joins the ring). GeoStd types the carbons and nitrogens of such rings as
+/// aromatic, including pyridones and uracil-like rings the CCD does not flag.
+/// (A strict Hueckel 4n+2 test agrees less with GeoStd.)
+fn conjugated_ring_atoms(atoms: &[TypingAtom<'_>]) -> Vec<bool> {
+    let n = atoms.len();
+    let heavy = |k: usize| !matches!(atoms[k].element, "H" | "D");
+    let can_conjugate = |k: usize| {
+        let a = &atoms[k];
+        a.aromatic || a.bonds.iter().any(|b| b.1 >= 2) || matches!(a.element, "N" | "O" | "S")
+    };
+    // simple cycles through `start` over larger indices only, so each ring is
+    // found from its smallest atom
+    fn walk(atoms: &[TypingAtom<'_>], heavy: &dyn Fn(usize) -> bool, start: usize, path: &mut Vec<usize>, rings: &mut Vec<Vec<usize>>) {
+        let last = *path.last().unwrap_or(&start);
+        for &(j, _) in &atoms[last].bonds {
+            if !heavy(j) {
+                continue;
+            }
+            if j == start && path.len() >= 3 {
+                rings.push(path.clone());
+            } else if j > start && !path.contains(&j) && path.len() < 7 {
+                path.push(j);
+                walk(atoms, heavy, start, path, rings);
+                path.pop();
+            }
+        }
+    }
+    let mut rings: Vec<Vec<usize>> = Vec::new();
+    if n < 400 {
+        for start in (0..n).filter(|&k| heavy(k)) {
+            let mut path = vec![start];
+            walk(atoms, &heavy, start, &mut path, &mut rings);
+        }
+    }
+    let mut out = vec![false; n];
+    for ring in rings {
+        if ring.len() >= 5 && ring.iter().all(|&k| can_conjugate(k)) && ring.iter().any(|&k| atoms[k].element == "C") {
+            for k in ring {
+                out[k] = true;
+            }
+        }
+    }
+    out
+}
+
 fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
     let doc = cif::parse(text);
     let block = doc.blocks.first()?;
@@ -519,6 +683,7 @@ fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
         Some([v[0], v[1], v[2]])
     };
     let ids: Vec<String> = (0..n).map(|r| atoms.get(r, c_id).to_string()).collect();
+    let elements: Vec<String> = (0..n).map(|r| atoms.get(r, c_type).to_ascii_uppercase()).collect();
     let pos: Vec<Option<P3>> = (0..n)
         .map(|r| {
             xyz(r, ["pdbx_model_Cartn_x_ideal", "pdbx_model_Cartn_y_ideal", "pdbx_model_Cartn_z_ideal"])
@@ -529,6 +694,65 @@ fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
         return None;
     }
     let index_of = |name: &str| -> Option<usize> { ids.iter().rposition(|x| x == name) };
+
+    // the whole CCD connectivity
+    let (c_arom, c_charge) = (col("pdbx_aromatic_flag"), col("charge"));
+    let mut typing: Vec<TypingAtom<'_>> = (0..n)
+        .map(|r| TypingAtom {
+            element: elements[r].as_str(),
+            charge: c_charge.and_then(|c| atoms.get(r, c).trim().parse().ok()).unwrap_or(0),
+            aromatic: c_arom.is_some_and(|c| atoms.get(r, c).eq_ignore_ascii_case("Y")),
+            bonds: Vec::new(),
+        })
+        .collect();
+    let mut bond_rows: Vec<(usize, usize, String)> = Vec::new();
+    if let Some(bonds) = block.category("_chem_comp_bond") {
+        let (b1, b2, bo) = (bonds.col("atom_id_1"), bonds.col("atom_id_2"), bonds.col("value_order"));
+        for r in 0..bonds.nrows() {
+            let field = |c: Option<usize>| c.map_or("?", |c| bonds.get(r, c));
+            let (Some(i), Some(j)) = (index_of(field(b1)), index_of(field(b2))) else { continue };
+            if i == j || typing[i].bonds.iter().any(|b| b.0 == j) {
+                continue;
+            }
+            let order = match field(bo) {
+                "DOUB" => 2,
+                "TRIP" => 3,
+                _ => 1,
+            };
+            typing[i].bonds.push((j, order));
+            typing[j].bonds.push((i, order));
+            bond_rows.push((i, j, field(bo).to_string()));
+        }
+    }
+    let is_h = |k: usize| matches!(elements[k].as_str(), "H" | "D");
+
+    // physiological protonation, as GeoStd has it: the CCD's neutral oxo acids
+    // (carboxylic, phosphoric, sulfonic) lose their acidic hydrogens
+    let mut dropped = vec![false; n];
+    for h in 0..n {
+        if !is_h(h) || typing[h].bonds.len() != 1 {
+            continue;
+        }
+        let o = typing[h].bonds[0].0;
+        if elements[o] != "O" {
+            continue;
+        }
+        let heavy: Vec<usize> = typing[o].bonds.iter().map(|b| b.0).filter(|&k| !is_h(k)).collect();
+        let [x] = heavy[..] else { continue };
+        let oxo = typing[x].bonds.iter().any(|&(y, order)| y != o && order == 2 && matches!(elements[y].as_str(), "O" | "S"));
+        if oxo && matches!(elements[x].as_str(), "C" | "P" | "S") {
+            dropped[h] = true;
+            typing[o].charge -= 1;
+        }
+    }
+    for a in typing.iter_mut() {
+        a.bonds.retain(|b| !dropped[b.0]);
+    }
+    for (k, ring) in conjugated_ring_atoms(&typing).into_iter().enumerate() {
+        typing[k].aromatic |= ring;
+    }
+    let types = energy_types(&typing);
+
     let mut comp = Comp {
         id: cc.get_tag(0, "id").unwrap_or("").to_string(),
         group: cc.get_tag(0, "type").unwrap_or("").to_string(),
@@ -536,30 +760,20 @@ fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
         from_ccd: true,
         ..Default::default()
     };
-    for r in 0..n {
-        comp.atoms.push(CompAtom {
-            id: ids[r].clone(),
-            type_symbol: atoms.get(r, c_type).to_ascii_uppercase(),
-            type_energy: None,
-        });
+    for r in (0..n).filter(|&r| !dropped[r]) {
+        comp.atoms.push(CompAtom { id: ids[r].clone(), type_symbol: elements[r].clone(), type_energy: types[r].clone() });
     }
     let mut nbrs: Vec<Vec<usize>> = vec![Vec::new(); n];
     let flat: Vec<P3> = pos.iter().map(|p| p.unwrap_or([0.0; 3])).collect();
     let mut pairs: Vec<(usize, usize, String)> = Vec::new();
-    if let Some(bonds) = block.category("_chem_comp_bond") {
-        let (b1, b2, bo) = (bonds.col("atom_id_1"), bonds.col("atom_id_2"), bonds.col("value_order"));
-        for r in 0..bonds.nrows() {
-            let field = |c: Option<usize>| c.map_or("?", |c| bonds.get(r, c));
-            let (Some(i), Some(j)) = (index_of(field(b1)), index_of(field(b2))) else { continue };
-            if i == j || nbrs[i].contains(&j) || pos[i].is_none() || pos[j].is_none() {
-                continue;
-            }
-            nbrs[i].push(j);
-            nbrs[j].push(i);
-            pairs.push((i, j, field(bo).to_string()));
+    for (i, j, order) in bond_rows {
+        if dropped[i] || dropped[j] || pos[i].is_none() || pos[j].is_none() {
+            continue;
         }
+        nbrs[i].push(j);
+        nbrs[j].push(i);
+        pairs.push((i, j, order));
     }
-    let is_h = |k: usize| matches!(comp.atoms[k].type_symbol.as_str(), "H" | "D");
     for (i, j, order) in pairs {
         let length = bond_length(&flat, i, j);
         let (xray, neutron) = match (is_h(i), is_h(j)) {
@@ -568,9 +782,9 @@ fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
                 // bonds to metals (an arene on Ru, say) do not change the hybridization
                 let degree = nbrs[parent]
                     .iter()
-                    .filter(|&&k| atomic_number(&comp.atoms[k].type_symbol).is_none_or(|z| !is_metal(z)))
+                    .filter(|&&k| atomic_number(&elements[k]).is_none_or(|z| !is_metal(z)))
                     .count();
-                crate::h_distances::lookup(&comp.atoms[parent].type_symbol, degree)
+                crate::h_distances::lookup(&elements[parent], degree)
                     .unwrap_or((rounded(length * 0.9, 3), rounded(length, 3)))
             }
             _ => (rounded(length, 3), rounded(length, 3)),
@@ -663,6 +877,38 @@ mod tests {
         // C-H takes GeoStd's length for a C with two bonds, not 0.9 x the CCD's 1.072 A
         assert_eq!((c.bonds[2].value_dist, c.bonds[2].value_dist_neutron), (Some(0.913), Some(1.066)));
         assert_eq!(c.bonds[0].value_dist, Some(2.2));
+    }
+
+    #[test]
+    fn fixed_mode_types_atoms_and_deprotonates_acids() {
+        // 4-hydroxybenzoic acid with a methylamine: aromatic ring, phenol, carboxylic
+        // acid (its H goes), and a secondary amine
+        let atoms = "TST C1 C 0 0.000 1.400 0\nTST C2 C 0 1.212 0.700 0\nTST C3 C 0 1.212 -0.700 0\n\
+            TST C4 C 0 0.000 -1.400 0\nTST C5 C 0 -1.212 -0.700 0\nTST C6 C 0 -1.212 0.700 0\n\
+            TST O4 O 0 0.000 -2.760 0\nTST HO4 H 0 0.900 -3.100 0\n\
+            TST C7 C 0 0.000 2.900 0\nTST O1 O 0 1.100 3.500 0\nTST O2 O 0 -1.100 3.500 0\nTST HO2 H 0 -1.000 4.450 0\n\
+            TST H2 H 0 2.150 1.240 0\nTST N1 N 0 2.500 -1.400 0\nTST HN1 H 0 2.500 -2.410 0\nTST C8 C 0 3.800 -0.700 0";
+        let arom = |a: &str, b: &str, o: &str| format!("TST {} {} {}", a, b, o);
+        let bonds = [
+            arom("C1", "C2", "DOUB"), arom("C2", "C3", "SING"), arom("C3", "C4", "DOUB"), arom("C4", "C5", "SING"),
+            arom("C5", "C6", "DOUB"), arom("C6", "C1", "SING"), arom("C4", "O4", "SING"), arom("O4", "HO4", "SING"),
+            arom("C1", "C7", "SING"), arom("C7", "O1", "DOUB"), arom("C7", "O2", "SING"), arom("O2", "HO2", "SING"),
+            arom("C2", "H2", "SING"), arom("C3", "N1", "SING"), arom("N1", "HN1", "SING"), arom("N1", "C8", "SING"),
+        ]
+        .join("\n");
+        let c = comp_from_ccd(&ccd(atoms, &bonds), Path::new("x"), false).unwrap();
+        let t = |id: &str| c.atom(id).and_then(|a| a.type_energy.clone());
+        assert_eq!(t("HO2"), None, "the carboxylic acid H is dropped");
+        assert!(c.atom("HO2").is_none() && c.bonds.iter().all(|b| b.a1 != "HO2" && b.a2 != "HO2"));
+        for (id, ty) in [
+            ("C1", "CR6"), ("C2", "CR16"), ("O4", "OH1"), ("HO4", "HOH1"), ("H2", "HCR6"),
+            ("C7", "C"), ("O1", "O"), ("O2", "OC"), ("N1", "NH1"), ("HN1", "HNH1"), ("C8", "CT"),
+        ] {
+            assert_eq!(t(id).as_deref(), Some(ty), "{}", id);
+        }
+        // Reduce2's builder types nothing and keeps every hydrogen
+        let strict = comp_from_ccd(&ccd(atoms, &bonds), Path::new("x"), true).unwrap();
+        assert!(strict.atoms.iter().all(|a| a.type_energy.is_none()) && strict.atom("HO2").is_some());
     }
 
     #[test]
