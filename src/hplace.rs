@@ -39,6 +39,9 @@ pub struct Placed {
     pub dict: Vec<interp::AtomDictInfo>,
     pub no_h_placed: Vec<String>,
     pub site_labels_no_para: Vec<String>,
+    /// H whose third neighbor lies on the parent bond axis (compat mode,
+    /// where Reduce2 divides by zero on them).
+    pub axial_reference: Vec<String>,
     pub removed_on_links: Vec<(String, String)>,
     pub n_h_initial: usize,
     pub n_h_final: usize,
@@ -712,6 +715,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         rg_of: &rg_of,
         expected_heavy: &expected_heavy,
         dictionary_nh2_torsion: !p.compat,
+        reroute_axial_reference: !p.compat,
     };
     crate::model::mem_checkpoint("placement: interpreted");
     let rr = riding::riding(&it, &mut sites, &ra, true);
@@ -720,6 +724,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         log.push_str(msg);
         log.push('\n');
     }
+    let axial_reference: Vec<String> = rr.axial_reference.iter().map(|&h| label(st, w.flat.path[h as usize])).collect();
     let mut coefs = rr.coef;
     w.flat.pos = sites;
 
@@ -846,6 +851,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         dict,
         no_h_placed: uniq_missing,
         site_labels_no_para,
+        axial_reference,
         removed_on_links,
         n_h_initial,
         n_h_final,

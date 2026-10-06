@@ -67,6 +67,12 @@ fn res_name_and_id(st: &Structure, p: crate::model::AtomPath) -> String {
 }
 
 /// `_RemoveModelsExceptIndex` followed by taking the first remaining model.
+/// Reduce2's `process_1_neighbor` normalizes a zero vector when the atom that
+/// orients a hydrogen lies on the parent bond axis (compat mode stops there).
+fn axial_reference_error(h: &str) -> String {
+    format!("float division by zero: the dihedral reference of hydrogen {} lies on its parent bond axis", h.trim())
+}
+
 fn select_model(st: &mut Structure, model_id: usize, compat: bool) -> Result<(), String> {
     if model_id == 0 {
         return Err("Model ID must be >=1 if specified (None means all models)".into());
@@ -148,6 +154,9 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                 };
                 let placed = hplace::place_hydrogens(&mut st, ml, &hp);
                 log += &placed.log;
+                if let Some(h) = placed.axial_reference.first() {
+                    return Err(axial_reference_error(h));
+                }
                 if !placed.no_h_placed.is_empty() {
                     let mut bad: Vec<String> = placed.no_h_placed.clone();
                     bad.dedup();
@@ -300,8 +309,13 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
                 rg_of: &rg_of,
                 expected_heavy: &expected_heavy,
                 dictionary_nh2_torsion: !p.compat,
+                reroute_axial_reference: !p.compat,
             };
             let rr = crate::riding::riding(&it, &mut sites, &ra, false);
+            if let Some(&h) = rr.axial_reference.first() {
+                let a = st.atom(flat.path[h as usize]);
+                return Err(axial_reference_error(a.name.trim()));
+            }
             for (k, pth) in flat.path.iter().enumerate() {
                 st.atom_mut(*pth).xyz = sites[k];
             }

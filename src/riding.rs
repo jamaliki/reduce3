@@ -84,12 +84,19 @@ pub struct RidingAtoms<'a> {
     /// and the temporary position then decides which H gets which name
     /// (HD21/HD22 come out swapped for a few percent of amides).
     pub dictionary_nh2_torsion: bool,
+    /// Orient a one-neighbor group by another atom when its third neighbor lies
+    /// on the parent bond axis (a ligand on a crystallographic two-fold, say).
+    /// Reduce2 divides by zero there.
+    pub reroute_axial_reference: bool,
 }
 
 pub struct RidingResult {
     pub coef: Vec<Option<RidingCoef>>,
     /// H that could not be parameterized.
     pub unparameterized: Vec<u32>,
+    /// H whose third neighbor lies on the parent bond axis, where Reduce2
+    /// divides by zero (left empty when the reference is rerouted).
+    pub axial_reference: Vec<u32>,
     pub warnings: Vec<String>,
 }
 
@@ -433,7 +440,12 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         }
     }
 
+    if at.reroute_axial_reference {
+        reroute_axial_references(at, &fsc0, sites, &mut conn);
+    }
+
     // ---------------- parameterization
+    let mut axial_reference: Vec<u32> = Vec::new();
     let mut coef: Vec<Option<RidingCoef>> = vec![None; n];
     let mut unk: Vec<u32> = Vec::new();
     for ih in 0..n {
@@ -450,9 +462,9 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         } else if nb.nnonh == 3 && nb.nh == 0 {
             process_3(&nb, sites, &mut coef)
         } else if nb.nnonh == 1 && (nb.nh == 0 || nb.nh == 2) {
-            process_1(&nb, &conn, sites, &mut coef, use_ideal_dihedral)
+            process_1(&nb, &conn, sites, &mut coef, use_ideal_dihedral, &mut axial_reference)
         } else if nb.nnonh == 1 && nb.nh == 1 {
-            process_1_arg(&nb, &conn, sites, &mut coef)
+            process_1_arg(&nb, &conn, sites, &mut coef, &mut axial_reference)
         } else {
             Err(())
         };
@@ -470,7 +482,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
     }
     let unparameterized: Vec<u32> = (0..n as u32).filter(|&k| at.is_h[k as usize] && coef[k as usize].is_none()).collect();
     let _ = unk;
-    RidingResult { coef, unparameterized, warnings }
+    RidingResult { coef, unparameterized, axial_reference, warnings }
 }
 
 fn parent_lost_heavy_neighbor(at: &RidingAtoms, fsc0: &[Vec<u32>], parent: u32) -> bool {
@@ -494,7 +506,63 @@ fn superposed(a: Vec3, b: Vec3) -> bool {
     (a - b).length() < 0.001
 }
 
-fn process_1(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>], use_ideal_dihedral: bool) -> Result<(), ()> {
+/// Distance of `rb1` from the line through `r0` and `r1`, in Python's
+/// arithmetic order (`process_1_neighbor`); Reduce2 normalizes this vector.
+fn off_axis(r0: Vec3, r1: Vec3, rb1: Vec3) -> f64 {
+    let u1 = (r0 - r1).normalize();
+    let rb10 = rb1 - r1;
+    (rb10 - u1 * rb10.dot(u1)).length()
+}
+
+/// A third neighbor closer than this to the parent bond axis does not orient
+/// the group: below the coordinate precision of a model file, its direction is
+/// rounding noise.
+const AXIS_TOLERANCE: f64 = 0.001;
+
+/// Give each one-neighbor group whose third neighbor lies on the parent bond
+/// axis another reference off the axis: a further heavy neighbor of the first
+/// neighbor when there is one (so the movers can name it too), else the
+/// nearest heavy atom off the axis. The ideal torsion is kept; it is undefined
+/// about the axial atom, and the groups this touches are rotatable.
+fn reroute_axial_references(at: &RidingAtoms, fsc0: &[Vec<u32>], sites: &[Vec3], conn: &mut [Option<Nb>]) {
+    for ih in 0..conn.len() {
+        let Some(nb) = conn[ih].as_ref() else { continue };
+        if !nb.valid || nb.nnonh != 1 {
+            continue;
+        }
+        let (Some((a0, _)), Some(a1), Some(b1)) = (nb.a0, nb.a[0], nb.b1_iseq) else { continue };
+        let a1 = a1.iseq;
+        let (r0, r1) = (sites[a0 as usize], sites[a1 as usize]);
+        if superposed(r0, r1) || off_axis(r0, r1, sites[b1 as usize]) >= AXIS_TOLERANCE {
+            continue;
+        }
+        let altloc = &at.altloc[a0 as usize];
+        let usable = |c: u32| {
+            let calt = &at.altloc[c as usize];
+            c != a0
+                && c != a1
+                && !at.is_h[c as usize]
+                && (altloc.is_empty() || calt.is_empty() || calt == altloc)
+                && off_axis(r0, r1, sites[c as usize]) >= AXIS_TOLERANCE
+        };
+        let bonded = fsc0[a1 as usize].iter().copied().find(|&c| usable(c));
+        let nearest = || {
+            (0..sites.len() as u32)
+                .filter(|&c| usable(c))
+                .min_by(|&x, &y| (sites[x as usize] - r1).length().total_cmp(&(sites[y as usize] - r1).length()))
+        };
+        conn[ih].as_mut().unwrap().b1_iseq = bonded.or_else(nearest);
+    }
+}
+
+fn process_1(
+    nb: &Nb,
+    conn: &[Option<Nb>],
+    sites: &[Vec3],
+    coef: &mut [Option<RidingCoef>],
+    use_ideal_dihedral: bool,
+    axial: &mut Vec<u32>,
+) -> Result<(), ()> {
     let mut nbs = nb.clone();
     if nb.nh == 2 {
         let (h1, h2) = (nb.h[0].unwrap().iseq, nb.h[1].unwrap().iseq);
@@ -514,6 +582,10 @@ fn process_1(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<Ri
     let i_b1 = nbs.b1_iseq.ok_or(())?;
     let (rh, r0, r1) = (sites[ih as usize], sites[i_a0 as usize], sites[a1.iseq as usize]);
     if superposed(rh, r0) || superposed(r1, r0) {
+        return Err(());
+    }
+    if off_axis(r0, r1, sites[i_b1 as usize]) == 0.0 {
+        axial.push(ih);
         return Err(());
     }
     let dihedral = dihedral_rad_cpp(sites[ih as usize], sites[i_a0 as usize], sites[a1.iseq as usize], sites[i_b1 as usize]);
@@ -565,7 +637,13 @@ fn process_1(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<Ri
     Ok(())
 }
 
-fn process_1_arg(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>]) -> Result<(), ()> {
+fn process_1_arg(
+    nb: &Nb,
+    conn: &[Option<Nb>],
+    sites: &[Vec3],
+    coef: &mut [Option<RidingCoef>],
+    axial: &mut Vec<u32>,
+) -> Result<(), ()> {
     let ih = nb.ih;
     let h1 = nb.h[0].unwrap();
     let (i_a0, disth) = nb.a0.ok_or(())?;
@@ -584,6 +662,10 @@ fn process_1_arg(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Optio
     }
     let (rh, r0, r1) = (sites[ih as usize], sites[i_a0 as usize], sites[a1.iseq as usize]);
     if superposed(rh, r0) || superposed(r1, r0) {
+        return Err(());
+    }
+    if off_axis(r0, r1, sites[i_b1 as usize]) == 0.0 {
+        axial.push(ih);
         return Err(());
     }
     let alpha = a1.angle.to_radians();
