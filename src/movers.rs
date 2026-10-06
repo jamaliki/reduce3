@@ -271,6 +271,21 @@ pub struct RidingRef {
 
 /// `dihedralChoicesForRotatableHydrogens`: the hydrogen whose riding `n` is 0
 /// and the potential third-neighbor named by its `a2` (last match wins).
+/// With `fallback`, a group whose hydrogens name none of the potentials (a
+/// methanol methyl, whose dictionary has no torsion and no heavy third
+/// neighbor) is measured from the first pair that defines a dihedral.
+fn dihedral_choice_or_any(w: &World, hydrogens: &[u32], potentials: &[u32], partner: u32, atom: u32, fallback: bool) -> MResult<(u32, u32)> {
+    let named = dihedral_choice(w, hydrogens, potentials);
+    if named.is_ok() || !fallback {
+        return named;
+    }
+    hydrogens
+        .iter()
+        .flat_map(|&h| potentials.iter().map(move |&p| (h, p)))
+        .find(|&(h, p)| dihedral_of(w, h, partner, atom, p).is_ok())
+        .ok_or_else(|| named.unwrap_err())
+}
+
 fn dihedral_choice(w: &World, hydrogens: &[u32], potentials: &[u32]) -> MResult<(u32, u32)> {
     let mut res = None;
     for &h in hydrogens {
@@ -294,6 +309,9 @@ fn dihedral_of(w: &World, a: u32, b: u32, c: u32, d: u32) -> MResult<f64> {
 
 pub struct SingleHOptions {
     pub circular_angle_spacing: bool,
+    /// Rotate a hydrogen whose partner has any number of other bonds
+    /// (S-OH, P-OH, a metal oxo-hydroxide); Reduce2 needs two or three.
+    pub any_partner_valence: bool,
 }
 
 /// `MoverSingleHydrogenRotator`.
@@ -321,7 +339,8 @@ pub fn single_hydrogen_rotator(
         partner = partners[1];
     }
     let friends: Vec<u32> = w.bonded[partner as usize].iter().copied().filter(|&b| b != neighbor).collect();
-    if friends.len() != 2 && friends.len() != 3 {
+    let valence_ok = if opts.any_partner_valence { !friends.is_empty() } else { friends.len() == 2 || friends.len() == 3 };
+    if !valence_ok {
         return Err(format!(
             "MoverSingleHydrogenRotator(): Atom's bonded neighbor's neighbor does not have 2-3 other bonds it has {}",
             friends.len()
@@ -330,7 +349,7 @@ pub fn single_hydrogen_rotator(
     let normal = (w.pos[neighbor as usize] - w.pos[partner as usize]).normalize();
     let origin = w.pos[partner as usize];
     let atoms = vec![atom, neighbor];
-    let (conv_h, conv_friend) = dihedral_choice(w, &atoms, &friends)?;
+    let (conv_h, conv_friend) = dihedral_choice_or_any(w, &atoms, &friends, partner, neighbor, opts.any_partner_valence)?;
     let dihedral = dihedral_of(w, conv_h, partner, neighbor, conv_friend)?;
     let mut m = build_rotator(
         w,
@@ -430,15 +449,17 @@ fn three_h_group(w: &World, atom: u32, elem: &str, who: &str) -> MResult<(Vec<u3
 }
 
 /// `MoverNH3Rotator`.
-pub fn nh3_rotator(w: &mut World, atom: u32) -> MResult<Mover> {
+/// With `any_partner_valence`, the partner may have any number of other bonds
+/// (an ammine on a two-coordinate metal, say); Reduce2 needs at least three.
+pub fn nh3_rotator(w: &mut World, atom: u32, any_partner_valence: bool) -> MResult<Mover> {
     let (hydrogens, partner, friends) = three_h_group(w, atom, "N", "MoverNH3Rotator")?;
-    if friends.len() < 3 {
+    if friends.is_empty() || (friends.len() < 3 && !any_partner_valence) {
         return Err("MoverNH3Rotator(): Partner does not have at least three bonded friends".into());
     }
     let preference: Option<fn(f64) -> f64> = if friends.len() == 3 { Some(pref_120) } else { None };
     let normal = (w.pos[atom as usize] - w.pos[partner as usize]).normalize();
     let origin = w.pos[partner as usize];
-    let (conv_h, conv_friend) = dihedral_choice(w, &hydrogens, &friends)?;
+    let (conv_h, conv_friend) = dihedral_choice_or_any(w, &hydrogens, &friends, partner, atom, any_partner_valence)?;
     let dihedral = dihedral_of(w, conv_h, partner, atom, conv_friend)?;
     let mut atoms = vec![atom];
     atoms.extend(&hydrogens);
@@ -462,14 +483,14 @@ pub fn nh3_rotator(w: &mut World, atom: u32) -> MResult<Mover> {
 }
 
 /// `MoverAromaticMethylRotator`.
-pub fn aromatic_methyl_rotator(w: &mut World, atom: u32) -> MResult<Mover> {
+pub fn aromatic_methyl_rotator(w: &mut World, atom: u32, any_reference: bool) -> MResult<Mover> {
     let (hydrogens, partner, friends) = three_h_group(w, atom, "C", "MoverAromaticMethylRotator")?;
     if friends.len() != 2 {
         return Err("MoverAromaticMethylRotator(): Partner does not have two bonded friends".into());
     }
     let normal = (w.pos[atom as usize] - w.pos[partner as usize]).normalize();
     let origin = w.pos[partner as usize];
-    let (conv_h, conv_friend) = dihedral_choice(w, &hydrogens, &friends)?;
+    let (conv_h, conv_friend) = dihedral_choice_or_any(w, &hydrogens, &friends, partner, atom, any_reference)?;
     let dihedral = dihedral_of(w, conv_h, partner, atom, conv_friend)?;
     let mut atoms = vec![atom];
     atoms.extend(&hydrogens);
@@ -494,14 +515,14 @@ pub fn aromatic_methyl_rotator(w: &mut World, atom: u32) -> MResult<Mover> {
 
 /// `MoverTetrahedralMethylRotator`: only its side effect (staggering the
 /// hydrogens) is used by Reduce2.
-pub fn stagger_tetrahedral_methyl(w: &mut World, atom: u32) -> MResult<()> {
+pub fn stagger_tetrahedral_methyl(w: &mut World, atom: u32, any_reference: bool) -> MResult<()> {
     let (hydrogens, partner, friends) = three_h_group(w, atom, "C", "MoverTetrahedralMethylRotator")?;
     if friends.len() != 1 && friends.len() != 3 {
         return Err("MoverTetrahedralMethylRotator(): Partner does not have one or three bonded friends".into());
     }
     let normal = (w.pos[atom as usize] - w.pos[partner as usize]).normalize();
     let origin = w.pos[partner as usize];
-    let (conv_h, conv_friend) = dihedral_choice(w, &hydrogens, &friends)?;
+    let (conv_h, conv_friend) = dihedral_choice_or_any(w, &hydrogens, &friends, partner, atom, any_reference)?;
     let dihedral = dihedral_of(w, conv_h, partner, atom, conv_friend)?;
     let mut atoms = vec![atom];
     atoms.extend(&hydrogens);

@@ -895,6 +895,7 @@ pub fn optimize_debug(
                 }
             }
             first = false;
+            let all_bonds = if p.compat { None } else { Some(keep_bonds_within(w, conf_atoms)) };
             let dels = run_one(w, p, mi.report_model, alt, conf_atoms.clone(), rotatable_h, &flip_states, n_models, &mut out, debug.as_deref_mut());
             if p.compat {
                 model_deletes = dels;
@@ -908,6 +909,9 @@ pub fn optimize_debug(
                 model_deletes.extend(dels);
             }
             w.clear_phantoms();
+            if let Some(bonds) = all_bonds {
+                w.bonded = bonds;
+            }
         }
         if p.compat {
             all_deletes = model_deletes;
@@ -931,6 +935,26 @@ pub fn optimize_debug(
     d.sort_unstable();
     out.hydrogens_to_delete = d;
     out
+}
+
+/// Limit the bonded-neighbor lists to one conformer and return the full
+/// lists: a neighbor outside the conformer is dropped when the conformer has
+/// its own alternate of that atom. Reduce2 keeps every alternate's neighbors,
+/// so a CB shared by two OG alternates seems to have six bonds and its OH gets
+/// no rotator (nor do the methyls of an alternate threonine or valine, or the
+/// ring of a histidine split at CG). A neighbor with no alternate in the
+/// conformer stays (an HG kept in the main conformation of a serine whose only
+/// OG is labeled A).
+fn keep_bonds_within(w: &mut World, conf_atoms: &[u32]) -> Vec<Vec<u32>> {
+    let mut inside = vec![false; w.len()];
+    let mut present: FxHashSet<(u32, &str)> = FxHashSet::default();
+    for &a in conf_atoms {
+        inside[a as usize] = true;
+        present.insert((w.labels[a as usize].rg, w.labels[a as usize].name.as_str()));
+    }
+    let replaced = |m: u32| !inside[m as usize] && present.contains(&(w.labels[m as usize].rg, w.labels[m as usize].name.as_str()));
+    let within: Vec<Vec<u32>> = w.bonded.iter().map(|l| l.iter().copied().filter(|&m| !replaced(m)).collect()).collect();
+    std::mem::replace(&mut w.bonded, within)
 }
 
 /// Phantom hydrogens for a water oxygen (`getPhantomHydrogensFor`).
@@ -1557,14 +1581,36 @@ struct CliqueResult {
 /// in the same order as `score_atom`, so the entries are the same sums, added
 /// in a different order. Returns the factors and the numbers of dot groups
 /// scored and of full atom scores they stand for.
-fn atom_factors_dotwise(ctx: &Ctx, comp: &[u32], doms: &[usize], i: usize, slot: usize) -> (Vec<Factor>, usize, usize) {
+/// Largest number of joint states of the other Movers one group of an atom's
+/// dots is scored over, and largest table variable elimination may build. A
+/// clique past either is optimized by coordinate ascent instead.
+const DOT_GROUP_STATES_LIMIT: usize = 1 << 17;
+/// Largest number of dot scorings (dots times joint states) one atom's factors
+/// may take; past it the clique is optimized by coordinate ascent.
+const ATOM_DOT_WORK_LIMIT: usize = 1 << 23;
+const ELIMINATION_TABLE_LIMIT: usize = 1 << 22;
+
+/// The atom's score factors, or None when a group of its dots depends on more
+/// joint states than `DOT_GROUP_STATES_LIMIT`.
+fn atom_factors_dotwise(
+    ctx: &Ctx,
+    comp: &[u32],
+    doms: &[usize],
+    i: usize,
+    slot: usize,
+    abandoned: &std::sync::atomic::AtomicBool,
+) -> Option<(Vec<Factor>, usize, usize)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if abandoned.load(Relaxed) {
+        return None;
+    }
     let p = ctx.p;
     let w = ctx.w;
     let m = comp[i];
     let mv = &ctx.movers[m as usize];
     let a = mv.atoms[slot];
     if w.occ[a as usize] < p.min_occupancy {
-        return (Vec::new(), 0, 0);
+        return Some((Vec::new(), 0, 0));
     }
     let sc = &ctx.scorer;
     let pr = p.probe.probe_radius;
@@ -1603,6 +1649,7 @@ fn atom_factors_dotwise(ctx: &Ctx, comp: &[u32], doms: &[usize], i: usize, slot:
     };
     let mut st = CliqueState { movers: comp, cfg: vec![Cfg::Coarse(0); comp.len()] };
     let (mut evaluated, mut stand_for) = (0usize, 0usize);
+    let mut dot_work = 0usize;
     for own in 0..doms[i] {
         let own_cfg = Cfg::Coarse(own as u16);
         if ctx.mover_atom_deleted(m, slot, own_cfg) {
@@ -1755,7 +1802,13 @@ fn atom_factors_dotwise(ctx: &Ctx, comp: &[u32], doms: &[usize], i: usize, slot:
             let size: usize = dims.iter().product();
             let ks: Vec<usize> = dep.iter().map(|&o| kidx(o)).collect();
             let ddims: Vec<usize> = dep.iter().map(|&o| doms[o]).collect();
-            let ncombo: usize = ddims.iter().product();
+            let ncombo: usize = ddims.iter().fold(1usize, |a, &b| a.saturating_mul(b));
+            dot_work = dot_work.saturating_add(ncombo.saturating_mul(dots.len()));
+            if ncombo > DOT_GROUP_STATES_LIMIT || dot_work > ATOM_DOT_WORK_LIMIT || abandoned.load(Relaxed) {
+                // one atom past the budget settles it for the whole clique
+                abandoned.store(true, Relaxed);
+                return None;
+            }
             let mut sv = vec![0usize; dep.len()];
             let mut vals = vec![0.0f64; ncombo];
             for (combo, val) in vals.iter_mut().enumerate() {
@@ -1815,7 +1868,7 @@ fn atom_factors_dotwise(ctx: &Ctx, comp: &[u32], doms: &[usize], i: usize, slot:
                 t[idx] = val;
             }
         }
-        stand_for += others.iter().map(|&o| doms[o]).product::<usize>();
+        stand_for = stand_for.saturating_add(others.iter().fold(1usize, |a, &o| a.saturating_mul(doms[o])));
     }
     let mut out: Vec<(Vec<usize>, Vec<f64>)> = tables.into_iter().collect();
     out.sort_by(|x, y| x.0.cmp(&y.0));
@@ -1827,7 +1880,7 @@ fn atom_factors_dotwise(ctx: &Ctx, comp: &[u32], doms: &[usize], i: usize, slot:
             Factor { scope, dims, table }
         })
         .collect();
-    (factors, evaluated, stand_for.saturating_sub(evaluated))
+    Some((factors, evaluated, stand_for.saturating_sub(evaluated)))
 }
 
 /// The score table of one moving atom over the states of its own Mover and
@@ -1957,6 +2010,167 @@ fn atom_factor(ctx: &Ctx, comp: &[u32], doms: &[usize], i: usize, slot: usize) -
     (Factor { scope, dims, table }, calculated, cached)
 }
 
+/// Largest table `variable_elimination` builds for these factor scopes (the
+/// same greedy order, without the tables).
+fn largest_elimination_table(nvars: usize, doms: &[usize], mut scopes: Vec<Vec<usize>>) -> usize {
+    let mut eliminated = vec![false; nvars];
+    let mut largest = 0usize;
+    for _ in 0..nvars {
+        let union_with = |v: usize, scopes: &[Vec<usize>]| -> Vec<usize> {
+            let mut uni: Vec<usize> = vec![v];
+            for sc in scopes.iter().filter(|sc| sc.contains(&v)) {
+                for &x in sc {
+                    if !uni.contains(&x) {
+                        uni.push(x);
+                    }
+                }
+            }
+            uni
+        };
+        let cost = |uni: &[usize]| uni.iter().fold(1usize, |a, &x| a.saturating_mul(doms[x]));
+        let mut best: Option<(usize, usize)> = None;
+        for v in (0..nvars).filter(|&v| !eliminated[v]) {
+            let c = cost(&union_with(v, &scopes));
+            if best.map(|b| c < b.1).unwrap_or(true) {
+                best = Some((v, c));
+            }
+        }
+        let Some((v, c)) = best else { break };
+        largest = largest.max(c);
+        eliminated[v] = true;
+        let mut rest: Vec<usize> = union_with(v, &scopes).into_iter().filter(|&x| x != v).collect();
+        rest.sort_unstable();
+        scopes.retain(|sc| !sc.contains(&v));
+        if !rest.is_empty() {
+            scopes.push(rest);
+        }
+    }
+    largest
+}
+
+/// The Movers of the clique that can touch each Mover's atoms (local indices).
+fn touching_movers(ctx: &Ctx, comp: &[u32]) -> Vec<Vec<usize>> {
+    let k = comp.len();
+    let mut touching: Vec<Vec<usize>> = vec![Vec::new(); k];
+    for (i, &m) in comp.iter().enumerate() {
+        let mv = &ctx.movers[m as usize];
+        for &a in &mv.atoms[..mv.n_moved] {
+            for &om in ctx.atom_movers.get(&a).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let j = ctx.local[om as usize];
+                if j == NONE || j as usize == i || comp.get(j as usize) != Some(&om) {
+                    continue;
+                }
+                let j = j as usize;
+                if !touching[i].contains(&j) {
+                    touching[i].push(j);
+                }
+                if !touching[j].contains(&i) {
+                    touching[j].push(i);
+                }
+            }
+        }
+    }
+    touching
+}
+
+/// Block coordinate ascent over the coarse states of a clique too dense for
+/// exact search: each Mover, then each pair of Movers that touch, takes its
+/// best states given the others, until nothing changes. A block is scored by
+/// its Movers' preferences and atoms and by the atoms of other Movers it can
+/// reach. Returns the states and the number of atom scores computed.
+fn ascend_clique(ctx: &Ctx, comp: &[u32], doms: &[usize], buf: &mut ScoreBuf) -> (Vec<usize>, usize) {
+    let k = comp.len();
+    // (other Mover, slot) of the atoms each Mover can touch
+    let mut reach: Vec<Vec<(usize, usize)>> = vec![Vec::new(); k];
+    for (j, &mj) in comp.iter().enumerate() {
+        let mv = &ctx.movers[mj as usize];
+        for slot in 0..mv.n_moved {
+            for &om in ctx.atom_movers.get(&mv.atoms[slot]).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let i = ctx.local[om as usize];
+                if i != NONE && i as usize != j && comp.get(i as usize) == Some(&om) && !reach[i as usize].contains(&(j, slot)) {
+                    reach[i as usize].push((j, slot));
+                }
+            }
+        }
+    }
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..k {
+        for &(j, _) in &reach[i] {
+            let pair = (i.min(j), i.max(j));
+            if !pairs.contains(&pair) {
+                pairs.push(pair);
+            }
+        }
+    }
+    pairs.sort_unstable();
+    let mut st = CliqueState { movers: comp, cfg: vec![Cfg::Coarse(0); k] };
+    let mut calculated = 0usize;
+    let mut block_score = |st: &CliqueState, block: &[usize]| -> f64 {
+        let mut s = 0.0;
+        for &i in block {
+            s += ctx.pref(comp[i], st.cfg[i]) + ctx.score_mover_atoms(st, comp[i], buf, true).0;
+            calculated += ctx.movers[comp[i] as usize].n_moved;
+        }
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        for &i in block {
+            for &(j, slot) in &reach[i] {
+                if block.contains(&j) || seen.contains(&(j, slot)) {
+                    continue;
+                }
+                seen.push((j, slot));
+                if !ctx.mover_atom_deleted(comp[j], slot, st.cfg[j]) {
+                    s += ctx.score_atom(st, ctx.movers[comp[j] as usize].atoms[slot], buf).total();
+                    calculated += 1;
+                }
+            }
+        }
+        s
+    };
+    for _ in 0..100 {
+        let mut changed = false;
+        for i in 0..k {
+            let cur = st.cfg[i].coarse();
+            let mut best = (block_score(&st, &[i]), cur);
+            for c in (0..doms[i]).filter(|&c| c != cur) {
+                st.cfg[i] = Cfg::Coarse(c as u16);
+                let s = block_score(&st, &[i]);
+                if s > best.0 {
+                    best = (s, c);
+                }
+            }
+            st.cfg[i] = Cfg::Coarse(best.1 as u16);
+            changed |= best.1 != cur;
+        }
+        if changed {
+            continue;
+        }
+        for &(i, j) in &pairs {
+            let cur = (st.cfg[i].coarse(), st.cfg[j].coarse());
+            let mut best = (block_score(&st, &[i, j]), cur);
+            for ci in 0..doms[i] {
+                for cj in 0..doms[j] {
+                    if (ci, cj) == cur {
+                        continue;
+                    }
+                    st.cfg[i] = Cfg::Coarse(ci as u16);
+                    st.cfg[j] = Cfg::Coarse(cj as u16);
+                    let s = block_score(&st, &[i, j]);
+                    if s > best.0 + 1e-9 {
+                        best = (s, (ci, cj));
+                    }
+                }
+            }
+            st.cfg[i] = Cfg::Coarse(best.1 .0 as u16);
+            st.cfg[j] = Cfg::Coarse(best.1 .1 as u16);
+            changed |= best.1 != cur;
+        }
+        if !changed {
+            break;
+        }
+    }
+    (st.cfg.iter().map(|c| c.coarse()).collect(), calculated)
+}
+
 fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     let p = ctx.p;
     let v = p.verbosity;
@@ -1984,24 +2198,32 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
             table: (0..doms[i]).map(|c| ctx.pref(m, Cfg::Coarse(c as u16))).collect(),
         });
     }
+    // a clique whose Mover contact graph alone needs too large a table is not
+    // searched exactly (the atom factors only add to it)
+    let touching = touching_movers(ctx, comp);
+    let pairs: Vec<Vec<usize>> = (0..k).flat_map(|i| touching[i].iter().filter(move |&&j| j > i).map(move |&j| vec![i, j])).collect();
+    let dense = k > 1 && largest_elimination_table(k, &doms, pairs) > ELIMINATION_TABLE_LIMIT;
     // per-atom factors (kept for final per-Mover scores), built in parallel
-    let tasks: Vec<(usize, usize)> =
-        comp.iter().enumerate().flat_map(|(i, &m)| (0..ctx.movers[m as usize].n_moved).map(move |slot| (i, slot))).collect();
+    let tasks: Vec<(usize, usize)> = if dense { Vec::new() } else {
+        comp.iter().enumerate().flat_map(|(i, &m)| (0..ctx.movers[m as usize].n_moved).map(move |slot| (i, slot))).collect()
+    };
     let dotwise = std::env::var_os("REDUCE3_ATOMWISE").is_none();
-    let built: Vec<(usize, Vec<Factor>, usize, usize)> = tasks
+    let abandoned = std::sync::atomic::AtomicBool::new(false);
+    let built: Vec<Option<(usize, Vec<Factor>, usize, usize)>> = tasks
         .par_iter()
         .map(|&(i, slot)| {
             if dotwise {
-                let (f, c, h) = atom_factors_dotwise(ctx, comp, &doms, i, slot);
-                (i, f, c, h)
+                let (f, c, h) = atom_factors_dotwise(ctx, comp, &doms, i, slot, &abandoned)?;
+                Some((i, f, c, h))
             } else {
                 let (f, c, h) = atom_factor(ctx, comp, &doms, i, slot);
-                (i, vec![f], c, h)
+                Some((i, vec![f], c, h))
             }
         })
         .collect();
     let mut atom_factors: Vec<(usize, Factor)> = Vec::with_capacity(built.len());
-    for (i, fs, c, h) in built {
+    let mut exact = !dense && built.iter().all(|b| b.is_some());
+    for (i, fs, c, h) in built.into_iter().flatten() {
         calculated += c;
         cached += h;
         for f in fs {
@@ -2009,12 +2231,20 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
             atom_factors.push((i, f));
         }
     }
+    if exact && k > 1 {
+        let scopes: Vec<Vec<usize>> = factors.iter().map(|f| f.scope.clone()).collect();
+        exact = largest_elimination_table(k, &doms, scopes) <= ELIMINATION_TABLE_LIMIT;
+    }
     let dbg = std::env::var("REDUCE3_DEBUG_ATOM").ok().map(|t| {
         let a0 = ctx.movers[comp[0] as usize].atoms[0] as usize;
         let l = &ctx.w.labels[a0];
         format!("{} {} {} {}", l.chain, l.resname, l.resseq, l.name) == t
     }) == Some(true);
-    let best = if k == 1 {
+    let best = if !exact {
+        let (best, c) = ascend_clique(ctx, comp, &doms, &mut buf);
+        calculated += c;
+        best
+    } else if k == 1 {
         // singleton: pick the first maximum in state order
         let mut bs = 0usize;
         let mut bv = f64::NEG_INFINITY;
@@ -2051,11 +2281,21 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     for i in 0..k {
         high[i] = ctx.pref(comp[i], st.cfg[i]);
     }
-    for (i, f) in &atom_factors {
-        high[*i] += f.table[table_index(&f.scope, &f.dims, &best)];
+    if exact {
+        for (i, f) in &atom_factors {
+            high[*i] += f.table[table_index(&f.scope, &f.dims, &best)];
+        }
+    } else {
+        for i in 0..k {
+            high[i] += ctx.score_mover_atoms(&st, comp[i], &mut buf, true).0;
+            calculated += ctx.movers[comp[i] as usize].n_moved;
+        }
     }
     let coarse_best: f64 = high.iter().sum();
     let mut coarse_info = String::new();
+    if !exact {
+        let _ = writeln!(coarse_info, "   Clique of {} Movers is too dense for exact search; optimized by coordinate ascent", k);
+    }
     if v >= 3 {
         for i in 0..k {
             let _ = write!(
@@ -2216,7 +2456,7 @@ fn place_movers(
         if elem == "N" && nb.len() == 4 {
             let num_h = nb.iter().filter(|&&n| w.is_h(n)).count();
             if num_h == 3 {
-                match movers::nh3_rotator(w, a) {
+                match movers::nh3_rotator(w, a, !p.compat) {
                     Ok(m) => {
                         pl.movers.push(m);
                         pl.info += &vcheck(v, 1, &format!("Added MoverNH3Rotator {} to {}\n", pl.movers.len(), rid));
@@ -2239,7 +2479,7 @@ fn place_movers(
             if num_h == 3 {
                 let neighbor = neighbor.unwrap();
                 if w.bonded[neighbor as usize].len() == 3 {
-                    match movers::aromatic_methyl_rotator(w, a) {
+                    match movers::aromatic_methyl_rotator(w, a, !p.compat) {
                         Ok(m) => {
                             pl.movers.push(m);
                             pl.info += &vcheck(
@@ -2254,7 +2494,7 @@ fn place_movers(
                         }
                     }
                 } else {
-                    match movers::stagger_tetrahedral_methyl(w, a) {
+                    match movers::stagger_tetrahedral_methyl(w, a, !p.compat) {
                         Ok(()) => {
                             pl.info += &vcheck(v, 1, &format!("Used MoverTetrahedralMethylRotator to stagger {} {}\n", rid, a_name))
                         }
@@ -2367,7 +2607,7 @@ fn place_movers(
 
     // single-hydrogen rotators
     let in_atoms: FxHashSet<u32> = atoms.iter().copied().collect();
-    let opts = SingleHOptions { circular_angle_spacing: !p.compat };
+    let opts = SingleHOptions { circular_angle_spacing: !p.compat, any_partner_valence: !p.compat };
     for &h in rotatable_h {
         if !in_atoms.contains(&h) {
             continue;
