@@ -143,7 +143,20 @@ fn add_missing_h(
                     let names: Vec<String> = ag.atoms.iter().map(|a| a.name.clone()).collect();
                     let actual: FxHashSet<String> = ag.atoms.iter().map(|a| a.name.trim().to_ascii_uppercase()).collect();
                     // `mon_lib_query`: the libraries, else restraints built from the CCD
-                    let comp = match residue_dictionary(ml, &ag.resname, &names) {
+                    let key = ag.resname.trim().to_ascii_uppercase();
+                    let library = match auto_comps.get(&key) {
+                        Some(c) => Some(c.clone()),
+                        None => residue_dictionary(ml, &ag.resname, &names).map(|c| {
+                            match (!p.compat).then(|| ccd_for_unmatched_names(ml, &c, cls, ag)).flatten() {
+                                Some(ccd) => {
+                                    auto_comps.insert(key.clone(), ccd.clone());
+                                    ccd
+                                }
+                                None => c,
+                            }
+                        }),
+                    };
+                    let comp = match library {
                         Some(c) => c,
                         None => match ml.ccd_comp(&ag.resname, p.compat) {
                             Some(c) => {
@@ -607,7 +620,29 @@ fn chiral_volume(c: Vec3, a: Vec3, b: Vec3, h: Vec3) -> f64 {
 /// A residue's dictionary as the monomer server has it after interpretation:
 /// the libraries, or the CCD-built one registered during placement.
 fn server_comp(ml: &MonLib, auto_comps: &FxHashMap<String, Arc<Comp>>, resname: &str) -> Option<Arc<Comp>> {
-    ml.comp(resname).or_else(|| auto_comps.get(&resname.trim().to_ascii_uppercase()).cloned())
+    auto_comps.get(&resname.trim().to_ascii_uppercase()).cloned().or_else(|| ml.comp(resname))
+}
+
+/// Fixed mode: the CCD-built dictionary of a ligand whose library entry uses
+/// other atom names than the model (the old `C1*` names of mon_lib's GTP, GDP,
+/// GSP, ... for the model's `C1'`), when the CCD names cover every heavy atom
+/// of the residue. Reduce2 leaves such atoms untyped and without hydrogens.
+fn ccd_for_unmatched_names(ml: &MonLib, lib: &Comp, cls: ResClass, ag: &AtomGroup) -> Option<Arc<Comp>> {
+    let heavy: Vec<String> =
+        ag.atoms.iter().filter(|a| !a.is_hydrogen()).map(|a| a.name.trim().to_ascii_uppercase()).collect();
+    // nucleotides keep their own name handling; a code that only shares a
+    // nucleotide's name (GUA, glutaric acid) has no backbone atoms
+    let nucleotide = cls == ResClass::CommonRnaDna && heavy.iter().any(|n| matches!(n.as_str(), "P" | "C1'" | "C1*" | "O4'" | "O4*"));
+    if nucleotide || matches!(cls, ResClass::CommonAminoAcid | ResClass::DAminoAcid | ResClass::CommonWater) {
+        return None;
+    }
+    let synonyms = ml.atom_synonyms.get(&lib.id);
+    let known = |n: &str| lib.has_atom(n) || synonyms.and_then(|s| s.get(n)).map(|t| lib.has_atom(t)).unwrap_or(false);
+    if heavy.iter().all(|n| known(n)) {
+        return None;
+    }
+    let ccd = ml.ccd_comp(&ag.resname, false)?;
+    heavy.iter().all(|n| ccd.has_atom(n)).then_some(ccd)
 }
 
 /// Per residue name: the number of heavy-atom bonds of each dictionary atom

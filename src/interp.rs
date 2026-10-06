@@ -458,7 +458,9 @@ fn interpret_residue(
             na_interp = true;
         }
     }
-    let comp0 = ml.comp(&work).or_else(|| auto_comps.get(&resname).cloned());
+    // CCD-built dictionaries first: fixed mode also builds them for residues
+    // whose library entry uses other atom names
+    let comp0 = auto_comps.get(&resname).cloned().or_else(|| ml.comp(&work));
     let Some(comp0) = comp0 else {
         return ResInterp {
             comp: None,

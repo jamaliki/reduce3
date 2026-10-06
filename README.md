@@ -230,6 +230,11 @@ Fixed mode carries on in these cases; compat mode stops or loses data exactly as
   entries inconsistently). Like GeoStd, fixed mode also builds them at physiological protonation:
   carboxylic, phosphoric and sulfonic acids lose their acidic hydrogen, which the CCD's neutral form
   carries. The hydrogen sets then agree with GeoStd's for 99.5% of a million hydrogens.
+* **Library entries with other atom names.** mon_lib's GTP, GDP, GSP and other nucleotide ligands
+  use the old `C1*` names where models use `C1'`, and a few codes name another compound than the
+  CCD does (mon_lib's GUA is guanine, the PDB's glutaric acid). Reduce2 leaves the atoms it cannot
+  match untyped and without hydrogens (a GTP ribose gets none). When the CCD entry names every
+  heavy atom of such a residue, fixed mode builds the residue from the CCD instead.
 * **Atoms of unknown element** (element X, such as UNX in 1h0h and 4iio). Reduce2 deletes them.
   Fixed mode keeps them unchanged; they get no hydrogens and take no part in scoring.
 * **Models with no site for a hydrogen** (C-alpha or phosphate traces). Reduce2 stops ("It was not
