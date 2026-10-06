@@ -3,7 +3,7 @@
 //! component dictionary (CCD).
 
 use crate::cif;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -213,6 +213,9 @@ pub struct ChemLink {
     pub mod_id_2: String,
     pub group_comp_2: String,
     pub name: String,
+    /// Whether a `_chem_link` table row describes the link; cctbx leaves the
+    /// fields of the others None rather than empty.
+    pub listed: bool,
     pub bonds: Vec<LinkBond>,
     pub angles: Vec<LinkAngle>,
     pub tors: Vec<LinkTor>,
@@ -316,6 +319,9 @@ pub struct MonLib {
     pub atom_synonyms: FxHashMap<String, FxHashMap<String, String>>,
     pub links: Vec<ChemLink>,
     pub link_index: FxHashMap<String, usize>,
+    /// Links in cctbx's `link_link_id_list` order: the link blocks of the list
+    /// files that hold restraints, then the RNA/DNA chain links.
+    pub link_list_order: Vec<usize>,
     pub mods: FxHashMap<String, ChemMod>,
     pub ener: FxHashMap<String, EnerAtom>,
     comp_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
@@ -382,6 +388,7 @@ impl MonLib {
             atom_synonyms: FxHashMap::default(),
             links: Vec::new(),
             link_index: FxHashMap::default(),
+            link_list_order: Vec::new(),
             mods: FxHashMap::default(),
             ener: FxHashMap::default(),
             comp_cache: RwLock::new(FxHashMap::default()),
@@ -393,8 +400,10 @@ impl MonLib {
         let read = |p: PathBuf| -> Result<String, String> {
             std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {}", p.display(), e))
         };
-        // mon_lib_list.cif with the geostd list merged on top
-        let mlist = read(root.join("mon_lib/list/mon_lib_list.cif"))?;
+        // mon_lib_list.cif with the geostd list merged on top; cctbx finds the
+        // copy under geostd first (`mon_lib_list_cif`)
+        let geostd_mlist = root.join("geostd/list/mon_lib_list.cif");
+        let mlist = if geostd_mlist.exists() { read(geostd_mlist)? } else { read(root.join("mon_lib/list/mon_lib_list.cif"))? };
         let glist = read(root.join("geostd/list/geostd_list.cif")).unwrap_or_default();
         let mdoc = cif::parse(&mlist);
         let gdoc = cif::parse(&glist);
@@ -436,6 +445,7 @@ impl MonLib {
                             mod_id_2: g(5),
                             group_comp_2: g(6),
                             name: g(7),
+                            listed: true,
                             ..Default::default()
                         });
                     }
@@ -503,6 +513,7 @@ impl MonLib {
                             mod_id_2: g(5),
                             group_comp_2: g(6),
                             name: g(7),
+                            listed: true,
                             ..Default::default()
                         };
                         if !ml.link_index.contains_key(&l.id) {
@@ -524,6 +535,34 @@ impl MonLib {
                 }
             }
         }
+        // `convert_list_block`: one entry per link block with restraint loops,
+        // in block order of the merged list (geostd-only blocks after the rest)
+        let has_restraints = |b: &cif::Block| {
+            ["_chem_link_bond", "_chem_link_angle", "_chem_link_tor", "_chem_link_chir", "_chem_link_plane"]
+                .iter()
+                .any(|c| b.category(c).is_some())
+        };
+        let mut order_ids: Vec<String> = Vec::new();
+        let geostd_restraints: FxHashSet<&str> =
+            gdoc.blocks.iter().filter(|b| has_restraints(b)).filter_map(|b| b.name.strip_prefix("link_")).collect();
+        for (doc, base) in [(&mdoc, true), (&gdoc, false)] {
+            for b in &doc.blocks {
+                let Some(id) = b.name.strip_prefix("link_") else { continue };
+                let restrained = has_restraints(b) || (base && geostd_restraints.contains(id));
+                if id != "list" && restrained && !order_ids.iter().any(|x| x == id) {
+                    order_ids.push(id.to_string());
+                }
+            }
+        }
+        for doc in &extra_parsed {
+            for b in &doc.blocks {
+                if let Some(id) = b.name.strip_prefix("link_") {
+                    if has_restraints(b) && !order_ids.iter().any(|x| x == id) {
+                        order_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
         for (id, b) in &link_blocks {
             let idx = match ml.link_index.get(id) {
                 Some(&i) => i,
@@ -535,6 +574,7 @@ impl MonLib {
             };
             parse_link_block(b, &mut ml.links[idx]);
         }
+        ml.link_list_order = order_ids.iter().filter_map(|id| ml.link_index.get(id).copied()).collect();
         for (id, b) in &mod_blocks {
             let mut m = ChemMod { id: id.clone(), name: mod_names.get(id).cloned().unwrap_or_default(), ..Default::default() };
             parse_mod_block(b, &mut m);

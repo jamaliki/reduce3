@@ -599,53 +599,118 @@ fn lib_link_id(ml: &MonLib, prev: &ResInterp, cur: &ResInterp) -> Option<String>
     if prev.is_rna_dna && cur.is_rna_dna {
         return Some(if prev.is_rna2p == Some(true) { "rna2p".into() } else { "rna3p".into() });
     }
-    // generic link search over the library list (simplified best match)
-    let norm = |g: &str| -> String {
-        match g.to_ascii_lowercase().as_str() {
-            "l-peptide" | "d-peptide" | "peptide" => "peptide".into(),
-            "dna" | "rna" => "DNA/RNA".into(),
-            other => other.into(),
-        }
-    };
-    let pg = norm(&pc.group);
-    let cg = norm(&cc.group);
-    let mut best: Option<(usize, usize, usize, String)> = None;
-    for l in &ml.links {
-        if l.name.contains("SS-bridge") || l.bonds.is_empty() {
-            continue;
-        }
-        if l.comp_id_1.is_empty() && l.comp_id_2.is_empty() && l.group_comp_1.is_empty() && l.group_comp_2.is_empty() {
-            continue;
-        }
-        let side_ok = |cid: &str, grp: &str, comp: &Comp, g: &str| -> bool {
-            let comp_ok = cid.is_empty() || cid.eq_ignore_ascii_case(&comp.id);
-            let grp_ok = grp.is_empty() || norm(grp) == g;
-            comp_ok && grp_ok
-        };
-        if !side_ok(&l.comp_id_1, &l.group_comp_1, pc, &pg) || !side_ok(&l.comp_id_2, &l.group_comp_2, cc, &cg) {
-            continue;
-        }
-        let specificity = l.comp_id_1.len() + l.comp_id_2.len();
-        let unresolved = l
-            .bonds
-            .iter()
-            .filter(|b| {
-                let r1 = if b.c1 == 1 { pc } else { cc };
-                let r2 = if b.c2 == 1 { pc } else { cc };
-                !r1.has_atom(&b.a1) || !r2.has_atom(&b.a2)
-            })
-            .count();
-        let key = (unresolved, usize::MAX - specificity, 0, l.id.clone());
-        if best.as_ref().map(|b| (key.0, key.1) < (b.0, b.1)).unwrap_or(true) {
-            best = Some(key);
-        }
+    // generic search: `get_lib_link` over the library's links
+    struct Match {
+        link: usize,
+        unresolved_bonds: usize,
+        unresolved_angles: usize,
+        comp_1: i64,
+        comp_2: i64,
+        group_1: i64,
+        group_2: i64,
     }
-    let b = best?;
-    let l = ml.link(&b.3)?;
-    if l.comp_id_1.is_empty() && l.comp_id_2.is_empty() && l.group_comp_1.is_empty() && l.group_comp_2.is_empty() {
+    // `link_match.__lt__`, which is not a strict ordering: Python's sort
+    // decides the result
+    let lt = |a: &Match, b: &Match| {
+        a.unresolved_bonds < b.unresolved_bonds
+            || a.unresolved_angles < b.unresolved_angles
+            || a.comp_1 > b.comp_1
+            || a.comp_2 > b.comp_2
+            || a.group_1 > b.group_1
+            || a.group_2 > b.group_2
+    };
+    let side = |c: u8| if c == 1 { pc } else { cc };
+    let mut matches: Vec<Match> = Vec::new();
+    for &li in &ml.link_list_order {
+        let l = &ml.links[li];
+        if l.name == "SS-bridge" {
+            continue;
+        }
+        // an unlisted link (no table row) matches any pair, improperly
+        let ids = [&l.comp_id_1, &l.mod_id_1, &l.group_comp_1, &l.comp_id_2, &l.mod_id_2, &l.group_comp_2];
+        if l.listed && ids.iter().all(|x| x.is_empty()) {
+            continue;
+        }
+        let (Some((comp_1, group_1)), Some((comp_2, group_2))) = (
+            link_match_one(&l.comp_id_1, &l.group_comp_1, &pc.id, &pc.group),
+            link_match_one(&l.comp_id_2, &l.group_comp_2, &cc.id, &cc.group),
+        ) else {
+            continue;
+        };
+        let unresolved_bonds = l.bonds.iter().filter(|b| !side(b.c1).has_atom(&b.a1) || !side(b.c2).has_atom(&b.a2)).count();
+        let unresolved_angles = l.angles.iter().filter(|a| (0..3).any(|k| !side(a.c[k]).has_atom(&a.a[k]))).count();
+        matches.push(Match { link: li, unresolved_bonds, unresolved_angles, comp_1, comp_2, group_1, group_2 });
+    }
+    py312_sort_small(&mut matches, lt);
+    let best = matches.first()?;
+    // `is_proper_match`
+    if best.comp_1 <= 0 && best.group_1 <= 0 && best.comp_2 <= 0 && best.group_2 <= 0 {
         return None;
     }
-    Some(b.3)
+    Some(ml.links[best.link].id.clone())
+}
+
+/// `link_match_one`: the lengths of the link's comp id and group matched, or
+/// None when the residue does not match that side of the link.
+fn link_match_one(link_comp: &str, link_group: &str, comp_id: &str, comp_group: &str) -> Option<(i64, i64)> {
+    let comp_group = match comp_group {
+        "L-peptide" | "D-peptide" => "peptide",
+        "DNA" | "RNA" => "DNA/RNA",
+        g => g,
+    };
+    let comp_match = link_comp.is_empty() || comp_id.eq_ignore_ascii_case(link_comp);
+    let comp_len = if comp_match { link_comp.len() as i64 } else { -1 };
+    let (group_match, group_len) = if link_group.is_empty() || comp_group.eq_ignore_ascii_case(link_group) {
+        (true, link_group.len() as i64)
+    } else if comp_group.is_empty() {
+        // linking non-standard amino acids
+        if comp_match && comp_len > 0 {
+            (true, link_group.len() as i64)
+        } else {
+            (false, -1)
+        }
+    } else {
+        (false, 0)
+    };
+    (comp_match && group_match).then_some((comp_len, group_len))
+}
+
+/// CPython 3.12 `list.sort` with a less-than predicate, for lists shorter than
+/// its minimum run (64): the first run is found (and reversed if strictly
+/// descending), then the rest is binary-inserted. With a predicate that is not
+/// a strict ordering the result depends on exactly these steps.
+fn py312_sort_small<T>(v: &mut Vec<T>, lt: impl Fn(&T, &T) -> bool) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    debug_assert!(n < 64, "only CPython's short-list path is reproduced");
+    // count_run
+    let mut run = 2;
+    if lt(&v[1], &v[0]) {
+        while run < n && lt(&v[run], &v[run - 1]) {
+            run += 1;
+        }
+        v[..run].reverse();
+    } else {
+        while run < n && !lt(&v[run], &v[run - 1]) {
+            run += 1;
+        }
+    }
+    // binarysort
+    for start in run..n {
+        let (mut l, mut r) = (0, start);
+        while l < r {
+            let p = l + ((r - l) >> 1);
+            if lt(&v[start], &v[p]) {
+                r = p;
+            } else {
+                l = p + 1;
+            }
+        }
+        let pivot = v.remove(start);
+        v.insert(l, pivot);
+    }
 }
 
 /// Add the proxies of a chain link between `prev` and `cur`. Returns false

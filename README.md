@@ -16,7 +16,8 @@ Asn/Gln/His flips) by Probe dot scoring. It covers the whole pipeline:
 It has two modes:
 
 * **fixed** (default) corrects the Reduce2 bugs listed below, goes on where Reduce2 gives up (see
-  "Where Reduce2 gives up"), and optimizes every clique exactly, in parallel.
+  "Where Reduce2 gives up"), and optimizes the cliques in parallel, exactly unless a clique is too
+  dense to search (see "Dense cliques" below).
 * **compat** (`--compat`) reproduces Reduce2 exactly, bugs included. It exists to validate the port.
 
 ## Build
@@ -237,6 +238,22 @@ Fixed mode carries on in these cases; compat mode stops or loses data exactly as
   ("Restraints were not found"), and with `ignore_missing_restraints=True` deletes their input
   hydrogens. Fixed mode reports them, keeps their input hydrogens (not scored), and places the
   hydrogens of everything else.
+* **Hydrogens oriented by an atom on the bond axis.** When the atom that orients a one-neighbor
+  group lies on the parent bond axis (cobalt hexammine on a crystallographic two-fold in 9ciy),
+  Reduce2 divides by zero. Fixed mode orients the group from another neighbor and optimizes it.
+* **Rotatable groups Reduce2 leaves alone.** Reduce2 counts the neighbors of every alternate
+  conformation together, so an atom shared by two alternates seems to have too many bonds:
+  alternate Ser/Thr hydroxyls get no rotator, alternate Thr/Val methyls are not staggered and a
+  histidine split at CG is not flipped. It also rejects an OH whose partner atom has other than two
+  or three further bonds (S-OH, P-OH, metal hydroxides), an NH3 whose partner has fewer than three
+  (metal ammines), and groups whose dictionary names no reference atom (methanol). Fixed mode gives
+  each alternate its own neighbors and builds these rotators.
+* **Dense cliques.** Reduce2 searches each clique exhaustively. Rings of Thr/Ser hydroxyls from
+  four chains meeting on a channel axis (6een) make cliques of 10 to 18 interacting Movers that
+  neither Reduce2 nor exact search finishes. Fixed mode searches a clique exactly when its tables
+  stay within a work budget, and otherwise by block coordinate ascent (each Mover, then each
+  touching pair, given the others). On 3,509 cliques that exact search can solve, the ascent
+  finds the same optimum for 3,497.
 
 ## Known limitations
 
