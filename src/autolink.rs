@@ -966,67 +966,48 @@ impl GlycoAtoms {
 fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
     let flat = cx.flat;
     let n = flat.pos.len();
-    let cell = MAX_BONDED_CUTOFF;
-    let ckey = |p: Vec3| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64);
-    let pack = |m: u32, x: i64, y: i64, z: i64| -> u64 {
-        // 16 bits model, 16 bits per coordinate (offset), plenty for any model
-        ((m as u64 & 0xffff) << 48) | (((x + 32768) as u64 & 0xffff) << 32) | (((y + 32768) as u64 & 0xffff) << 16) | ((z + 32768) as u64 & 0xffff)
-    };
-    let mut cells: Vec<(u64, u32)> = (0..n)
-        .filter(|&a| !flat.is_h[a])
-        .map(|a| {
-            let (x, y, z) = ckey(flat.pos[a]);
-            (pack(flat.path[a].model, x, y, z), a as u32)
-        })
-        .collect();
-    crate::par::sort_unstable_by_key(&mut cells, |&c| c);
-    let mut ranges: FxHashMap<u64, (usize, usize)> = FxHashMap::default();
-    let mut k = 0;
-    while k < cells.len() {
-        let mut e = k;
-        while e < cells.len() && cells[e].0 == cells[k].0 {
-            e += 1;
-        }
-        ranges.insert(cells[k].0, (k, e));
-        k = e;
-    }
     let rg_of = |a: u32| {
         let p = flat.path[a as usize];
         (p.model, p.chain, p.rg)
     };
-    let mut out: Vec<(f64, u32, u32)> = crate::par::flat_map_collect(&cells, |&(_, a)| {
-            let pa = flat.pos[a as usize];
-            let (x, y, z) = ckey(pa);
-            let m = flat.path[a as usize].model;
+    // heavy atoms per model, each model on a grid of cutoff-sized cells
+    let mut by_model: Vec<Vec<(u32, Vec3)>> = Vec::new();
+    for a in (0..n).filter(|&a| !flat.is_h[a]) {
+        let m = flat.path[a].model as usize;
+        if by_model.len() <= m {
+            by_model.resize(m + 1, Vec::new());
+        }
+        by_model[m].push((a as u32, flat.pos[a]));
+    }
+    let mut out: Vec<(f64, u32, u32)> = Vec::new();
+    for atoms in by_model.iter().filter(|v| !v.is_empty()) {
+        let grid = crate::probe::SpatialGrid::new(atoms, MAX_BONDED_CUTOFF);
+        let found = crate::par::flat_map_collect(atoms, |&(a, pa)| {
             let ra = rg_of(a);
             let alt_a = flat.altloc[a as usize].trim();
             let mut v: Vec<(f64, u32, u32)> = Vec::new();
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let Some(&(s, e)) = ranges.get(&pack(m, x + dx, y + dy, z + dz)) else { continue };
-                        for &(_, b) in &cells[s..e] {
-                            if b <= a {
-                                continue;
-                            }
-                            let d = (flat.pos[b as usize] - pa).length();
-                            if d >= MAX_BONDED_CUTOFF || rg_of(b) == ra {
-                                continue;
-                            }
-                            let alt_b = flat.altloc[b as usize].trim();
-                            if !(alt_a == alt_b || alt_a.is_empty() || alt_b.is_empty()) {
-                                continue;
-                            }
-                            if initial[a as usize].contains(&b) {
-                                continue;
-                            }
-                            v.push((d, a, b));
-                        }
-                    }
+            // a slightly larger query, then the exact test on the same distance
+            grid.for_each_within(pa, 0.0, MAX_BONDED_CUTOFF * (1.0 + 1e-9), |b, pb, _| {
+                if b <= a {
+                    return;
                 }
-            }
+                let d = (pb - pa).length();
+                if d >= MAX_BONDED_CUTOFF || rg_of(b) == ra {
+                    return;
+                }
+                let alt_b = flat.altloc[b as usize].trim();
+                if !(alt_a == alt_b || alt_a.is_empty() || alt_b.is_empty()) {
+                    return;
+                }
+                if initial[a as usize].contains(&b) {
+                    return;
+                }
+                v.push((d, a, b));
+            });
             v.into_iter()
         });
+        out.extend(found);
+    }
     crate::par::sort_unstable_by_key(&mut out, |&(d, i, j)| (d.to_bits(), i, j));
     out
 }

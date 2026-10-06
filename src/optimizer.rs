@@ -378,6 +378,12 @@ struct Ctx<'a> {
     atom_movers: FxHashMap<u32, SmallVec<[u32; 4]>>,
     exclude: FxHashMap<u32, Vec<u32>>,
     dots: FxHashMap<u32, Arc<Vec<DotPair>>>,
+    /// Largest distance of an atom's dots from its center.
+    dot_reach: FxHashMap<u32, f64>,
+    /// Per Mover atom: the static grid entries near any of its positions
+    /// (center, radius covered, entries), filtered per state instead of
+    /// querying the grid for each.
+    near: FxHashMap<u32, (Vec3, f64, Vec<u32>)>,
     max_vdw: f64,
     /// Local index of each mover inside its clique.
     local: Vec<u32>,
@@ -469,17 +475,23 @@ impl<'a> Ctx<'a> {
         let min_occ = self.p.min_occupancy;
         buf.targets.clear();
         buf.excl.clear();
-        // excluded atoms' current geometry (for trimming)
+        // excluded atoms' current geometry (for trimming); one farther than
+        // the dots reach plus its radius cannot cover a dot
         let fixed = !self.p.compat;
+        let reach = self.dot_reach.get(&a).copied().unwrap_or(f64::INFINITY) + EXCLUSION_MARGIN;
         for &e in excl {
             let (pe, deleted, ie) = self.atom_state(st, e);
             if fixed && deleted {
                 continue;
             }
+            if pe.dist_sq(pa) >= (reach + ie.vdw_radius) * (reach + ie.vdw_radius) {
+                continue;
+            }
             buf.excl.push((pe, ie.vdw_radius));
         }
         // static neighbors
-        self.grid.for_each_within(pa, 1e-5, nearby, |b, pb, d2| {
+        let targets = &mut buf.targets;
+        let mut on_static = |b: u32, pb: Vec3, d2: f64| {
             if excl.contains(&b) {
                 return;
             }
@@ -489,9 +501,15 @@ impl<'a> Ctx<'a> {
             let ib = self.static_info(b);
             let lim = ia.vdw_radius + ib.vdw_radius + 2.0 * pr;
             if d2.sqrt() <= lim {
-                buf.targets.push(Target { pos: pb, info: ib });
+                targets.push(Target { pos: pb, info: ib });
             }
-        });
+        };
+        match self.near.get(&a) {
+            Some((c, r, entries)) if pa.dist(*c) + nearby + NEAR_MARGIN <= *r => {
+                self.grid.for_each_within_entries(entries, pa, 1e-5, nearby, &mut on_static)
+            }
+            _ => self.grid.for_each_within(pa, 1e-5, nearby, &mut on_static),
+        }
         // dynamic neighbors from interacting Movers
         if let Some(ms) = self.atom_movers.get(&a) {
             for &m in ms {
@@ -524,7 +542,7 @@ impl<'a> Ctx<'a> {
         // trim dots inside excluded atoms
         if let Some((cache, loc)) = trim {
             if let Some(d) = cache.borrow().get(&(a, loc)) {
-                return self.scorer_score(pa, &ia, d, &buf.targets);
+                return self.scorer_score(pa, &ia, d, &buf.targets, &mut buf.prepared);
             }
         }
         let dots = &self.dots[&a];
@@ -541,10 +559,10 @@ impl<'a> Ctx<'a> {
         if let Some((cache, loc)) = trim {
             cache.borrow_mut().insert((a, loc), buf.dots.clone());
         }
-        self.scorer_score(pa, &ia, &buf.dots, &buf.targets)
+        self.scorer_score(pa, &ia, &buf.dots, &buf.targets, &mut buf.prepared)
     }
 
-    fn scorer_score(&self, pa: Vec3, ia: &AtomInfo, dots: &[DotPair], targets: &[Target]) -> ScoreDotsResult {
+    fn scorer_score(&self, pa: Vec3, ia: &AtomInfo, dots: &[DotPair], targets: &[Target], prepared: &mut Vec<PTarget>) -> ScoreDotsResult {
         // Same arithmetic as DotScorer::score_dots with precomputed probe offsets.
         let pr = self.p.probe.probe_radius;
         let density = self.p.probe.density;
@@ -553,10 +571,11 @@ impl<'a> Ctx<'a> {
         if ia.is_ion && s.ignore_ions {
             return ret;
         }
+        prepare_targets(s, ia, pa, targets, pr, prepared);
         for dp in dots {
             let dot_abs = pa + dp.d;
             let probe_loc = pa + dp.probe;
-            accumulate_dot(s, check_dot(s, ia, pa, dot_abs, probe_loc, targets, pr), &mut ret);
+            accumulate_dot(s, check_dot(s, ia, dot_abs, probe_loc, prepared), &mut ret);
         }
         ret.bump /= density;
         ret.hbond /= density;
@@ -591,12 +610,45 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// A target prepared for one source atom state: the ion and alternate
+/// filters applied, and what a dot test needs precomputed (the probe reach and
+/// the annular test's surface point and kissing distance), with the same
+/// arithmetic as the per-dot test.
+#[derive(Clone, Copy)]
+struct PTarget {
+    pos: Vec3,
+    info: AtomInfo,
+    prb2: f64,
+    surface: Vec3,
+    kiss: f64,
+}
+
+fn prepare_targets(s: &DotScorer, src: &AtomInfo, src_pos: Vec3, targets: &[Target], probe_radius: f64, out: &mut Vec<PTarget>) {
+    out.clear();
+    let src_r = src.vdw_radius;
+    for b in targets {
+        let bi = &b.info;
+        if bi.is_ion && s.ignore_ions {
+            continue;
+        }
+        if !compatible_alts(src.alt, bi.alt) {
+            continue;
+        }
+        let prb = bi.vdw_radius + probe_radius;
+        let tv = b.pos - src_pos;
+        let surface = tv / tv.length() * src_r + src_pos;
+        let tr = bi.vdw_radius;
+        let kiss = 2.0 * src_r * (tr * probe_radius / ((src_r + tr) * (src_r + probe_radius))).sqrt();
+        out.push(PTarget { pos: b.pos, info: *bi, prb2: prb * prb, surface, kiss });
+    }
+}
+
 /// Running state of `check_dot` over a dot's targets: the target with the
 /// smallest gap so far (first one wins ties) and its hydrogen-bond status.
 #[derive(Clone, Copy)]
 struct DotFold {
     best_gap: f64,
-    best: Option<Target>,
+    best: Option<PTarget>,
     is_hbond: bool,
     too_close: bool,
     hb_min: f64,
@@ -608,20 +660,12 @@ impl DotFold {
         DotFold { best_gap: 1e100, best: None, is_hbond: false, too_close: false, hb_min: 0.0, cause_dummy: false };
 
     #[inline]
-    fn step(&mut self, s: &DotScorer, src: &AtomInfo, dot_abs: Vec3, probe_loc: Vec3, b: &Target, probe_radius: f64) {
+    fn step(&mut self, s: &DotScorer, src: &AtomInfo, dot_abs: Vec3, probe_loc: Vec3, b: &PTarget) {
         let bi = &b.info;
-        if bi.is_ion && s.ignore_ions {
+        if probe_loc.dist_sq(b.pos) > b.prb2 {
             return;
         }
-        let vdwb = bi.vdw_radius;
-        let prb = vdwb + probe_radius;
-        if probe_loc.dist_sq(b.pos) > prb * prb {
-            return;
-        }
-        if !compatible_alts(src.alt, bi.alt) {
-            return;
-        }
-        let gap = dot_abs.dist(b.pos) - vdwb;
+        let gap = dot_abs.dist(b.pos) - bi.vdw_radius;
         if gap < self.best_gap {
             let cs = src.charge as i32;
             let cb = bi.charge as i32;
@@ -647,7 +691,7 @@ impl DotFold {
 
     /// (overlap type, gap, overlap, annular) of the dot, or None without a target.
     #[inline]
-    fn finish(&self, s: &DotScorer, src: &AtomInfo, src_pos: Vec3, dot_abs: Vec3, probe_radius: f64) -> Option<(OverlapType, f64, f64, bool)> {
+    fn finish(&self, s: &DotScorer, src: &AtomInfo, dot_abs: Vec3) -> Option<(OverlapType, f64, f64, bool)> {
         let b = self.best?;
         let mut gap = self.best_gap;
         let overlap;
@@ -669,13 +713,8 @@ impl DotFold {
             ot = OverlapType::Clash;
         }
         // annularDots: dot2srcCenter > kissEdge2bullsEye
-        let src_r = src.vdw_radius;
-        let tv = b.pos - src_pos;
-        let surface = tv / tv.length() * src_r + src_pos;
-        let d2s = (surface - dot_abs).length();
-        let tr = b.info.vdw_radius;
-        let kiss = 2.0 * src_r * (tr * probe_radius / ((src_r + tr) * (src_r + probe_radius))).sqrt();
-        let annular = d2s > kiss;
+        let d2s = (b.surface - dot_abs).length();
+        let annular = d2s > b.kiss;
         if (src.is_dummy_hydrogen || self.cause_dummy) && (self.too_close || ot != OverlapType::HydrogenBond) {
             ot = OverlapType::Ignore;
         }
@@ -685,20 +724,12 @@ impl DotFold {
 
 /// `DotScorer::check_dot` with a precomputed probe location.
 #[inline(always)]
-fn check_dot(
-    s: &DotScorer,
-    src: &AtomInfo,
-    src_pos: Vec3,
-    dot_abs: Vec3,
-    probe_loc: Vec3,
-    targets: &[Target],
-    probe_radius: f64,
-) -> Option<(OverlapType, f64, f64, bool)> {
+fn check_dot(s: &DotScorer, src: &AtomInfo, dot_abs: Vec3, probe_loc: Vec3, targets: &[PTarget]) -> Option<(OverlapType, f64, f64, bool)> {
     let mut f = DotFold::START;
     for b in targets {
-        f.step(s, src, dot_abs, probe_loc, b, probe_radius);
+        f.step(s, src, dot_abs, probe_loc, b);
     }
-    f.finish(s, src, src_pos, dot_abs, probe_radius)
+    f.finish(s, src, dot_abs)
 }
 
 /// Add one dot's result to the running sums (the body of `score_dots`).
@@ -730,6 +761,7 @@ fn accumulate_dot(s: &DotScorer, r: Option<(OverlapType, f64, f64, bool)>, ret: 
 #[derive(Default)]
 struct ScoreBuf {
     targets: Vec<Target>,
+    prepared: Vec<PTarget>,
     excl: Vec<(Vec3, f64)>,
     dots: Vec<DotPair>,
 }
@@ -1316,6 +1348,7 @@ fn run_one(
     info += &tm.report("determine excluded atoms");
     let mut cache = DotSphereCache::new(p.probe.density);
     let mut dots: FxHashMap<u32, Arc<Vec<DotPair>>> = FxHashMap::default();
+    let mut dot_reach: FxHashMap<u32, f64> = FxHashMap::default();
     let mut by_radius: FxHashMap<u64, Arc<Vec<DotPair>>> = FxHashMap::default();
     for &a in &mover_atoms {
         let r = w.info[a as usize].vdw_radius;
@@ -1333,6 +1366,7 @@ fn run_one(
                 )
             })
             .clone();
+        dot_reach.insert(a, dp.iter().map(|x| x.d.length()).fold(0.0, f64::max));
         dots.insert(a, dp);
     }
     info += &tm.report("construct dot scorer");
@@ -1368,6 +1402,24 @@ fn run_one(
         }
     }
     info += &tm.report("construct OptimizerC");
+    // static grid entries near each Mover atom over all of its positions;
+    // fixed mode only: compat's grid files atoms by another position than it
+    // measures (Reduce2's query misses some), so a filtered superset differs
+    let mut near: FxHashMap<u32, (Vec3, f64, Vec<u32>)> = FxHashMap::default();
+    for mv in movers.iter().filter(|_| !p.compat) {
+        for slot in 0..mv.n_moved {
+            let mut ps: Vec<Vec3> = mv.coarse_pos.iter().filter_map(|c| c.get(slot).copied()).collect();
+            ps.extend(mv.fine_pos.iter().flatten().filter_map(|f| f.get(slot).copied()));
+            if ps.is_empty() {
+                continue;
+            }
+            let a = mv.atoms[slot];
+            let c = ps.iter().fold(Vec3::ZERO, |acc, &q| acc + q) / ps.len() as f64;
+            let spread = ps.iter().map(|q| q.dist(c)).fold(0.0, f64::max);
+            let r = max_vdw + w.info[a as usize].vdw_radius + 2.0 * p.probe.probe_radius + spread + NEAR_MARGIN;
+            near.insert(a, (c, r, grid.entries_within(c, r)));
+        }
+    }
 
     let ctx = Ctx {
         w: &*w,
@@ -1380,6 +1432,8 @@ fn run_one(
         atom_movers,
         exclude,
         dots,
+        dot_reach,
+        near,
         max_vdw,
         local,
     };
@@ -1577,6 +1631,13 @@ struct CliqueResult {
 /// in the same order as `score_atom`, so the entries are the same sums, added
 /// in a different order. Returns the factors and the numbers of dot groups
 /// scored and of full atom scores they stand for.
+/// Slack on the radius of a Mover atom's precomputed static neighborhood.
+const NEAR_MARGIN: f64 = 1e-3;
+
+/// Slack on the distance beyond which an excluded atom cannot cover a dot
+/// (far above rounding error).
+const EXCLUSION_MARGIN: f64 = 0.01;
+
 /// Largest number of joint states of the other Movers one group of an atom's
 /// dots is scored over, and largest table variable elimination may build. A
 /// clique past either is optimized by coordinate ascent instead.
@@ -1660,6 +1721,9 @@ fn atom_factors_dotwise(
         // clique) and, per other Mover and state, the dynamic ones
         let mut excl_fixed: Vec<(Vec3, f64)> = Vec::new();
         let mut excl_dyn: Vec<Vec<Vec<(Vec3, f64)>>> = others.iter().map(|&o| vec![Vec::new(); doms[o]]).collect();
+        // one farther than the dots reach plus its radius cannot cover a dot
+        let reach = ctx.dot_reach.get(&a).copied().unwrap_or(f64::INFINITY) + EXCLUSION_MARGIN;
+        let covers = |pe: Vec3, re: f64| pe.dist_sq(pa) < (reach + re) * (reach + re);
         for &e in excl {
             let owner = ctx.dyn_of.get(&e).and_then(|&(em, eslot)| {
                 let li = ctx.local[em as usize];
@@ -1675,12 +1739,14 @@ fn atom_factors_dotwise(
                         }
                         let pe = ctx.mover_atom_pos(em, eslot, cfg);
                         let ie = ctx.mover_atom_info(em, eslot, cfg, e);
-                        excl_dyn[k][sidx].push((pe, ie.vdw_radius));
+                        if covers(pe, ie.vdw_radius) {
+                            excl_dyn[k][sidx].push((pe, ie.vdw_radius));
+                        }
                     }
                 }
                 None => {
                     let (pe, deleted, ie) = ctx.atom_state(&st, e);
-                    if deleted {
+                    if deleted || !covers(pe, ie.vdw_radius) {
                         continue;
                     }
                     excl_fixed.push((pe, ie.vdw_radius));
@@ -1689,7 +1755,7 @@ fn atom_factors_dotwise(
         }
         // static targets (same filters and order as score_atom)
         let mut static_t: Vec<Target> = Vec::new();
-        ctx.grid.for_each_within(pa, 1e-5, nearby, |b, pb, d2| {
+        let mut on_static = |b: u32, pb: Vec3, d2: f64| {
             if excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
                 return;
             }
@@ -1697,7 +1763,13 @@ fn atom_factors_dotwise(
             if d2.sqrt() <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
                 static_t.push(Target { pos: pb, info: ib });
             }
-        });
+        };
+        match ctx.near.get(&a) {
+            Some((c, r, entries)) if pa.dist(*c) + nearby + NEAR_MARGIN <= *r => {
+                ctx.grid.for_each_within_entries(entries, pa, 1e-5, nearby, &mut on_static)
+            }
+            _ => ctx.grid.for_each_within(pa, 1e-5, nearby, &mut on_static),
+        }
         // Mover targets: own Mover fixed, others per state
         let mover_targets = |om: u32, cfg: Cfg| -> Vec<Target> {
             let omv = &ctx.movers[om as usize];
@@ -1726,6 +1798,22 @@ fn atom_factors_dotwise(
                 Some(o) => (0..doms[o]).map(|sidx| mover_targets(om, Cfg::Coarse(sidx as u16))).collect(),
             })
             .collect();
+        // the folds use prepared targets; the reach test keeps the raw lists
+        let mut static_p: Vec<PTarget> = Vec::with_capacity(static_t.len());
+        prepare_targets(sc, &ia, pa, &static_t, pr, &mut static_p);
+        let seg_prepared: Vec<Vec<Vec<PTarget>>> = seg_targets
+            .iter()
+            .map(|per_state| {
+                per_state
+                    .iter()
+                    .map(|ts| {
+                        let mut v = Vec::with_capacity(ts.len());
+                        prepare_targets(sc, &ia, pa, ts, pr, &mut v);
+                        v
+                    })
+                    .collect()
+            })
+            .collect();
         // classify dots
         let mut base = ScoreDotsResult::default();
         let mut groups: FxHashMap<Vec<usize>, Vec<(usize, DotFold)>> = FxHashMap::default();
@@ -1738,8 +1826,8 @@ fn atom_factors_dotwise(
                 }
             }
             let mut fold = DotFold::START;
-            for b in &static_t {
-                fold.step(sc, &ia, dot_abs, probe_loc, b, pr);
+            for b in &static_p {
+                fold.step(sc, &ia, dot_abs, probe_loc, b);
             }
             let mut dep: Vec<usize> = Vec::new();
             for (k, &o) in others.iter().enumerate() {
@@ -1775,12 +1863,12 @@ fn atom_factors_dotwise(
             if dep.is_empty() {
                 for (q, &(_, so)) in seq.iter().enumerate() {
                     if so.is_none() {
-                        for b in &seg_targets[q][0] {
-                            fold.step(sc, &ia, dot_abs, probe_loc, b, pr);
+                        for b in &seg_prepared[q][0] {
+                            fold.step(sc, &ia, dot_abs, probe_loc, b);
                         }
                     }
                 }
-                accumulate_dot(sc, fold.finish(sc, &ia, pa, dot_abs, pr), &mut base);
+                accumulate_dot(sc, fold.finish(sc, &ia, dot_abs), &mut base);
             } else {
                 groups.entry(dep).or_default().push((di, fold));
             }
@@ -1827,18 +1915,18 @@ fn atom_factors_dotwise(
                     }
                     let mut fold = start;
                     for (qq, &(_, so)) in seq.iter().enumerate() {
-                        let ts: &[Target] = match so {
-                            None => &seg_targets[qq][0],
+                        let ts: &[PTarget] = match so {
+                            None => &seg_prepared[qq][0],
                             Some(o) => match dep.iter().position(|&x| x == o) {
-                                Some(q) => &seg_targets[qq][sv[q]],
+                                Some(q) => &seg_prepared[qq][sv[q]],
                                 None => continue,
                             },
                         };
                         for b in ts {
-                            fold.step(sc, &ia, dot_abs, probe_loc, b, pr);
+                            fold.step(sc, &ia, dot_abs, probe_loc, b);
                         }
                     }
-                    accumulate_dot(sc, fold.finish(sc, &ia, pa, dot_abs, pr), &mut acc);
+                    accumulate_dot(sc, fold.finish(sc, &ia, dot_abs), &mut acc);
                 }
                 *val = acc.bump / density + acc.hbond / density + acc.attract / density;
             }
@@ -2176,12 +2264,15 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     let mut calculated = 0usize;
     let mut cached = 0usize;
 
-    // initial scores (all at coarse 0)
+    // initial scores (all at coarse 0); a lone Mover's come from its atom
+    // factors below
     let mut initial = vec![0.0; k];
-    for (i, &m) in comp.iter().enumerate() {
-        let (s, _) = ctx.score_mover_atoms(&st, m, &mut buf, true);
-        calculated += ctx.movers[m as usize].n_moved;
-        initial[i] = ctx.pref(m, Cfg::Coarse(0)) + s;
+    if k > 1 {
+        for (i, &m) in comp.iter().enumerate() {
+            let (s, _) = ctx.score_mover_atoms(&st, m, &mut buf, true);
+            calculated += ctx.movers[m as usize].n_moved;
+            initial[i] = ctx.pref(m, Cfg::Coarse(0)) + s;
+        }
     }
 
     // ---------- coarse optimization
@@ -2205,27 +2296,41 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     };
     let dotwise = std::env::var_os("REDUCE3_ATOMWISE").is_none();
     let abandoned = std::sync::atomic::AtomicBool::new(false);
-    let built: Vec<Option<(usize, Vec<Factor>, usize, usize)>> = crate::par::map_collect(&tasks, |&(i, slot)| {
+    let built: Vec<Option<(usize, usize, Vec<Factor>, usize, usize)>> = crate::par::map_collect(&tasks, |&(i, slot)| {
             if dotwise {
                 let (f, c, h) = atom_factors_dotwise(ctx, comp, &doms, i, slot, &abandoned)?;
-                Some((i, f, c, h))
+                Some((i, slot, f, c, h))
             } else {
                 let (f, c, h) = atom_factor(ctx, comp, &doms, i, slot);
-                Some((i, vec![f], c, h))
+                Some((i, slot, vec![f], c, h))
             }
         });
     let mut atom_factors: Vec<(usize, Factor)> = Vec::with_capacity(built.len());
     let mut exact = !dense && built.iter().all(|b| b.is_some());
-    for (i, fs, c, h) in built.into_iter().flatten() {
+    // a lone Mover's initial score: its atoms' coarse-0 values in slot order,
+    // as score_mover_atoms sums them (one factor per atom, no other Movers)
+    let mut lone_initial = 0.0;
+    for (i, slot, fs, c, h) in built.into_iter().flatten() {
         // the partial work of an abandoned search depends on thread timing
         if exact {
             calculated += c;
             cached += h;
         }
         for f in fs {
+            if k == 1 && !ctx.mover_atom_deleted(comp[0], slot, Cfg::Coarse(0)) {
+                lone_initial += f.table[0];
+            }
             factors.push(Factor { scope: f.scope.clone(), dims: f.dims.clone(), table: f.table.clone() });
             atom_factors.push((i, f));
         }
+    }
+    if k == 1 {
+        initial[0] = if exact {
+            ctx.pref(comp[0], Cfg::Coarse(0)) + lone_initial
+        } else {
+            calculated += ctx.movers[comp[0] as usize].n_moved;
+            ctx.pref(comp[0], Cfg::Coarse(0)) + ctx.score_mover_atoms(&st, comp[0], &mut buf, true).0
+        };
     }
     if exact && k > 1 {
         let scopes: Vec<Vec<usize>> = factors.iter().map(|f| f.scope.clone()).collect();
@@ -2352,8 +2457,9 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
         }
         fine_info.push((m, msg));
     }
-    if !p.compat {
-        // Report each Mover's score in the final configuration of its clique.
+    if !p.compat && k > 1 {
+        // Report each Mover's score in the final configuration of its clique
+        // (a lone Mover's is the score its fine search ended on).
         for i in 0..k {
             let (s, _) = ctx.score_mover_atoms(&st, comp[i], &mut buf, true);
             calculated += ctx.movers[comp[i] as usize].n_moved;

@@ -254,6 +254,44 @@ impl SpatialGrid {
 
     /// Call `f(id, pos, dist_sq)` for every point with `min_d <= dist <= max_d` from `p`.
     #[inline]
+    /// Storage positions of the entries within `max_d` of `p`, in the order
+    /// `for_each_within` visits entries (increasing storage position).
+    pub fn entries_within(&self, p: Vec3, max_d: f64) -> Vec<u32> {
+        let mut out = Vec::new();
+        let (x0, x1) = (self.axis_index(p.x - max_d, 0), self.axis_index(p.x + max_d, 0));
+        let (y0, y1) = (self.axis_index(p.y - max_d, 1), self.axis_index(p.y + max_d, 1));
+        let (z0, z1) = (self.axis_index(p.z - max_d, 2), self.axis_index(p.z + max_d, 2));
+        let max2 = max_d * max_d;
+        for z in z0..=z1 {
+            for y in y0..=y1 {
+                let row = self.dims[0] * (y + self.dims[1] * z);
+                let s = self.starts[row + x0] as usize;
+                let e = self.starts[row + x1 + 1] as usize;
+                for k in s..e {
+                    if self.pos[k].dist_sq(p) <= max2 {
+                        out.push(k as u32);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `for_each_within` over entries from `entries_within` that include every
+    /// entry within `max_d` of `p`: the same calls in the same order.
+    #[inline]
+    pub fn for_each_within_entries<F: FnMut(u32, Vec3, f64)>(&self, entries: &[u32], p: Vec3, min_d: f64, max_d: f64, mut f: F) {
+        let min2 = min_d * min_d;
+        let max2 = max_d * max_d;
+        for &k in entries {
+            let k = k as usize;
+            let d2 = self.pos[k].dist_sq(p);
+            if d2 >= min2 && d2 <= max2 {
+                f(self.items[k], self.pos[k], d2);
+            }
+        }
+    }
+
     pub fn for_each_within<F: FnMut(u32, Vec3, f64)>(&self, p: Vec3, min_d: f64, max_d: f64, mut f: F) {
         let (x0, x1) = (self.axis_index(p.x - max_d, 0), self.axis_index(p.x + max_d, 0));
         let (y0, y1) = (self.axis_index(p.y - max_d, 1), self.axis_index(p.y + max_d, 1));
