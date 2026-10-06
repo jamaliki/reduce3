@@ -521,11 +521,10 @@ pub fn format_atom_line_serial(out: &mut String, a: &Atom, serial: &str, ag: &At
     let _ = write!(out, "{:<1}", if rg.icode.is_empty() { " " } else { &rg.icode });
     out.push_str("   ");
     for k in 0..3 {
-        let v = a.xyz[k].clamp(-1e7, 1e8);
-        let _ = write!(out, "{:8.3}", v);
+        crate::fastfmt::push_fixed(out, a.xyz[k].clamp(-1e7, 1e8), 3, 8);
     }
-    let _ = write!(out, "{:6.2}", a.occ.clamp(-1e5, 1e6));
-    let _ = write!(out, "{:6.2}", a.b.clamp(-1e5, 1e6));
+    crate::fastfmt::push_fixed(out, a.occ.clamp(-1e5, 1e6), 2, 6);
+    crate::fastfmt::push_fixed(out, a.b.clamp(-1e5, 1e6), 2, 6);
     let _ = write!(out, "      {:<4}{:>2}{:<2}", a.segid, a.element.trim(), a.charge.trim_end());
     // right-trim blanks
     while out.len() > start && out.ends_with(' ') {
@@ -541,7 +540,7 @@ pub fn format_atom_line_serial(out: &mut String, a: &Atom, serial: &str, ag: &At
         out.push(' ');
         for k in 0..6 {
             // "%7.0f": round half to even, and a tiny negative prints "-0"
-            let _ = write!(out, "{:7.0}", (u[k] * 10000.0).clamp(-1.0e7, 1.0e8));
+            crate::fastfmt::push_fixed(out, (u[k] * 10000.0).clamp(-1.0e7, 1.0e8), 0, 7);
         }
         let _ = write!(out, "  {:<4}{:>2}{:<2}", a.segid, a.element.trim(), a.charge.trim_end());
         while out.len() > ls && out.ends_with(' ') {

@@ -650,20 +650,52 @@ enum AtomItem {
 /// A value to send: from the source table, or made here.
 enum Val {
     Source(usize, usize),
-    Made(String),
+    /// A byte range of the row's scratch text.
+    Made(usize, usize),
     Missing(CifCell<'static>),
 }
 
-fn send_row<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, vals: &[Val], sink: &mut K) {
-    let cells: Vec<(Option<CifCell<'static>>, std::borrow::Cow<'_, str>)> = vals
+/// Append `text` to the row's scratch text and name its range.
+fn made(scratch: &mut String, text: &str) -> Val {
+    let s = scratch.len();
+    scratch.push_str(text);
+    Val::Made(s, scratch.len())
+}
+
+/// `format!("{:.prec$}", v)` into the row's scratch text.
+fn made_fixed(scratch: &mut String, v: f64, prec: u32) -> Val {
+    let s = scratch.len();
+    crate::fastfmt::push_fixed(scratch, v, prec, 0);
+    Val::Made(s, scratch.len())
+}
+
+fn made_int(scratch: &mut String, v: usize) -> Val {
+    let s = scratch.len();
+    let mut buf = [0u8; 20];
+    let mut k = buf.len();
+    let mut x = v;
+    loop {
+        k -= 1;
+        buf[k] = b'0' + (x % 10) as u8;
+        x /= 10;
+        if x == 0 {
+            break;
+        }
+    }
+    scratch.push_str(std::str::from_utf8(&buf[k..]).unwrap());
+    Val::Made(s, scratch.len())
+}
+
+fn send_row<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, vals: &[Val], scratch: &str, sink: &mut K) {
+    let cells: smallvec::SmallVec<[(Option<CifCell<'static>>, std::borrow::Cow<'_, str>); 32]> = vals
         .iter()
         .map(|v| match v {
             Val::Source(r, c) => (t.missing(*r, *c), t.cell(*r, *c)),
-            Val::Made(s) => (None, std::borrow::Cow::Borrowed(s.as_str())),
+            Val::Made(a, b) => (None, std::borrow::Cow::Borrowed(&scratch[*a..*b])),
             Val::Missing(m) => (Some(*m), std::borrow::Cow::Borrowed("")),
         })
         .collect();
-    let row: Vec<CifCell<'_>> = cells.iter().map(|(m, s)| m.unwrap_or(CifCell::Text(s))).collect();
+    let row: smallvec::SmallVec<[CifCell<'_>; 32]> = cells.iter().map(|(m, s)| m.unwrap_or(CifCell::Text(s))).collect();
     sink.row(&row);
 }
 
@@ -674,9 +706,11 @@ fn send_table<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, sink: &mut K) {
     if t.is_loop() {
         let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         sink.begin_loop(&refs, t.row_count());
+        let mut vals: Vec<Val> = Vec::with_capacity(ncol);
         for r in 0..t.row_count() {
-            let vals: Vec<Val> = (0..ncol).map(|c| Val::Source(r, c)).collect();
-            send_row(t, &vals, sink);
+            vals.clear();
+            vals.extend((0..ncol).map(|c| Val::Source(r, c)));
+            send_row(t, &vals, "", sink);
         }
         sink.end_loop();
     } else if t.row_count() > 0 {
@@ -746,43 +780,46 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
             "atom_site" => {
                 let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
                 sink.begin_loop(&refs, out.len());
+                let mut scratch = String::new();
+                let mut vals: Vec<Val> = Vec::with_capacity(roles.len());
                 for (k, &(ag, a, row)) in out.iter().enumerate() {
                     let input = a.src != Atom::NEW;
-                    let vals: Vec<Val> = roles
-                        .iter()
-                        .enumerate()
-                        .map(|(c, &role)| match role {
-                            AtomItem::Id => Val::Made((k + 1).to_string()),
+                    scratch.clear();
+                    vals.clear();
+                    for (c, &role) in roles.iter().enumerate() {
+                        let v = match role {
+                            AtomItem::Id => made_int(&mut scratch, k + 1),
                             AtomItem::Coord(i) => {
                                 let v = [a.xyz.x, a.xyz.y, a.xyz.z][i];
                                 match row {
                                     Some(r) if input && atoms.number(r, c) == Some(v) => Val::Source(r, c),
-                                    _ => Val::Made(format!("{:.3}", v)),
+                                    _ => made_fixed(&mut scratch, v, 3),
                                 }
                             }
                             AtomItem::Occupancy | AtomItem::BIso => {
                                 let v = if role == AtomItem::Occupancy { a.occ } else { a.b };
                                 match row {
                                     Some(r) if input && atoms.number(r, c) == Some(v) => Val::Source(r, c),
-                                    _ => Val::Made(format!("{:.2}", v)),
+                                    _ => made_fixed(&mut scratch, v, 2),
                                 }
                             }
                             AtomItem::Name => match row {
                                 Some(r) if input && atoms.cell(r, c).trim() == a.name.trim() => Val::Source(r, c),
-                                _ => Val::Made(a.name.trim().to_string()),
+                                _ => made(&mut scratch, a.name.trim()),
                             },
                             _ if input => Val::Source(row.unwrap_or(0), c),
-                            AtomItem::TypeSymbol => Val::Made(a.elem().to_string()),
+                            AtomItem::TypeSymbol => made(&mut scratch, a.elem()),
                             AtomItem::AltId if ag.altloc.is_empty() => Val::Missing(CifCell::NotApplicable),
-                            AtomItem::AltId => Val::Made(ag.altloc.clone()),
+                            AtomItem::AltId => made(&mut scratch, &ag.altloc),
                             AtomItem::Residue => match row {
                                 Some(r) => Val::Source(r, c),
                                 None => Val::Missing(CifCell::Unknown),
                             },
                             AtomItem::Charge | AtomItem::Other => Val::Missing(CifCell::Unknown),
-                        })
-                        .collect();
-                    send_row(&atoms, &vals, sink);
+                        };
+                        vals.push(v);
+                    }
+                    send_row(&atoms, &vals, &scratch, sink);
                 }
                 sink.end_loop();
             }
@@ -803,10 +840,12 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
                 let an_tags: Vec<String> = an.tags().iter().map(|s| s.to_string()).collect();
                 let refs: Vec<&str> = an_tags.iter().map(|s| s.as_str()).collect();
                 sink.begin_loop(&refs, rows.len());
+                let mut scratch = String::new();
                 for (k, r) in rows {
+                    scratch.clear();
                     let vals: Vec<Val> =
-                        (0..an_tags.len()).map(|c| if c == an_id { Val::Made((k + 1).to_string()) } else { Val::Source(r, c) }).collect();
-                    send_row(&an, &vals, sink);
+                        (0..an_tags.len()).map(|c| if c == an_id { made_int(&mut scratch, k + 1) } else { Val::Source(r, c) }).collect();
+                    send_row(&an, &vals, &scratch, sink);
                 }
                 sink.end_loop();
             }
@@ -834,13 +873,15 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
                 sink.begin_loop(&refs, t.row_count() + missing.len());
                 for r in 0..t.row_count() {
                     let vals: Vec<Val> = (0..t_tags.len()).map(|c| Val::Source(r, c)).collect();
-                    send_row(&t, &vals, sink);
+                    send_row(&t, &vals, "", sink);
                 }
+                let mut scratch = String::new();
                 for e in missing {
+                    scratch.clear();
                     let vals: Vec<Val> = (0..t_tags.len())
-                        .map(|c| if c == c_sym { Val::Made(e.clone()) } else { Val::Missing(CifCell::Unknown) })
+                        .map(|c| if c == c_sym { made(&mut scratch, &e) } else { Val::Missing(CifCell::Unknown) })
                         .collect();
-                    send_row(&t, &vals, sink);
+                    send_row(&t, &vals, &scratch, sink);
                 }
                 sink.end_loop();
             }

@@ -374,19 +374,40 @@ struct Ctx<'a> {
     snapshot: Option<Vec<AtomInfo>>,
     grid: SpatialGrid,
     /// (mover, slot) for atoms that move with a Mover (slot < n_moved).
-    dyn_of: FxHashMap<u32, (u32, u16)>,
+    dyn_of: DynOf,
     atom_movers: FxHashMap<u32, SmallVec<[u32; 4]>>,
     exclude: FxHashMap<u32, Vec<u32>>,
     dots: FxHashMap<u32, Arc<Vec<DotPair>>>,
     /// Largest distance of an atom's dots from its center.
     dot_reach: FxHashMap<u32, f64>,
-    /// Per Mover atom: the static grid entries near any of its positions
-    /// (center, radius covered, entries), filtered per state instead of
+    /// Per Mover atom: the static atoms near any of its positions that can
+    /// be its targets (not excluded, occupied), in grid order with their
+    /// info (center, radius covered, entries), filtered per state instead of
     /// querying the grid for each.
-    near: FxHashMap<u32, (Vec3, f64, Vec<u32>)>,
+    near: FxHashMap<u32, (Vec3, f64, Vec<(Vec3, AtomInfo)>)>,
     max_vdw: f64,
     /// Local index of each mover inside its clique.
     local: Vec<u32>,
+}
+
+/// (mover, slot) of each atom that moves with a Mover, by atom index.
+struct DynOf(Vec<(u32, u16)>);
+
+impl DynOf {
+    #[inline]
+    fn get(&self, a: &u32) -> Option<&(u32, u16)> {
+        self.0.get(*a as usize).filter(|e| e.0 != NONE)
+    }
+    #[inline]
+    fn contains_key(&self, a: &u32) -> bool {
+        self.get(a).is_some()
+    }
+    fn insert(&mut self, a: u32, v: (u32, u16)) {
+        if self.0.len() <= a as usize {
+            self.0.resize(a as usize + 1, (NONE, 0));
+        }
+        self.0[a as usize] = v;
+    }
 }
 
 /// The configuration of the Movers of one clique.
@@ -449,6 +470,36 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The static targets of atom `a` at `pa` (`for_each_within` over the grid
+    /// with the target filters), from its cached neighborhood when that
+    /// covers the position.
+    #[inline]
+    fn static_targets(&self, a: u32, pa: Vec3, ia: &AtomInfo, nearby: f64, excl: &[u32], out: &mut Vec<Target>) {
+        let pr = self.p.probe.probe_radius;
+        if let Some((c, r, entries)) = self.near.get(&a) {
+            if pa.dist(*c) + nearby + NEAR_MARGIN <= *r {
+                let (min2, max2) = (1e-5 * 1e-5, nearby * nearby);
+                for &(pb, ib) in entries {
+                    let d2 = pb.dist_sq(pa);
+                    if d2 >= min2 && d2 <= max2 && d2.sqrt() <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
+                        out.push(Target { pos: pb, info: ib });
+                    }
+                }
+                return;
+            }
+        }
+        let (w, min_occ) = (self.w, self.p.min_occupancy);
+        self.grid.for_each_within(pa, 1e-5, nearby, |b, pb, d2| {
+            if excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
+                return;
+            }
+            let ib = self.static_info(b);
+            if d2.sqrt() <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
+                out.push(Target { pos: pb, info: ib });
+            }
+        });
+    }
+
     /// Score one Mover atom under the clique state (`OptimizerC::scoreAtom`).
     fn score_atom(&self, st: &CliqueState, a: u32, buf: &mut ScoreBuf) -> ScoreDotsResult {
         self.score_atom_ext(st, a, buf, None)
@@ -490,26 +541,7 @@ impl<'a> Ctx<'a> {
             buf.excl.push((pe, ie.vdw_radius));
         }
         // static neighbors
-        let targets = &mut buf.targets;
-        let mut on_static = |b: u32, pb: Vec3, d2: f64| {
-            if excl.contains(&b) {
-                return;
-            }
-            if w.occ[b as usize].abs() < min_occ {
-                return;
-            }
-            let ib = self.static_info(b);
-            let lim = ia.vdw_radius + ib.vdw_radius + 2.0 * pr;
-            if d2.sqrt() <= lim {
-                targets.push(Target { pos: pb, info: ib });
-            }
-        };
-        match self.near.get(&a) {
-            Some((c, r, entries)) if pa.dist(*c) + nearby + NEAR_MARGIN <= *r => {
-                self.grid.for_each_within_entries(entries, pa, 1e-5, nearby, &mut on_static)
-            }
-            _ => self.grid.for_each_within(pa, 1e-5, nearby, &mut on_static),
-        }
+        self.static_targets(a, pa, &ia, nearby, excl, &mut buf.targets);
         // dynamic neighbors from interacting Movers
         if let Some(ms) = self.atom_movers.get(&a) {
             for &m in ms {
@@ -1372,7 +1404,7 @@ fn run_one(
     info += &tm.report("construct dot scorer");
 
     // static targets: run atoms (incl. phantoms) that do not move with a Mover
-    let mut dyn_of: FxHashMap<u32, (u32, u16)> = FxHashMap::default();
+    let mut dyn_of = DynOf(vec![(NONE, 0); w.len()]);
     for (mi, mv) in movers.iter().enumerate() {
         for slot in 0..mv.n_moved {
             dyn_of.insert(mv.atoms[slot], (mi as u32, slot as u16));
@@ -1405,7 +1437,7 @@ fn run_one(
     // static grid entries near each Mover atom over all of its positions;
     // fixed mode only: compat's grid files atoms by another position than it
     // measures (Reduce2's query misses some), so a filtered superset differs
-    let mut near: FxHashMap<u32, (Vec3, f64, Vec<u32>)> = FxHashMap::default();
+    let mut near: FxHashMap<u32, (Vec3, f64, Vec<(Vec3, AtomInfo)>)> = FxHashMap::default();
     for mv in movers.iter().filter(|_| !p.compat) {
         for slot in 0..mv.n_moved {
             let mut ps: Vec<Vec3> = mv.coarse_pos.iter().filter_map(|c| c.get(slot).copied()).collect();
@@ -1417,7 +1449,14 @@ fn run_one(
             let c = ps.iter().fold(Vec3::ZERO, |acc, &q| acc + q) / ps.len() as f64;
             let spread = ps.iter().map(|q| q.dist(c)).fold(0.0, f64::max);
             let r = max_vdw + w.info[a as usize].vdw_radius + 2.0 * p.probe.probe_radius + spread + NEAR_MARGIN;
-            near.insert(a, (c, r, grid.entries_within(c, r)));
+            let excl: &[u32] = exclude.get(&a).map(|v| v.as_slice()).unwrap_or(&[]);
+            let mut entries = Vec::new();
+            grid.for_each_within(c, 0.0, r, |b, pb, _| {
+                if !excl.contains(&b) && w.occ[b as usize].abs() >= p.min_occupancy {
+                    entries.push((pb, w.info[b as usize]));
+                }
+            });
+            near.insert(a, (c, r, entries));
         }
     }
 
@@ -1755,21 +1794,7 @@ fn atom_factors_dotwise(
         }
         // static targets (same filters and order as score_atom)
         let mut static_t: Vec<Target> = Vec::new();
-        let mut on_static = |b: u32, pb: Vec3, d2: f64| {
-            if excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
-                return;
-            }
-            let ib = ctx.static_info(b);
-            if d2.sqrt() <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
-                static_t.push(Target { pos: pb, info: ib });
-            }
-        };
-        match ctx.near.get(&a) {
-            Some((c, r, entries)) if pa.dist(*c) + nearby + NEAR_MARGIN <= *r => {
-                ctx.grid.for_each_within_entries(entries, pa, 1e-5, nearby, &mut on_static)
-            }
-            _ => ctx.grid.for_each_within(pa, 1e-5, nearby, &mut on_static),
-        }
+        ctx.static_targets(a, pa, &ia, nearby, excl, &mut static_t);
         // Mover targets: own Mover fixed, others per state
         let mover_targets = |om: u32, cfg: Cfg| -> Vec<Target> {
             let omv = &ctx.movers[om as usize];

@@ -97,10 +97,14 @@ pub trait CifSink {
 /// a character that would make it something else, contains blanks, or is a
 /// reserved word.
 pub fn needs_quotes(value: &str) -> bool {
-    value.is_empty()
-        || value.starts_with(['_', '#', '$', '\'', '"', '[', ']', ';'])
-        || value.contains([' ', '\t'])
-        || matches!(value.to_ascii_lowercase().as_str(), "loop_" | "stop_" | "global_")
+    let b = value.as_bytes();
+    let Some(&first) = b.first() else { return true };
+    // the special leading characters are ASCII, so the first byte decides
+    matches!(first, b'_' | b'#' | b'$' | b'\'' | b'"' | b'[' | b']' | b';')
+        || b.iter().any(|&c| c == b' ' || c == b'\t')
+        || value.eq_ignore_ascii_case("loop_")
+        || value.eq_ignore_ascii_case("stop_")
+        || value.eq_ignore_ascii_case("global_")
         || value.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data_") || p.eq_ignore_ascii_case("save_"))
 }
 
@@ -118,6 +122,17 @@ impl CifText {
 
     /// Write a value; true when it was a text field, which ends a line.
     fn value(&mut self, v: CifCell<'_>) -> bool {
+        // the plain case (the usual one) in one pass over the bytes
+        if let CifCell::Text(s) = v {
+            let b = s.as_bytes();
+            if let Some(&first) = b.first() {
+                let special_start = matches!(first, b'_' | b'#' | b'$' | b'\'' | b'"' | b'[' | b']' | b';');
+                if !special_start && !b.iter().any(|&c| matches!(c, b' ' | b'\t' | b'\n' | b'\r')) && !needs_quotes(s) {
+                    self.out.push_str(s);
+                    return false;
+                }
+            }
+        }
         match v {
             CifCell::Unknown => self.out.push('?'),
             CifCell::NotApplicable => self.out.push('.'),

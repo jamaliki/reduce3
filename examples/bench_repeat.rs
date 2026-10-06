@@ -19,13 +19,24 @@ fn main() {
     let field = |d: &str, key: &str| -> f64 {
         d.lines().find(|l| l.contains(key)).and_then(|l| l.split('=').nth(1)).and_then(|v| v.trim().trim_end_matches("sec").trim().parse::<f64>().ok()).unwrap_or(0.0) * 1e3
     };
+    let is_cif = a[2].ends_with(".cif");
     for _ in 0..n {
         let t = Instant::now();
-        let st = if a[2].ends_with(".cif") { reduce3::mmcif::read_mmcif(&text).unwrap() } else { reduce3::pdbio::read_pdb(&text) };
+        // as the command line does: mmCIF is parsed once and written back into its block
+        let doc = is_cif.then(|| reduce3::cif::parse(&text));
+        let block = doc.as_ref().map(|d| d.blocks.iter().find(|b| b.category("_atom_site").is_some()).unwrap());
+        let st = match block { Some(b) => reduce3::mmcif::structure_from_cif(b).unwrap(), None => reduce3::pdbio::read_pdb(&text) };
         let t1 = Instant::now();
         let out = reduce3::par::run_sequential(|| pipeline::run(st, &ml, &params)).unwrap();
         let t2 = Instant::now();
-        let s = reduce3::pdbio::write_pdb_preserving(&out.structure);
+        let s = match block {
+            Some(b) => {
+                let mut w = reduce3::cifsource::CifText::with_capacity(text.len() * 2);
+                reduce3::mmcif::write_cif_preserving(&out.structure, b, b.name, &mut w).unwrap();
+                w.out
+            }
+            None => reduce3::pdbio::write_pdb_preserving(&out.structure),
+        };
         std::hint::black_box(s);
         tr.push((t1 - t).as_secs_f64() * 1e3);
         tp.push((t2 - t1).as_secs_f64() * 1e3);

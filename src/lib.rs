@@ -14,6 +14,7 @@ pub mod ccdrestraints;
 pub mod cell;
 pub mod cif;
 pub mod cifsource;
+pub mod fastfmt;
 pub mod geom;
 pub mod hplace;
 pub mod interp;
