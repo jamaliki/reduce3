@@ -79,7 +79,7 @@ without flips.
 | Hydrogen placement vs. dumps, 13 structures | same atoms, names, riding types; coordinates equal to 0.0000 Å, about 98% of them bit-identical |
 | Optimizer on Reduce2's own intermediate state (26 dumps) | same report, coordinates and deletions in all 26 |
 | Residues only the CCD describes: 1fdo (6MO, Fe4S4 cluster), 2atz (DGT, disulfide to a symmetry copy), 3fx8 (FE2), with and without flips | **byte-identical** in all 6 (Reduce2 run with RDKit) |
-| Restraints Reduce2 builds from the CCD, per entry (`reference/harness/dump_ccd_restraints.py`) | identical acceptance, values and order in a 3,600-entry sample of the CCD entries that neither library describes |
+| Restraints Reduce2 builds from the CCD, per entry (`reference/harness/dump_ccd_restraints.py`) | identical acceptance, values and order for all 3,093 CCD entries that neither library describes (2,215 accepted, 878 rejected) |
 
 Bit-exact agreement needed two things beyond porting the code:
 
