@@ -574,43 +574,13 @@ fn h_references(ml: &MonLib, resname: &str, n_h: usize, n_heavy: usize) -> Vec<(
         }
     }
     if let Some(c) = comp {
-        if let Some(sites) = dictionary_sites(&c, resname) {
+        if let Some(sites) = ml.dictionary_sites(&c.source, resname) {
             let elements: FxHashMap<String, String> = c.atoms.iter().map(|a| (a.id.clone(), a.type_symbol.clone())).collect();
             let pairs: Vec<(String, String)> = c.bonds.iter().map(|b| (b.a1.clone(), b.a2.clone())).collect();
             result.extend(groups_from(&elements, &pairs, &sites));
         }
     }
     result
-}
-
-/// Ideal sites from a restraint dictionary that carries coordinates.
-fn dictionary_sites(c: &Comp, resname: &str) -> Option<FxHashMap<String, Vec3>> {
-    let text = std::fs::read_to_string(&c.source).ok()?;
-    let doc = crate::cif::parse(&text);
-    for b in &doc.blocks {
-        let Some(cat) = b.category("_chem_comp_atom") else { continue };
-        let (Some(ai), Some(xi), Some(yi), Some(zi)) = (cat.col("atom_id"), cat.col("x"), cat.col("y"), cat.col("z")) else { continue };
-        let ci = cat.col("comp_id");
-        if ci.is_none() && b.name != format!("comp_{}", resname) {
-            continue;
-        }
-        let mut sites = FxHashMap::default();
-        for r in 0..cat.nrows() {
-            if let Some(ci) = ci {
-                if cat.get(r, ci).trim() != resname {
-                    continue;
-                }
-            }
-            let (x, y, z) = (crate::cif::parse_f64(cat.get(r, xi)), crate::cif::parse_f64(cat.get(r, yi)), crate::cif::parse_f64(cat.get(r, zi)));
-            if let (Some(x), Some(y), Some(z)) = (x, y, z) {
-                sites.insert(cat.get(r, ai).trim_matches('"').to_string(), v3(x, y, z));
-            }
-        }
-        if !sites.is_empty() {
-            return Some(sites);
-        }
-    }
-    None
 }
 
 fn chiral_volume(c: Vec3, a: Vec3, b: Vec3, h: Vec3) -> f64 {

@@ -38,7 +38,14 @@ reduce3 model.cif add_flip_movers=True         # writes modelFH.cif and modelFH.
 reduce3 --compat model.pdb -o out.pdb          # behave exactly like Reduce2
 reduce3 modelH.pdb approach=optimize           # optimize existing hydrogens
 reduce3 modelH.pdb approach=remove             # strip hydrogens
+reduce3 --out-dir out/ a.cif b.cif c.pdb       # several models in one run
+reduce3 --out-dir out/ --batch models.txt add_flip_movers=True   # paths, one per line
 ```
+
+Batch mode (more than one model, `--batch FILE` or `--out-dir`) loads the monomer library once and
+runs `--jobs N` models at once (default: all cores), each on one thread; the outputs are the same
+as separate runs give. A model that fails is reported and skipped, and the exit status is nonzero
+if any failed. `--no-description` skips the report files.
 
 Reduce2's `name=value` parameters work the same way, with the same defaults: `approach`,
 `add_flip_movers`, `n_terminal_charge`, `keep_existing_H`, `exclude_water`,

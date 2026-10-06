@@ -8,11 +8,21 @@ use pipeline::{Approach, Params};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USAGE: &str = "\
 Reduce3: add hydrogens to a macromolecular model and optimize the rotatable
 and flippable groups (a Rust reimplementation of cctbx Reduce2).
 
 Usage: reduce3 [options] model.pdb [name=value ...]
+       reduce3 [options] --out-dir DIR model1.cif model2.pdb ... [name=value ...]
+       reduce3 [options] --out-dir DIR --batch list.txt [name=value ...]
+
+Batch mode (several models, or --batch): the monomer library is loaded once and
+models are processed in parallel, each on one thread. A model that fails is
+reported and skipped; the exit status is nonzero if any failed.
 
 Options:
   --compat              reproduce Reduce2 exactly, including its known bugs
@@ -20,6 +30,10 @@ Options:
                         $REDUCE3_CHEM_DATA, $CHEM_DATA, or the active conda env
   -o, --output FILE     output model (same as output.filename=FILE)
   --threads N           worker threads (default: all cores)
+  --batch FILE          read model paths from FILE, one per line (- for stdin)
+  --out-dir DIR         write outputs to DIR (batch mode; default: .)
+  --jobs N              models processed at once in batch mode (default: all cores)
+  --no-description      do not write the description (report) file
   -q, --quiet           no progress messages
   -h, --help            this help
   -V, --version         print the version
@@ -53,7 +67,11 @@ fn none_or(v: &str) -> Option<String> {
 }
 
 struct Cli {
-    input: PathBuf,
+    inputs: Vec<PathBuf>,
+    batch_list: Option<String>,
+    out_dir: Option<PathBuf>,
+    jobs: Option<usize>,
+    no_description: bool,
     output: Option<PathBuf>,
     description: Option<PathBuf>,
     write_files: bool,
@@ -65,7 +83,11 @@ struct Cli {
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut cli = Cli {
-        input: PathBuf::new(),
+        inputs: Vec::new(),
+        batch_list: None,
+        out_dir: None,
+        jobs: None,
+        no_description: false,
         output: None,
         description: None,
         write_files: true,
@@ -74,7 +96,6 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         quiet: false,
         params: Params::default(),
     };
-    let mut input: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -94,6 +115,10 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
             "--chem-data" => cli.chem_data = Some(next(&mut i)?),
             "-o" | "--output" => cli.output = Some(PathBuf::from(next(&mut i)?)),
             "--threads" => cli.threads = Some(next(&mut i)?.parse().map_err(|_| "bad --threads value".to_string())?),
+            "--batch" => cli.batch_list = Some(next(&mut i)?),
+            "--out-dir" => cli.out_dir = Some(PathBuf::from(next(&mut i)?)),
+            "--jobs" => cli.jobs = Some(next(&mut i)?.parse().map_err(|_| "bad --jobs value".to_string())?),
+            "--no-description" => cli.no_description = true,
             _ if a.contains('=') && !a.starts_with('-') => {
                 let (k, v) = a.split_once('=').unwrap();
                 let key = k.trim().trim_start_matches("reduce2.");
@@ -167,16 +192,13 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                 }
             }
             _ if a.starts_with('-') && a.len() > 1 => return Err(format!("unknown option: {}", a)),
-            _ => {
-                if input.is_some() {
-                    return Err(format!("more than one input model given ({})", a));
-                }
-                input = Some(PathBuf::from(a));
-            }
+            _ => cli.inputs.push(PathBuf::from(a)),
         }
         i += 1;
     }
-    cli.input = input.ok_or_else(|| "no input model given".to_string())?;
+    if cli.inputs.is_empty() && cli.batch_list.is_none() {
+        return Err("no input model given".to_string());
+    }
     cli.params.opt.compat = cli.params.compat;
     Ok(cli)
 }
@@ -204,11 +226,105 @@ fn default_output(input: &Path, flips: bool) -> PathBuf {
     PathBuf::from(format!("{}{}{}", stem, if flips { "FH" } else { "H" }, ext))
 }
 
-fn run_cli(args: &[String]) -> Result<(), String> {
-    let cli = parse_args(args)?;
-    if let Some(n) = cli.threads {
-        let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
+/// One model to process and where its results go.
+struct Job {
+    input: PathBuf,
+    output: PathBuf,
+    description: Option<PathBuf>,
+    /// False for `output.write_files=False`: run, write nothing.
+    write: bool,
+}
+
+/// Inputs this large are read again for writing rather than kept parsed
+/// through the run (peak memory of the largest entries).
+const KEEP_PARSED_BELOW: usize = 32 << 20;
+
+/// Read, process and write one model; returns its atom count.
+fn process_one(job: &Job, ml: &monlib::MonLib, params: &Params, header: &str) -> Result<usize, String> {
+    let text = std::fs::read_to_string(&job.input).map_err(|e| format!("cannot read {}: {}", job.input.display(), e))?;
+    let lower = job.input.to_string_lossy().to_ascii_lowercase();
+    let is_cif = lower.ends_with(".cif") || lower.ends_with(".mmcif") || text.trim_start().starts_with("data_");
+    let out_lower = job.output.to_string_lossy().to_ascii_lowercase();
+    let write_pdb_format = out_lower.ends_with(".pdb") || out_lower.ends_with(".ent");
+    // fixed mode writes mmCIF back into its source block: parse it once
+    let keep_doc = is_cif && !write_pdb_format && !params.compat && text.len() < KEEP_PARSED_BELOW;
+    model::mem_checkpoint("start");
+    let source_block = |doc: &'_ reduce3::cif::Document<'_>| -> Result<usize, String> {
+        doc.blocks.iter().position(|b| b.category("_atom_site").is_some()).ok_or_else(|| "no _atom_site loop found in the mmCIF file".to_string())
+    };
+    // the text is kept only when its parsed block is written back
+    let (st, kept) = if keep_doc {
+        (None, Some(text))
+    } else {
+        (Some(if is_cif { mmcif::read_mmcif(&text)? } else { pdbio::read_pdb(&text) }), None)
+    };
+    let doc = kept.as_deref().map(reduce3::cif::parse);
+    let st = match (st, &doc) {
+        (Some(st), _) => st,
+        (None, Some(d)) => mmcif::structure_from_cif(&d.blocks[source_block(d)?])?,
+        (None, None) => unreachable!("a model or its parsed text"),
+    };
+    model::mem_checkpoint("read");
+    let n_atoms = st.atoms_size();
+    if n_atoms == 0 {
+        return Err(format!("no atoms found in {}", job.input.display()));
     }
+    let out = pipeline::run(st, ml, params)?;
+    model::mem_checkpoint("pipeline done");
+    if !job.write {
+        return Ok(n_atoms);
+    }
+    let model_text = if write_pdb_format && params.compat {
+        pdbio::write_pdb(&out.structure, true)
+    } else if write_pdb_format {
+        // keep SSBOND, LINK and CONECT (fixed mode)
+        pdbio::write_pdb_preserving(&out.structure)
+    } else if is_cif && !params.compat {
+        // keep every category of the input block (fixed mode)
+        let write = |doc: &reduce3::cif::Document<'_>, size: usize| -> Result<String, String> {
+            let block = &doc.blocks[source_block(doc)?];
+            let mut w = reduce3::cifsource::CifText::with_capacity(size + out.structure.atoms_size() * 100);
+            mmcif::write_cif_preserving(&out.structure, block, block.name, &mut w)?;
+            Ok(w.out)
+        };
+        match &doc {
+            Some(d) => write(d, kept.as_ref().map_or(0, |t| t.len()))?,
+            None => {
+                let text = std::fs::read_to_string(&job.input).map_err(|e| format!("cannot read {}: {}", job.input.display(), e))?;
+                let d = reduce3::cif::parse(&text);
+                write(&d, text.len())?
+            }
+        }
+    } else {
+        mmcif::write_mmcif(&out.structure)
+    };
+    std::fs::write(&job.output, model_text).map_err(|e| format!("cannot write {}: {}", job.output.display(), e))?;
+    if let Some(description) = &job.description {
+        let mut desc = String::with_capacity(header.len() + out.description.len());
+        desc.push_str(header);
+        desc.push_str(&out.description);
+        std::fs::write(description, desc).map_err(|e| format!("cannot write {}: {}", description.display(), e))?;
+    }
+    Ok(n_atoms)
+}
+
+fn description_path(output: &Path) -> PathBuf {
+    PathBuf::from(output.to_string_lossy().replace(".pdb", ".txt").replace(".cif", ".txt"))
+}
+
+/// The description file's first lines: version, time and command line.
+fn description_header() -> String {
+    let mut h = format!("reduce3 v.{}, run {}\n", env!("CARGO_PKG_VERSION"), utc_timestamp());
+    for a in std::env::args() {
+        h.push(' ');
+        h.push_str(&a);
+    }
+    h.push('\n');
+    h
+}
+
+fn run_cli(args: &[String]) -> Result<(), String> {
+    let mut cli = parse_args(args)?;
     let say = |m: &str| {
         if !cli.quiet {
             eprintln!("{}", m);
@@ -217,59 +333,78 @@ fn run_cli(args: &[String]) -> Result<(), String> {
     let root = monlib::MonLib::locate(cli.chem_data.as_deref()).ok_or_else(|| {
         "could not find chem_data (the monomer library). Pass --chem-data DIR or set REDUCE3_CHEM_DATA.".to_string()
     })?;
-    let t0 = std::time::Instant::now();
-    let text = std::fs::read_to_string(&cli.input).map_err(|e| format!("cannot read {}: {}", cli.input.display(), e))?;
-    let lower = cli.input.to_string_lossy().to_ascii_lowercase();
-    let is_cif = lower.ends_with(".cif") || lower.ends_with(".mmcif") || text.trim_start().starts_with("data_");
-    model::mem_checkpoint("start");
-    let st = if is_cif { mmcif::read_mmcif(&text)? } else { pdbio::read_pdb(&text) };
-    drop(text);
-    model::mem_checkpoint("read");
-    if st.atoms_size() == 0 {
-        return Err(format!("no atoms found in {}", cli.input.display()));
-    }
-    let ml = monlib::MonLib::load(&root)?;
-    say(&format!("Read {} ({} atoms)", cli.input.display(), st.atoms_size()));
-    let out = pipeline::run(st, &ml, &cli.params)?;
-    model::mem_checkpoint("pipeline done");
-    let output = cli.output.clone().unwrap_or_else(|| default_output(&cli.input, cli.params.opt.add_flip_movers));
-    let out_lower = output.to_string_lossy().to_ascii_lowercase();
-    let write_pdb_format = out_lower.ends_with(".pdb") || out_lower.ends_with(".ent");
-    let description = cli.description.clone().unwrap_or_else(|| {
-        let s = output.to_string_lossy().replace(".pdb", ".txt").replace(".cif", ".txt");
-        PathBuf::from(s)
-    });
-    if cli.write_files {
-        let mut desc = format!("reduce3 v.{}, run {}\n", env!("CARGO_PKG_VERSION"), utc_timestamp());
-        for a in std::env::args() {
-            desc.push(' ');
-            desc.push_str(&a);
-        }
-        desc.push('\n');
-        desc.push_str(&out.description);
-        let model_text = if write_pdb_format && cli.params.compat {
-            pdbio::write_pdb(&out.structure, true)
-        } else if write_pdb_format {
-            // keep SSBOND, LINK and CONECT (fixed mode)
-            pdbio::write_pdb_preserving(&out.structure)
-        } else if is_cif && !cli.params.compat {
-            // keep every category of the input block (fixed mode)
-            let text = std::fs::read_to_string(&cli.input).map_err(|e| format!("cannot read {}: {}", cli.input.display(), e))?;
-            let doc = reduce3::cif::parse(&text);
-            let block = doc
-                .blocks
-                .iter()
-                .find(|b| b.category("_atom_site").is_some())
-                .ok_or_else(|| "no _atom_site loop found in the mmCIF file".to_string())?;
-            let mut w = reduce3::cifsource::CifText::with_capacity(text.len() + out.structure.atoms_size() * 100);
-            mmcif::write_cif_preserving(&out.structure, block, block.name, &mut w)?;
-            w.out
+    if let Some(list) = &cli.batch_list {
+        let text = if list == "-" {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| format!("cannot read the model list: {}", e))?;
+            s
         } else {
-            mmcif::write_mmcif(&out.structure)
+            std::fs::read_to_string(list).map_err(|e| format!("cannot read {}: {}", list, e))?
         };
-        std::fs::write(&output, model_text).map_err(|e| format!("cannot write {}: {}", output.display(), e))?;
-        std::fs::write(&description, desc).map_err(|e| format!("cannot write {}: {}", description.display(), e))?;
-        say(&format!("Wrote {} and {} ({:.3} s)", output.display(), description.display(), t0.elapsed().as_secs_f64()));
+        cli.inputs.extend(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(PathBuf::from));
+    }
+    let batch = cli.inputs.len() > 1 || cli.batch_list.is_some() || cli.out_dir.is_some();
+    if !batch {
+        if let Some(n) = cli.threads {
+            let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
+        }
+        let t0 = std::time::Instant::now();
+        let input = cli.inputs[0].clone();
+        let output = cli.output.clone().unwrap_or_else(|| default_output(&input, cli.params.opt.add_flip_movers));
+        let description = (!cli.no_description).then(|| cli.description.clone().unwrap_or_else(|| description_path(&output)));
+        let job = Job { input, output, description, write: cli.write_files };
+        let ml = monlib::MonLib::load(&root)?;
+        let n = process_one(&job, &ml, &cli.params, &description_header())?;
+        say(&format!("Read {} ({} atoms)", job.input.display(), n));
+        if job.write {
+            let desc = job.description.as_ref().map(|d| format!(" and {}", d.display())).unwrap_or_default();
+            say(&format!("Wrote {}{} ({:.3} s)", job.output.display(), desc, t0.elapsed().as_secs_f64()));
+        }
+        return Ok(());
+    }
+    if cli.output.is_some() || cli.description.is_some() {
+        return Err("output.filename and output.description_file_name name one model's files; use --out-dir in batch mode".to_string());
+    }
+    let out_dir = cli.out_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
+    let flips = cli.params.opt.add_flip_movers;
+    let mut seen: std::collections::HashMap<PathBuf, PathBuf> = std::collections::HashMap::new();
+    let mut jobs: Vec<Job> = Vec::with_capacity(cli.inputs.len());
+    for input in &cli.inputs {
+        let output = out_dir.join(default_output(input, flips));
+        if let Some(other) = seen.insert(output.clone(), input.clone()) {
+            return Err(format!("{} and {} would both write {}", other.display(), input.display(), output.display()));
+        }
+        let description = (!cli.no_description).then(|| description_path(&output));
+        jobs.push(Job { input: input.clone(), output, description, write: cli.write_files });
+    }
+    let n_jobs = cli.jobs.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)).max(1);
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(n_jobs).build().map_err(|e| e.to_string())?;
+    let t0 = std::time::Instant::now();
+    let ml = monlib::MonLib::load(&root)?;
+    let header = description_header();
+    let failed = std::sync::atomic::AtomicUsize::new(0);
+    pool.install(|| {
+        use rayon::prelude::*;
+        jobs.par_iter().with_max_len(1).for_each(|job| {
+            if let Err(e) = reduce3::par::run_sequential(|| process_one(job, &ml, &cli.params, &header)) {
+                failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("reduce3: {}: error: {}", job.input.display(), e);
+            }
+        })
+    });
+    let failed = failed.into_inner();
+    let secs = t0.elapsed().as_secs_f64();
+    say(&format!(
+        "{} models, {} failed, {:.1} s ({:.1} models/s, {} at once)",
+        jobs.len(),
+        failed,
+        secs,
+        jobs.len() as f64 / secs.max(1e-9),
+        n_jobs
+    ));
+    if failed > 0 {
+        return Err(format!("{} of {} models failed", failed, jobs.len()));
     }
     Ok(())
 }

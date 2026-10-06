@@ -328,6 +328,7 @@ pub struct MonLib {
     ccd_cache: RwLock<FxHashMap<String, Option<Arc<CcdEntry>>>>,
     ccd_comp_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
     variant_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
+    sites_cache: RwLock<FxHashMap<(PathBuf, String), Option<Arc<FxHashMap<String, crate::geom::Vec3>>>>>,
     /// User-supplied dictionaries (restraint CIF files), which win over the library.
     user_comps: FxHashMap<String, Arc<Comp>>,
 }
@@ -395,6 +396,7 @@ impl MonLib {
             ccd_cache: RwLock::new(FxHashMap::default()),
             ccd_comp_cache: RwLock::new(FxHashMap::default()),
             variant_cache: RwLock::new(FxHashMap::default()),
+            sites_cache: RwLock::new(FxHashMap::default()),
             user_comps: FxHashMap::default(),
         };
         let read = |p: PathBuf| -> Result<String, String> {
@@ -692,6 +694,18 @@ impl MonLib {
     /// The GeoStd neutron or low-pH variant of a residue dictionary
     /// (`get_comp_comp_id_direct(resname, pH_range=...)`, neutron first), which
     /// cctbx applies to residues whose hydrogens have no energy type.
+    /// Ideal sites of `resname` in a restraint file that carries coordinates
+    /// (`_dictionary_sites`), read once per file and residue name.
+    pub fn dictionary_sites(&self, source: &Path, resname: &str) -> Option<Arc<FxHashMap<String, crate::geom::Vec3>>> {
+        let key = (source.to_path_buf(), resname.to_string());
+        if let Some(s) = self.sites_cache.read().unwrap().get(&key) {
+            return s.clone();
+        }
+        let sites = read_dictionary_sites(source, resname).map(Arc::new);
+        self.sites_cache.write().unwrap().insert(key, sites.clone());
+        sites
+    }
+
     pub fn ph_variant(&self, comp_id: &str) -> Option<Arc<Comp>> {
         let id = comp_id.trim().to_ascii_uppercase();
         if id.is_empty() {
@@ -1276,4 +1290,33 @@ fn parse_mod_block(b: &cif::Block, m: &mut ChemMod) {
             });
         }
     }
+}
+
+fn read_dictionary_sites(source: &Path, resname: &str) -> Option<FxHashMap<String, crate::geom::Vec3>> {
+    let text = std::fs::read_to_string(source).ok()?;
+    let doc = cif::parse(&text);
+    for b in &doc.blocks {
+        let Some(cat) = b.category("_chem_comp_atom") else { continue };
+        let (Some(ai), Some(xi), Some(yi), Some(zi)) = (cat.col("atom_id"), cat.col("x"), cat.col("y"), cat.col("z")) else { continue };
+        let ci = cat.col("comp_id");
+        if ci.is_none() && b.name != format!("comp_{}", resname) {
+            continue;
+        }
+        let mut sites = FxHashMap::default();
+        for r in 0..cat.nrows() {
+            if let Some(ci) = ci {
+                if cat.get(r, ci).trim() != resname {
+                    continue;
+                }
+            }
+            let (x, y, z) = (cif::parse_f64(cat.get(r, xi)), cif::parse_f64(cat.get(r, yi)), cif::parse_f64(cat.get(r, zi)));
+            if let (Some(x), Some(y), Some(z)) = (x, y, z) {
+                sites.insert(cat.get(r, ai).trim_matches('"').to_string(), crate::geom::v3(x, y, z));
+            }
+        }
+        if !sites.is_empty() {
+            return Some(sites);
+        }
+    }
+    None
 }

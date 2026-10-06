@@ -27,6 +27,7 @@ pub mod mmcif;
 pub mod model;
 pub mod movers;
 pub mod optimizer;
+pub mod par;
 pub mod pipeline;
 pub mod pdbio;
 pub mod probe;

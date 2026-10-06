@@ -13,7 +13,6 @@ use crate::movers::{self, Mover, MoverKind, SingleHOptions};
 use crate::probe::*;
 use crate::resclass::ResClass;
 use crate::world::World;
-use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::fmt::Write as _;
@@ -1206,9 +1205,7 @@ fn run_one(
             }
         }
         cand.sort_unstable();
-        let results: Vec<(usize, usize, Vec<(u32, u32)>)> = cand
-            .par_iter()
-            .map(|&(i, j)| {
+        let results: Vec<(usize, usize, Vec<(u32, u32)>)> = crate::par::map_collect(&cand, |&(i, j)| {
                 let mut entries: Vec<(u32, u32)> = Vec::new();
                 let mi = &movers[i];
                 let mj = &movers[j];
@@ -1241,8 +1238,7 @@ fn run_one(
                     }
                 }
                 (i, j, entries)
-            })
-            .collect();
+            });
         for (i, j, entries) in results {
             if !entries.is_empty() {
                 edges.push((i, j));
@@ -1316,7 +1312,7 @@ fn run_one(
     }
     let depth = p.bonded_neighbor_depth;
     let exclude: FxHashMap<u32, Vec<u32>> =
-        mover_atoms.par_iter().map(|&a| (a, atoms_within_n_bonds(w, a, pr, depth, 3))).collect();
+        crate::par::map_collect(&mover_atoms, |&a| (a, atoms_within_n_bonds(w, a, pr, depth, 3)));
     info += &tm.report("determine excluded atoms");
     let mut cache = DotSphereCache::new(p.probe.density);
     let mut dots: FxHashMap<u32, Arc<Vec<DotPair>>> = FxHashMap::default();
@@ -1394,7 +1390,7 @@ fn run_one(
         ident_ctx.local = (0..nm as u32).collect();
         compat_optimize(&ident_ctx, &components, &edges, v)
     } else {
-        components.par_iter().map(|comp| optimize_clique(&ctx, comp)).collect()
+        crate::par::map_collect(&components, |comp| optimize_clique(&ctx, comp))
     };
 
     // initial scores into mover info
@@ -2209,9 +2205,7 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     };
     let dotwise = std::env::var_os("REDUCE3_ATOMWISE").is_none();
     let abandoned = std::sync::atomic::AtomicBool::new(false);
-    let built: Vec<Option<(usize, Vec<Factor>, usize, usize)>> = tasks
-        .par_iter()
-        .map(|&(i, slot)| {
+    let built: Vec<Option<(usize, Vec<Factor>, usize, usize)>> = crate::par::map_collect(&tasks, |&(i, slot)| {
             if dotwise {
                 let (f, c, h) = atom_factors_dotwise(ctx, comp, &doms, i, slot, &abandoned)?;
                 Some((i, f, c, h))
@@ -2219,13 +2213,15 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
                 let (f, c, h) = atom_factor(ctx, comp, &doms, i, slot);
                 Some((i, vec![f], c, h))
             }
-        })
-        .collect();
+        });
     let mut atom_factors: Vec<(usize, Factor)> = Vec::with_capacity(built.len());
     let mut exact = !dense && built.iter().all(|b| b.is_some());
     for (i, fs, c, h) in built.into_iter().flatten() {
-        calculated += c;
-        cached += h;
+        // the partial work of an abandoned search depends on thread timing
+        if exact {
+            calculated += c;
+            cached += h;
+        }
         for f in fs {
             factors.push(Factor { scope: f.scope.clone(), dims: f.dims.clone(), table: f.table.clone() });
             atom_factors.push((i, f));

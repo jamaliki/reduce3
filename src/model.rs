@@ -3,6 +3,8 @@
 //! atom-group ordering, blank-altloc handling, conformers and atom sorting.
 
 use crate::geom::Vec3;
+use rustc_hash::FxHashMap;
+use std::sync::OnceLock;
 use crate::resclass::{self, ResClass};
 
 #[derive(Clone, Debug)]
@@ -453,26 +455,48 @@ const BIG_NA_ORDER: &[&str] = &[
     "H2", "H21", "H22", "HO5'", "H2'1", "H2'2",
 ];
 
+/// Position of each name in an ordering (the first, as `position` finds it).
+fn order_index(order: &'static [&'static str], cell: &'static OnceLock<FxHashMap<&'static str, usize>>) -> &'static FxHashMap<&'static str, usize> {
+    cell.get_or_init(|| {
+        let mut m = FxHashMap::default();
+        for (k, name) in order.iter().enumerate() {
+            m.entry(*name).or_insert(k);
+        }
+        m
+    })
+}
+
 fn sort_atom_group(ag: &mut AtomGroup) {
+    static AA: OnceLock<FxHashMap<&str, usize>> = OnceLock::new();
+    static SMALL_NA: OnceLock<FxHashMap<&str, usize>> = OnceLock::new();
+    static BIG_NA: OnceLock<FxHashMap<&str, usize>> = OnceLock::new();
     let cls = resclass::get_class(&ag.resname);
-    let order: &[&str] = if cls == ResClass::CommonRnaDna || cls == ResClass::ModifiedRnaDna {
-        if ag.get_atom("N9").is_none() { SMALL_NA_ORDER } else { BIG_NA_ORDER }
+    let (order, index) = if cls == ResClass::CommonRnaDna || cls == ResClass::ModifiedRnaDna {
+        if ag.get_atom("N9").is_none() { (SMALL_NA_ORDER, order_index(SMALL_NA_ORDER, &SMALL_NA)) } else { (BIG_NA_ORDER, order_index(BIG_NA_ORDER, &BIG_NA)) }
     } else {
-        AA_ORDER
+        (AA_ORDER, order_index(AA_ORDER, &AA))
     };
-    // Precompute keys: (position in list or len, is_hydrogen-by-name, padded name).
+    // Keys once per atom: (position in the list or its length, is_hydrogen-by-name).
     let n = order.len();
-    let key = |a: &Atom| {
-        let stripped = a.name.trim().replace('*', "'");
-        let pos = order.iter().position(|x| *x == stripped).unwrap_or(n);
-        let is_h = stripped.as_bytes().first() == Some(&b'H');
-        (pos, is_h)
-    };
+    let keys: Vec<(usize, bool)> = ag
+        .atoms
+        .iter()
+        .map(|a| {
+            let trimmed = a.name.trim();
+            let starred;
+            let stripped = if trimmed.contains('*') {
+                starred = trimmed.replace('*', "'");
+                starred.as_str()
+            } else {
+                trimmed
+            };
+            (index.get(stripped).copied().unwrap_or(n), stripped.as_bytes().first() == Some(&b'H'))
+        })
+        .collect();
     // The iotbx comparator: atoms not in the list compare by (H last, then
     // padded name); otherwise non-H before H, then by list position.
-    ag.atoms.sort_by(|a1, a2| {
-        let (p1, h1) = key(a1);
-        let (p2, h2) = key(a2);
+    let cmp = |i: usize, j: usize| {
+        let ((p1, h1), (p2, h2)) = (keys[i], keys[j]);
         use std::cmp::Ordering::*;
         if p1 == p2 {
             if h1 && !h2 {
@@ -481,7 +505,7 @@ fn sort_atom_group(ag: &mut AtomGroup) {
             if h2 && !h1 {
                 return Less;
             }
-            return a1.name.cmp(&a2.name);
+            return ag.atoms[i].name.cmp(&ag.atoms[j].name);
         }
         if h1 && !h2 {
             return Greater;
@@ -490,7 +514,15 @@ fn sort_atom_group(ag: &mut AtomGroup) {
             return Less;
         }
         p1.cmp(&p2)
-    });
+    };
+    if (1..ag.atoms.len()).all(|k| cmp(k - 1, k) != std::cmp::Ordering::Greater) {
+        return;
+    }
+    // a stable sort of the indices with the same comparator: the same order
+    let mut idx: Vec<usize> = (0..ag.atoms.len()).collect();
+    idx.sort_by(|&i, &j| cmp(i, j));
+    let mut old: Vec<Option<Atom>> = std::mem::take(&mut ag.atoms).into_iter().map(Some).collect();
+    ag.atoms = idx.into_iter().map(|k| old[k].take().unwrap()).collect();
 }
 
 // ----------------------------------------------------------------------------

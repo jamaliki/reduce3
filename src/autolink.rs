@@ -964,7 +964,6 @@ impl GlycoAtoms {
 /// bonded before linking starts, atoms of one residue group, and different
 /// non-blank altlocs.
 fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
-    use rayon::prelude::*;
     let flat = cx.flat;
     let n = flat.pos.len();
     let cell = MAX_BONDED_CUTOFF;
@@ -980,7 +979,7 @@ fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
             (pack(flat.path[a].model, x, y, z), a as u32)
         })
         .collect();
-    cells.par_sort_unstable();
+    crate::par::sort_unstable_by_key(&mut cells, |&c| c);
     let mut ranges: FxHashMap<u64, (usize, usize)> = FxHashMap::default();
     let mut k = 0;
     while k < cells.len() {
@@ -995,9 +994,7 @@ fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
         let p = flat.path[a as usize];
         (p.model, p.chain, p.rg)
     };
-    let mut out: Vec<(f64, u32, u32)> = cells
-        .par_iter()
-        .flat_map_iter(|&(_, a)| {
+    let mut out: Vec<(f64, u32, u32)> = crate::par::flat_map_collect(&cells, |&(_, a)| {
             let pa = flat.pos[a as usize];
             let (x, y, z) = ckey(pa);
             let m = flat.path[a as usize].model;
@@ -1029,9 +1026,8 @@ fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
                 }
             }
             v.into_iter()
-        })
-        .collect();
-    out.par_sort_unstable_by_key(|&(d, i, j)| (d.to_bits(), i, j));
+        });
+    crate::par::sort_unstable_by_key(&mut out, |&(d, i, j)| (d.to_bits(), i, j));
     out
 }
 
