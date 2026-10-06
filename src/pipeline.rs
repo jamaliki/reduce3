@@ -23,7 +23,8 @@ pub enum Approach {
 #[derive(Clone, Debug)]
 pub struct Params {
     pub approach: Approach,
-    /// Reproduce Reduce2 exactly, including its bugs.
+    /// Reproduce Reduce2 exactly, including its bugs. `run` applies it to
+    /// `opt.compat` as well.
     pub compat: bool,
     pub keep_existing_h: bool,
     pub n_terminal_charge: NTermCharge,
@@ -88,6 +89,12 @@ fn select_model(st: &mut Structure, model_id: usize, compat: bool) -> Result<(),
 
 /// Run the whole program on a structure.
 pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String> {
+    // `compat` governs the optimizer too
+    let p = &{
+        let mut p = p.clone();
+        p.opt.compat = p.compat;
+        p
+    };
     let mut desc = String::new();
     let mut log = String::new();
     // element X atoms are dropped first
