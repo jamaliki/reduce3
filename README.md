@@ -231,6 +231,8 @@ Fixed mode carries on in these cases; compat mode stops or loses data exactly as
   carries. The hydrogen sets then agree with GeoStd's for 99.5% of a million hydrogens.
 * **Atoms of unknown element** (element X, such as UNX in 1h0h and 4iio). Reduce2 deletes them.
   Fixed mode keeps them unchanged; they get no hydrogens and take no part in scoring.
+* **Models with no site for a hydrogen** (C-alpha or phosphate traces). Reduce2 stops ("It was not
+  possible to place any H atoms"). Fixed mode writes the model unchanged and says so in the report.
 * **Residues no dictionary describes** (UNL, or a code missing from the CCD). Reduce2 stops
   ("Restraints were not found"), and with `ignore_missing_restraints=True` deletes their input
   hydrogens. Fixed mode reports them, keeps their input hydrogens (not scored), and places the

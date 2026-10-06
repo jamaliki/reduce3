@@ -169,7 +169,14 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                     ));
                 }
                 if !st.has_hydrogens() {
-                    return Err("It was not possible to place any H atoms. Is this a single atom model?".into());
+                    if p.compat {
+                        return Err("It was not possible to place any H atoms. Is this a single atom model?".into());
+                    }
+                    // fixed mode: a CA- or P-only trace, say, has no site for a
+                    // hydrogen; the model is written back unchanged
+                    let note = "No hydrogens could be placed (the model may be a C-alpha or phosphate trace); it is written unchanged\n";
+                    log += note;
+                    desc += note;
                 }
                 prior = Some(Prior { bonds: placed.bonds, etype: placed.etype, riding: placed.riding });
             }
