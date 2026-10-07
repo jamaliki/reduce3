@@ -22,7 +22,8 @@ Usage: reduce3 [options] model.pdb [name=value ...]
 
 Batch mode (several models, or --batch): the monomer library is loaded once and
 models are processed in parallel, each on one thread. A model that fails is
-reported and skipped; the exit status is nonzero if any failed.
+reported and skipped; the exit status is nonzero if any failed. Inputs may be
+gzip-compressed (model.cif.gz); outputs are written uncompressed.
 
 Options:
   --compat              reproduce Reduce2 exactly, including its known bugs
@@ -220,10 +221,38 @@ fn utc_timestamp() -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
+/// The input's name without a trailing `.gz` (outputs are written uncompressed).
+fn model_name(input: &Path) -> PathBuf {
+    let name = input.to_string_lossy();
+    match name.len().checked_sub(3) {
+        Some(k) if name.is_char_boundary(k) && name[k..].eq_ignore_ascii_case(".gz") => PathBuf::from(&name[..k]),
+        _ => input.to_path_buf(),
+    }
+}
+
 fn default_output(input: &Path, flips: bool) -> PathBuf {
+    let input = model_name(input);
     let stem = input.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "model".into());
     let ext = input.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
     PathBuf::from(format!("{}{}{}", stem, if flips { "FH" } else { "H" }, ext))
+}
+
+/// A model file's text; gzip-compressed files (by their magic bytes) are
+/// decompressed.
+fn read_model_text(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        #[cfg(feature = "gzip")]
+        {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut flate2::read::MultiGzDecoder::new(&bytes[..]), &mut text)
+                .map_err(|e| format!("cannot decompress {}: {}", path.display(), e))?;
+            return Ok(text);
+        }
+        #[cfg(not(feature = "gzip"))]
+        return Err(format!("{} is gzip-compressed; this build reads uncompressed files only", path.display()));
+    }
+    String::from_utf8(bytes).map_err(|e| format!("cannot read {}: {}", path.display(), e))
 }
 
 /// One model to process and where its results go.
@@ -241,8 +270,8 @@ const KEEP_PARSED_BELOW: usize = 32 << 20;
 
 /// Read, process and write one model; returns its atom count.
 fn process_one(job: &Job, ml: &monlib::MonLib, params: &Params, header: &str) -> Result<usize, String> {
-    let text = std::fs::read_to_string(&job.input).map_err(|e| format!("cannot read {}: {}", job.input.display(), e))?;
-    let lower = job.input.to_string_lossy().to_ascii_lowercase();
+    let text = read_model_text(&job.input)?;
+    let lower = model_name(&job.input).to_string_lossy().to_ascii_lowercase();
     let is_cif = lower.ends_with(".cif") || lower.ends_with(".mmcif") || text.trim_start().starts_with("data_");
     let out_lower = job.output.to_string_lossy().to_ascii_lowercase();
     let write_pdb_format = out_lower.ends_with(".pdb") || out_lower.ends_with(".ent");
@@ -290,7 +319,7 @@ fn process_one(job: &Job, ml: &monlib::MonLib, params: &Params, header: &str) ->
         match &doc {
             Some(d) => write(d, kept.as_ref().map_or(0, |t| t.len()))?,
             None => {
-                let text = std::fs::read_to_string(&job.input).map_err(|e| format!("cannot read {}: {}", job.input.display(), e))?;
+                let text = read_model_text(&job.input)?;
                 let d = reduce3::cif::parse(&text);
                 write(&d, text.len())?
             }
@@ -371,11 +400,19 @@ fn run_cli(args: &[String]) -> Result<(), String> {
     let mut seen: std::collections::HashMap<PathBuf, PathBuf> = std::collections::HashMap::new();
     let mut jobs: Vec<Job> = Vec::with_capacity(cli.inputs.len());
     for input in &cli.inputs {
-        let output = out_dir.join(default_output(input, flips));
-        if let Some(other) = seen.insert(output.clone(), input.clone()) {
-            return Err(format!("{} and {} would both write {}", other.display(), input.display(), output.display()));
+        let name = default_output(input, flips);
+        let output = out_dir.join(&name);
+        let description = (!cli.no_description).then(|| out_dir.join(description_path(&name)));
+        for path in std::iter::once(&output).chain(description.as_ref()) {
+            if let Some(other) = seen.insert(path.clone(), input.clone()) {
+                return Err(format!(
+                    "{} and {} would both write {} (run them separately, or use --no-description if only the reports collide)",
+                    other.display(),
+                    input.display(),
+                    path.display()
+                ));
+            }
         }
-        let description = (!cli.no_description).then(|| description_path(&output));
         jobs.push(Job { input: input.clone(), output, description, write: cli.write_files });
     }
     let n_jobs = cli.jobs.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)).max(1);

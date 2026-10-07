@@ -16,11 +16,14 @@ rustc-hash = "2.1.3"
 serde_json = { version = "1.0.151", optional = true, features = ["float_roundtrip"] }
 smallvec = "1.16.2"
 mimalloc = { version = "0.1", default-features = false, optional = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 
 [features]
-default = ["mimalloc"]
+default = ["mimalloc", "gzip"]
 # The command-line tool's allocator (the library leaves it to its host).
 mimalloc = ["dep:mimalloc"]
+# The command-line tool reads gzip-compressed models (.pdb.gz, .cif.gz).
+gzip = ["dep:flate2"]
 # Developer tool: compare against JSON dumps of the original Reduce2.
 refcheck = ["dep:serde_json"]
 
