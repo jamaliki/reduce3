@@ -206,6 +206,37 @@ written by `reference/harness/dump_ref.py`. [reference/README.md](reference/READ
 how to recreate the reference data, and [docs/INTERPRETATION_SPEC.md](docs/INTERPRETATION_SPEC.md)
 documents the cctbx interpretation behavior that Reduce3 reproduces.
 
+## Benchmark against neutron structures
+
+Neutron crystallography locates hydrogens (usually as deuterium) instead of inferring them, so
+the PDB's neutron structures show where the hydrogens Reduce places really are.
+`tools/neutron_benchmark.py` runs `reduce3` on the 334 entries in `tools/neutron_entries.txt`
+and compares its hydrogens with the deposited ones, residue by residue. It needs Python 3 with
+gemmi and a directory of the entries' mmCIF files, flat or in the PDB's divided layout:
+
+```bash
+python3 tools/neutron_benchmark.py --pdb-dir /data/pdb/mmCIF
+```
+
+Each `--config NAME="ARGS"` adds a column run with those `reduce3` arguments (default: fixed and
+`--compat`), and `--find` rescans a mirror for neutron entries. On the current code:
+
+| Measure | Fixed | Compat (Reduce2) |
+|---|---:|---:|
+| His ring oriented as deposited | 91.4% of 725 | 91.2% of 725 |
+| His protonation (HID/HIE/HIP), where the ring is | 62.6% of 663 | 57.5% of 661 |
+| His not on a metal left with no ring hydrogen | 0% of 1,879 | 0.5% of 1,882 |
+| Asn / Gln amide orientation | 91.0% / 88.7% | 91.1% / 89.5% |
+| Ser / Thr / Tyr hydroxyl H within 30° | 31.8% / 40.2% / 46.3% | 31.8% / 40.2% / 41.1% |
+| Hydroxyl H within 30°, deposited H bonds to protein or ligand / water / nothing | 66.5% / 32.7% / 12.7% | 65.5% / 30.1% / 12.4% |
+| Cys on a metal: thiol hydrogen as deposited | 36 of 36 | 0 of 36 |
+| Asp/Glu protonated: deposited / placed | 25 / 0 | 25 / 0 |
+
+Compat mode leaves out the 4 entries Reduce2 cannot process. Only residues without alternate
+conformations and deposited hydrogens at occupancy 0.5 or more are compared. Depositors usually
+add deuteriums with dictionaries like Reduce's, so a hydrogen missing from a deposited model is
+weaker evidence than one present.
+
 ## Performance
 
 These are wall-clock times for one model per run with `add_flip_movers=True` on an Apple-silicon
@@ -483,7 +514,7 @@ applies these preferences, and setting both to 0 gives the same output as before
 | `src/pdbio.rs`, `src/mmcif.rs`, `src/cif.rs`, `src/model.rs` | I/O and the iotbx-style hierarchy |
 | `src/cifsource.rs`, `src/lib.rs` | library interface for already-parsed CIF data |
 | `src/cell.rs` | cctbx unit-cell arithmetic used by compat mode |
-| `tools/` | table generators and the end-to-end comparison script |
+| `tools/` | table generators, the end-to-end comparison script and the neutron benchmark |
 | `reference/` | scripts that produce the Reduce2 reference data |
 
 ## License
