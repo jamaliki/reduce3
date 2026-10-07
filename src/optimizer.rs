@@ -849,6 +849,8 @@ const LANE_NO_TARGET: u64 = u64::MAX;
 /// Dots go through in chunks of `LANES`, each test over a chunk at once (the
 /// compiler vectorizes the fixed-size loops) with the scalar arithmetic, so
 /// the results are the same bits; each dot's fold keeps the target order.
+// `!(d2 < r2)` keeps the scalar test's form (`if d2 < r2 { skip }`) exactly
+#[allow(clippy::too_many_arguments, clippy::neg_cmp_op_on_partial_ord)]
 fn score_dot_lanes(
     s: &DotScorer,
     src: &AtomInfo,
