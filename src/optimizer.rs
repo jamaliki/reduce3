@@ -3126,7 +3126,7 @@ fn place_his(
     let v = p.verbosity;
     let clamp = !p.compat;
     let a_name = w.name(a).to_string();
-    let hist = match movers::his_flip(w, a, p.non_flip_preference, 3, true, clamp) {
+    let hist = match movers::his_flip(w, a, p.non_flip_preference, 3, true, clamp, p.compat) {
         Ok(h) => h,
         Err(e) => {
             pl.info += &vcheck(v, 0, &format!("Did not add MoverHisFlip to {}: {}\n", rid, e));
@@ -3218,7 +3218,7 @@ fn place_his(
             if s.flipped {
                 pl.his_flips.push(FlippedMoverInfo { alt: alt.into(), base_atom: a });
             }
-            match movers::his_flip(w, a, p.non_flip_preference, enabled, s.fixed_up, clamp) {
+            match movers::his_flip(w, a, p.non_flip_preference, enabled, s.fixed_up, clamp, p.compat) {
                 Ok(h) => {
                     set_state_now(w, &h, 0, q);
                     pl.movers.push(h);

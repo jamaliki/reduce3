@@ -334,6 +334,24 @@ Where the speed comes from:
     (new hydrogens take their residue's), atom ids renumbered and `_atom_site_anisotrop` and
     `_atom_type` updated. PDB output keeps SSBOND and LINK and renumbers CONECT.
 
+**Protonation**
+
+24. A histidine Mover could remove both ring hydrogens, giving an imidazolate anion (pKa about 14),
+    which does not occur in proteins. Reduce2 discourages that state by only 1 score unit, and
+    waters favor it: their phantom hydrogens donate to any bare nitrogen. Fixed mode's exact clique
+    search reached it far more often than Reduce2's search does. Of the histidines not bound to a
+    metal, fixed mode left 10.5% with no ring hydrogen over the 334 neutron structures in the PDB
+    (Reduce2: 0.5%), and 5.9% of 43,661 in 4,000 random entries. A nitrogen bound to a metal is
+    handled before the Mover is built, so fixed mode now rules the state out. Where the ring is
+    oriented as deposited, the protonation (HID, HIE or HIP) matches the neutron model for 62.6% of
+    663 histidines, up from 56.3% (Reduce2: 57.5%).
+25. Cysteines bound to a metal other than zinc kept their thiol hydrogen, because the Metal
+    Coordination Library bonds SG only to zinc and to iron-sulfur clusters. In 4,000 random
+    entries, 118 of 1,626 metal-bound cysteines kept it (on Cu, Hg, Fe, Cd, Mn, Co and Ni; most of
+    the iron is heme, the thiolate ligand of P450s), and in the neutron structures all 36 did.
+    Fixed mode bonds each SG within 2.9 A of a d-block or heavier main-group metal to the closest
+    one, which removes the hydrogen as for zinc. All 36 now match the neutron models.
+
 ## Where Reduce2 gives up
 
 Fixed mode carries on in these cases; compat mode stops or loses data exactly as Reduce2 does.
@@ -425,6 +443,14 @@ hydroxyls on tetrahedral atoms (Ser, Thr) have no preference, as in Reduce2. Com
 applies these preferences, and setting both to 0 gives the same output as before they existed.
 
 ## Known limitations
+
+* Protonation states follow fixed rules plus the contact score, with no electrostatics or pKa:
+  Asp, Glu and C-termini are always charged, and a histidine's charge is decided by contacts
+  alone. Against the 334 neutron structures, 30% of the histidines are doubly protonated, and
+  fixed mode finds 37 of the 191 whose ring it orients as deposited. The 25 Asp/Glu that the
+  neutron models show protonated are all left charged. A rule protonating one of each pair of
+  carboxylates closer than 2.55 A was considered and dropped: none of the 29 such pairs in the
+  neutron models carries a modeled hydrogen, and none of the 25 protonated acids is in such a pair.
 
 * Symmetry is used for disulfides and, in fixed mode, zinc coordination (a Cys or His binding the
   zinc of a neighboring copy). Reduce2 also bonds atoms to symmetry copies of other metal sites

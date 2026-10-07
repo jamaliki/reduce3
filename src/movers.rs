@@ -813,6 +813,14 @@ pub fn amide_flip(w: &mut World, nh2: u32, ca_name: &str, non_flip_preference: f
 }
 
 /// `MoverHisFlip`.
+/// Preference of a histidine state with neither ring nitrogen protonated
+/// when that state is ruled out: an imidazolate anion (pKa about 14) does not
+/// occur in proteins, and a nitrogen bound to a metal is handled before the
+/// Mover is built. Large enough that no contact score outweighs it.
+pub const HIS_BARE_RING_PENALTY: f64 = -1.0e4;
+
+/// `MoverHisFlip`. With `bare_ring_allowed` false (fixed mode) the states with
+/// neither ring hydrogen carry [`HIS_BARE_RING_PENALTY`] instead of Reduce2's -1.
 pub fn his_flip(
     w: &mut World,
     ne2: u32,
@@ -820,6 +828,7 @@ pub fn his_flip(
     enabled: u8,
     enable_fixup: bool,
     clamp: bool,
+    bare_ring_allowed: bool,
 ) -> MResult<Mover> {
     if w.elem(ne2) != "N" {
         return Err("MoverHisFlip(): ne2Atom is not a Nitrogen".into());
@@ -971,12 +980,13 @@ pub fn his_flip(
         infos.push(ex);
         dels.push(de);
     }
+    let bare = if bare_ring_allowed { -1.0 } else { HIS_BARE_RING_PENALTY };
     let mut pref = Vec::new();
     if enabled & 1 != 0 {
-        pref.extend([0.0 - 0.05, 0.0, 0.0, 0.0 - 1.0]);
+        pref.extend([0.0 - 0.05, 0.0, 0.0, 0.0 + bare]);
     }
     if enabled & 2 != 0 {
-        pref.extend([-non_flip_preference - 0.05, -non_flip_preference, -non_flip_preference, -non_flip_preference - 1.0]);
+        pref.extend([-non_flip_preference - 0.05, -non_flip_preference, -non_flip_preference, -non_flip_preference + bare]);
     }
     Ok(Mover {
         kind: MoverKind::HisFlip { enabled, enable_fixup },

@@ -1017,6 +1017,7 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
     add_zinc_coordination(&mut it, st, flat);
     if !p.compat {
         add_zinc_symmetry_coordination(&mut it, st, flat);
+        add_thiolate_metal_coordination(&mut it, st, flat);
     }
     adjust_for_ph_variants(&mut it, st, flat, &flat_index, ml, p);
     it
@@ -1322,6 +1323,48 @@ fn add_iron_sulfur_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtom
         // the S-Fe-S angles cctbx adds as well do not involve hydrogens
         it.add_bond(fe as u32, aa as u32, 2.268, ORIGIN_METAL);
     }
+}
+
+/// Metals that bind cysteine as a thiolate: the d-block and the heavier
+/// main-group metals (alkali, alkaline-earth and lanthanide ions do not).
+const THIOLATE_METALS: &[&str] = &[
+    "ZN", "FE", "CU", "CD", "HG", "NI", "CO", "MN", "MO", "W", "V", "CR", "TI", "PT", "PD", "AU", "AG", "RU", "RH",
+    "IR", "OS", "RE", "GA", "IN", "TL", "PB", "BI", "SN",
+];
+
+/// Metal-sulfur bonds are 2.1-2.6 A; non-bonded contacts start near 3.3 A.
+const THIOLATE_METAL_DISTANCE: f64 = 2.9;
+
+/// Cysteine thiolates on any metal (fixed mode). The Metal Coordination
+/// Library port above bonds SG only to zinc and iron-sulfur clusters, so a
+/// cysteine on copper, mercury, cadmium, nickel, cobalt or a heme iron (the
+/// thiolate ligand of P450s) kept its thiol hydrogen. Each SG within
+/// `THIOLATE_METAL_DISTANCE` of such a metal in the same model and a
+/// compatible conformer is bonded to the closest one, which removes the
+/// hydrogen as for zinc.
+fn add_thiolate_metal_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms) {
+    let n = flat.pos.len();
+    let metals: Vec<usize> = (0..n).filter(|&a| THIOLATE_METALS.contains(&flat.element[a].as_str())).collect();
+    if metals.is_empty() {
+        return;
+    }
+    for sg in (0..n).filter(|&a| flat.name[a].trim() == "SG" && flat.element[a] == "S") {
+        let closest = metals
+            .iter()
+            .copied()
+            .filter(|&m| flat.path[m].model == flat.path[sg].model)
+            .filter(|&m| {
+                let (am, asg) = (&flat.altloc[m], &flat.altloc[sg]);
+                am.is_empty() || asg.is_empty() || am == asg
+            })
+            .map(|m| (flat.pos[m].dist(flat.pos[sg]), m))
+            .filter(|&(d, _)| d <= THIOLATE_METAL_DISTANCE)
+            .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap().then(x.1.cmp(&y.1)));
+        if let Some((_, m)) = closest {
+            it.add_bond(m as u32, sg as u32, 2.30, ORIGIN_METAL);
+        }
+    }
+    let _ = st;
 }
 
 /// Metal Coordination Library, zinc part: ZN with SG/ND1/NE2 partners within 3 A.
