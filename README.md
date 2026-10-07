@@ -16,8 +16,9 @@ Asn/Gln/His flips) by Probe dot scoring. It covers the whole pipeline:
 It has two modes:
 
 * **fixed** (default) corrects the Reduce2 bugs listed below, goes on where Reduce2 gives up (see
-  "Where Reduce2 gives up"), and optimizes the cliques in parallel, exactly unless a clique is too
-  dense to search (see "Dense cliques" below).
+  "Where Reduce2 gives up"), keeps hydroxyl hydrogens in the plane of phenols and acids and acid
+  hydrogens syn (see "Hydroxyl orientation"), and optimizes the cliques in parallel, exactly unless
+  a clique is too dense to search (see "Dense cliques" below).
 * **compat** (`--compat`) reproduces Reduce2 exactly, bugs included. It exists to validate the port.
 
 ## Build
@@ -52,7 +53,8 @@ Reduce2's `name=value` parameters work the same way, with the same defaults exce
 `set_flip_states`, `model_id`, `alt_id`, `bonded_neighbor_depth`, `verbosity`,
 `stop_on_any_missing_hydrogen`, `ignore_missing_restraints`, `output.filename`,
 `output.description_file_name`, `output.write_files`, and all `probe.*` scoring parameters.
-Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue
+Fixed mode adds `planar_hydroxyl_preference` and `acid_syn_preference` (see "Hydroxyl
+orientation"). Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue
 without restraints does not stop the run (so `ignore_missing_restraints` has no effect there);
 `stop_on_any_missing_hydrogen=True` makes it stop.
 
@@ -385,6 +387,42 @@ Fixed mode carries on in these cases; compat mode stops or loses data exactly as
   stay within a work budget, and otherwise by block coordinate ascent (each Mover, then each
   touching pair, given the others). On 3,509 cliques that exact search can solve, the ascent
   finds the same optimum for 3,497.
+
+## Hydroxyl orientation
+
+Reduce2 rotates every single hydroxyl (and thiol) hydrogen freely and keeps the orientation with the
+best Probe score, with no torsional preference: its rotator has one, but it is switched off to match
+the original Reduce. Where nothing nearby decides, the hydrogen ends up wherever the contact score
+happens to peak. On 600 random PDB entries, 34% of the tyrosine hydroxyls with no hydrogen-bond
+partner came out 60 degrees or more from the ring plane, close to the top of phenol's rotation
+barrier, and a carboxylic acid's hydrogen can stop anywhere between syn and anti.
+
+Fixed mode adds two preferences to the score of a hydroxyl hydrogen whose oxygen is bonded to a
+planar, three-coordinate atom (a phenol such as tyrosine, an enol, a carboxylic acid):
+
+* `planar_hydroxyl_preference` (default 1.0) times cos² of the hydrogen's dihedral to that atom's
+  plane: the full amount in the plane on either side, nothing perpendicular to it.
+* `acid_syn_preference` (default 1.0) times (1 + cos τ)/2, where τ is the O=C-O-H dihedral to a
+  carbonyl oxygen on the same atom: the full amount syn (τ = 0), nothing anti. For an acid, syn in
+  the plane is therefore preferred by 1.0 over anti in the plane and by 1.5 over perpendicular.
+
+The two in-plane orientations are always among the positions tried. Both terms are in Probe score
+units and are scaled by `preference_magnitude`, like the flip preference, and the report's Mover
+scores include them. For scale, the middle half of hydrogen-bonded tyrosine hydroxyl Movers score
+4.4 to 13.9, and of those without a hydrogen bond 0.04 to 1.75. So the preferences settle
+orientations that only contacts would decide, and a hydrogen bond out of the plane still wins. On
+the same 600 entries the share of non-hydrogen-bonded tyrosine hydroxyls 60 degrees or more from
+the plane fell from 34% to 5.5%. The share of tyrosine hydroxyls with a hydrogen-bond partner went
+from 54.3% to 55.3%, since the in-plane positions are now tried even when no coarse step lands on
+them.
+
+Carboxylic acids rarely carry a hydrogen: Asp, Glu and C-termini are placed as carboxylates, and
+fixed mode builds CCD-only residues at physiological protonation. In 20,000 random entries an acid
+hydrogen appeared in 7 (mercuribenzoic acid and bicarbonate). With nothing around it, the acid
+hydrogen of mercuribenzoic acid goes from 151 degrees (near anti, and out of the plane) to syn
+(`tests/hydroxyl_orientation.rs`). Thiols and
+hydroxyls on tetrahedral atoms (Ser, Thr) have no preference, as in Reduce2. Compat mode never
+applies these preferences, and setting both to 0 gives the same output as before they existed.
 
 ## Known limitations
 

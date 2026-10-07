@@ -47,6 +47,7 @@ Reduce2 parameters (name=value), with the same defaults except add_flip_movers:
   non_flip_preference=0.5          skip_bond_fix_up=False
   set_flip_states=None             model_id=None   alt_id=None
   bonded_neighbor_depth=4          verbosity=2
+  planar_hydroxyl_preference=1.0   acid_syn_preference=1.0   (fixed mode only)
   stop_on_any_missing_hydrogen=False   ignore_missing_restraints=False
   output.filename=<input>FH.pdb (H without flips)
   output.description_file_name=<output>.txt   output.write_files=True
@@ -154,6 +155,8 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                         }
                     }
                     "add_flip_movers" => p.opt.add_flip_movers = parse_bool(v)?,
+                    "planar_hydroxyl_preference" => p.opt.planar_hydroxyl_preference = parse_f(v)?,
+                    "acid_syn_preference" => p.opt.acid_syn_preference = parse_f(v)?,
                     "non_flip_preference" => p.opt.non_flip_preference = parse_f(v)?,
                     "skip_bond_fix_up" => p.opt.skip_bond_fixup = parse_bool(v)?,
                     "set_flip_states" => p.opt.flip_states = none_or(v).unwrap_or_default(),

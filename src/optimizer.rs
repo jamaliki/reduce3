@@ -30,6 +30,12 @@ pub struct OptParams {
     pub min_occupancy: f64,
     pub preference_magnitude: f64,
     pub non_flip_preference: f64,
+    /// Fixed mode: preference for a hydroxyl hydrogen on a planar atom (a
+    /// phenol, an enol, a carboxylic acid) to lie in its plane.
+    pub planar_hydroxyl_preference: f64,
+    /// Fixed mode: further preference for an acid's hydroxyl hydrogen to be
+    /// syn to the carbonyl oxygen rather than anti.
+    pub acid_syn_preference: f64,
     pub skip_bond_fixup: bool,
     pub flip_states: String,
     pub verbosity: i32,
@@ -48,6 +54,8 @@ impl Default for OptParams {
             min_occupancy: 0.02,
             preference_magnitude: 1.0,
             non_flip_preference: 0.5,
+            planar_hydroxyl_preference: 1.0,
+            acid_syn_preference: 1.0,
             skip_bond_fixup: false,
             flip_states: String::new(),
             verbosity: 2,
@@ -2963,7 +2971,12 @@ fn place_movers(
 
     // single-hydrogen rotators
     let in_atoms: FxHashSet<u32> = atoms.iter().copied().collect();
-    let opts = SingleHOptions { circular_angle_spacing: !p.compat, any_partner_valence: !p.compat };
+    let opts = SingleHOptions {
+        circular_angle_spacing: !p.compat,
+        any_partner_valence: !p.compat,
+        planar_preference: if p.compat { 0.0 } else { p.planar_hydroxyl_preference },
+        syn_preference: if p.compat { 0.0 } else { p.acid_syn_preference },
+    };
     for &h in rotatable_h {
         if !in_atoms.contains(&h) {
             continue;
