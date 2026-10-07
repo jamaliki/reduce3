@@ -45,17 +45,24 @@ reduce3 --out-dir out/ --batch models.txt      # paths, one per line
 
 To process many models, see "Batch runs" below.
 
+Reduce3 scores every atom it is given and nothing else. To place hydrogens on a biological assembly
+with contacts between its copies taken into account, give it the assembly's coordinates, for
+example from gemmi's `Structure.transform_to_assembly`. Reduce3 does not build assemblies and does
+not score contacts with neighbors in the crystal lattice. It does use the crystal cell, when the
+file has one, for covalent bonds across the lattice (disulfides and zinc sites to a symmetry copy),
+as Reduce2 does, and recognizes copies that are already in the model.
+
 Reduce2's `name=value` parameters work the same way, with the same defaults except one:
 `add_flip_movers` is True (Reduce2: False), so Asn/Gln/His flips are considered unless
-`add_flip_movers=False` is given, in either mode. The parameters are `approach`,
-`add_flip_movers`, `n_terminal_charge`, `keep_existing_H`, `exclude_water`,
-`use_neutron_distances`, `preference_magnitude`, `non_flip_preference`, `skip_bond_fix_up`,
-`set_flip_states`, `model_id`, `alt_id`, `bonded_neighbor_depth`, `verbosity`,
-`stop_on_any_missing_hydrogen`, `ignore_missing_restraints`, `output.filename`,
-`output.description_file_name`, `output.write_files`, and all `probe.*` scoring parameters.
-Fixed mode adds `planar_hydroxyl_preference` and `acid_syn_preference` (see "Hydroxyl
-orientation"). Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue
-without restraints does not stop the run (so `ignore_missing_restraints` has no effect there);
+`add_flip_movers=False` is given, in either mode. The parameters are `approach`, `add_flip_movers`,
+`n_terminal_charge`, `keep_existing_H`, `exclude_water`, `use_neutron_distances`,
+`preference_magnitude`, `non_flip_preference`, `skip_bond_fix_up`, `set_flip_states`, `model_id`,
+`alt_id`, `bonded_neighbor_depth`, `verbosity`, `stop_on_any_missing_hydrogen`,
+`ignore_missing_restraints`, `output.filename`, `output.description_file_name`,
+`output.write_files`, and all `probe.*` scoring parameters. Fixed mode adds
+`planar_hydroxyl_preference` and `acid_syn_preference` (see "Hydroxyl orientation"). Extra options:
+`--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue without restraints
+does not stop the run (so `ignore_missing_restraints` has no effect there);
 `stop_on_any_missing_hydrogen=True` makes it stop.
 
 ## Batch runs
@@ -382,6 +389,12 @@ Where the speed comes from:
     the iron is heme, the thiolate ligand of P450s), and in the neutron structures all 36 did.
     Fixed mode bonds each SG within 2.9 A of a d-block or heavier main-group metal to the closest
     one, which removes the hydrogen as for zinc. All 36 now match the neutron models.
+26. A symmetry image was taken as a separate copy even when the model already held it, as in a
+    biological assembly written with its crystal's cell: the copies map onto each other, so every
+    cysteine found a "disulfide" to the image of its own copy at 0 A and lost its thiol hydrogen
+    (4,622 hydrogens in 229 assemblies built from 1,500 random entries), and zinc sites were bonded
+    twice. Fixed mode skips an image within 0.5 A of an atom of the model, which the in-model
+    search has already handled. Deposited coordinates are unaffected.
 
 ## Where Reduce2 gives up
 

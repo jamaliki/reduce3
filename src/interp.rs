@@ -1002,7 +1002,7 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
         }
     }
     it.log = log;
-    add_disulfides(&mut it, st, flat, &cys_sg);
+    add_disulfides(&mut it, st, flat, &cys_sg, p.compat);
     let mut link_log = String::new();
     crate::autolink::auto_link(
         &mut it,
@@ -1164,7 +1164,16 @@ fn adjust_for_ph_variants(
 }
 
 
-fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32]) {
+/// A symmetry image this close to an atom of the model is that atom: the model
+/// already holds the copy (a biological assembly written with its crystal cell).
+const COINCIDENT_COPY: f64 = 0.5;
+
+/// Whether `p` coincides with one of `atoms` in `model` (see [`COINCIDENT_COPY`]).
+fn copy_in_model(flat: &FlatAtoms, atoms: impl IntoIterator<Item = usize>, model: u32, p: Vec3) -> bool {
+    atoms.into_iter().any(|s| flat.path[s].model == model && flat.pos[s].dist(p) <= COINCIDENT_COPY)
+}
+
+fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32], compat: bool) {
     // exclude SG near atoms that are not H D T S O P N C SE (typically metals)
     let ok_el = ["H", "D", "T", "S", "O", "P", "N", "C", "SE"];
     let n = flat.pos.len();
@@ -1245,7 +1254,13 @@ fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32]
                             if op.is_identity() && shift.x == 0.0 && shift.y == 0.0 && shift.z == 0.0 {
                                 continue; // the same copy: a simple disulfide
                             }
-                            if uc.orthogonalize(img + shift).dist(flat.pos[a as usize]) <= 3.0 {
+                            let p_img = uc.orthogonalize(img + shift);
+                            if p_img.dist(flat.pos[a as usize]) <= 3.0 {
+                                // fixed mode: a copy the model already holds is bonded (or not) above
+                                let model = flat.path[a as usize].model;
+                                if !compat && copy_in_model(flat, sgs.iter().map(|&s| s as usize), model, p_img) {
+                                    continue;
+                                }
                                 hit = true;
                             }
                         }
@@ -1422,6 +1437,9 @@ fn add_zinc_symmetry_coordination(it: &mut Interp, st: &Structure, flat: &FlatAt
                             continue;
                         }
                         let pz = uc.orthogonalize(img + v3(kx as f64, ky as f64, kz as f64));
+                        if copy_in_model(flat, zincs.iter().copied(), flat.path[z].model, pz) {
+                            continue; // the model already holds this zinc; bonded within the model
+                        }
                         let (cx, cy, cz) = cell(pz);
                         for dx in -1..=1 {
                             for dy in -1..=1 {
