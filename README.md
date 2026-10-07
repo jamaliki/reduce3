@@ -38,14 +38,11 @@ reduce3 model.cif add_flip_movers=True         # writes modelFH.cif and modelFH.
 reduce3 --compat model.pdb -o out.pdb          # behave exactly like Reduce2
 reduce3 modelH.pdb approach=optimize           # optimize existing hydrogens
 reduce3 modelH.pdb approach=remove             # strip hydrogens
-reduce3 --out-dir out/ a.cif b.cif c.pdb       # several models in one run
+reduce3 --out-dir out/ a.cif b.cif.gz c.pdb    # several models in one run
 reduce3 --out-dir out/ --batch models.txt add_flip_movers=True   # paths, one per line
 ```
 
-Batch mode (more than one model, `--batch FILE` or `--out-dir`) loads the monomer library once and
-runs `--jobs N` models at once (default: all cores), each on one thread; the outputs are the same
-as separate runs give. A model that fails is reported and skipped, and the exit status is nonzero
-if any failed. `--no-description` skips the report files.
+To process many models, see "Batch runs" below.
 
 Reduce2's `name=value` parameters work the same way, with the same defaults: `approach`,
 `add_flip_movers`, `n_terminal_charge`, `keep_existing_H`, `exclude_water`,
@@ -56,6 +53,106 @@ Reduce2's `name=value` parameters work the same way, with the same defaults: `ap
 Extra options: `--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue
 without restraints does not stop the run (so `ignore_missing_restraints` has no effect there);
 `stop_on_any_missing_hydrogen=True` makes it stop.
+
+## Batch runs
+
+To add hydrogens to many models (a set of predictions, an AlphaFold DB download, a PDB mirror),
+run one `reduce3` process over all of them rather than one process per file. The process loads the
+monomer library once (about 9 ms of a 23 ms single run for an AlphaFold model) and keeps every core
+busy, one model per core.
+
+```bash
+# models named on the command line
+reduce3 --out-dir hydrogenated/ a.cif b.cif c.pdb add_flip_movers=True
+
+# a list of paths in a file
+reduce3 --out-dir hydrogenated/ --batch models.txt add_flip_movers=True
+
+# a list on standard input: every model under a directory, gzipped or not
+find afdb/ -name '*.cif.gz' | reduce3 --out-dir hydrogenated/ --batch - add_flip_movers=True
+```
+
+**When batch mode applies.** A run is a batch run when it names more than one model, or uses
+`--batch` or `--out-dir`. A single model with `--out-dir` is a batch of one.
+
+**Inputs.** Models can be named on the command line, listed in a file with `--batch FILE`, or both.
+`--batch -` reads the list from standard input. A list has one path per line; surrounding
+whitespace is ignored, as are blank lines and lines starting with `#`. Paths are relative to the
+current directory, not to the list file. Each file is read as mmCIF if its name ends in `.cif` or
+`.mmcif` or its text starts with `data_`, and as PDB otherwise. Files compressed with gzip are
+detected by their contents and decompressed on the fly, so `.cif.gz` and `.pdb.gz` downloads can be
+used as they are.
+
+**Outputs.** Each model is written to `--out-dir` (default: the current directory, created if
+missing) in the format it was read in, uncompressed, as `<name>H.<ext>`, or `<name>FH.<ext>` with
+`add_flip_movers=True`. `<name>` is the file name without its directory, `.gz` and extension, so
+`afdb/AF-P69905-F1-model_v4.cif.gz` becomes `hydrogenated/AF-P69905-F1-model_v4FH.cif`. The
+description (report) goes next to it as `<name>H.txt` or `<name>FH.txt`; `--no-description` skips
+it. Existing files are overwritten. Before starting, `reduce3` checks that no two inputs would
+write the same file (for example `x/1abc.cif` and `y/1abc.cif`, or `1abc.pdb` and `1abc.cif`, whose
+reports are both `1abcH.txt`) and stops with an error if they would. `output.filename` and
+`output.description_file_name` name a single model's files, so they are refused in batch mode.
+
+**Parameters.** `name=value` parameters and `--compat` apply to every model in the run. To process
+models with different settings, use separate runs.
+
+**Parallelism.** `--jobs N` sets how many models run at once (default: the number of cores). Each
+model runs on one thread, which is faster in total than spreading one model over several cores.
+`--threads N` applies to single-model runs only. Memory grows with model size: about 30 MB per job
+for a 2,000-atom model, 75 MB at 11,000 atoms and 260 MB at 100,000 atoms (counting the hydrogens
+added), and about 10 GB for the 2.4-million-atom HIV capsid 3j3q. Lower `--jobs` for sets of large
+structures. On a machine shared with other work, `--jobs` also bounds how many cores `reduce3`
+takes.
+
+**Errors and exit status.** A model that cannot be processed does not stop the run. Its error is
+printed to standard error as `reduce3: <path>: error: <message>`, and the run moves on. At the end
+`reduce3` prints a summary to standard error:
+
+```text
+1000 models, 0 failed, 1.4 s (708.7 models/s, 16 at once)
+```
+
+If any model failed, a last line `reduce3: error: N of M models failed` follows and the exit status
+is 1; otherwise it is 0. A problem with the run itself (an unknown option, an unreadable list,
+colliding output names, no `chem_data`) stops it before any model is processed, also with exit
+status 1. `-q` suppresses the summary but not the error lines. To collect the failures and rerun
+only those:
+
+```bash
+reduce3 --out-dir hydrogenated/ --batch models.txt 2> errors.log
+sed -n 's/^reduce3: \(.*\): error: .*/\1/p' errors.log > failed.txt
+reduce3 --out-dir hydrogenated/ --batch failed.txt
+```
+
+**Very large sets.** One process per machine is the efficient arrangement. To spread a set over
+several machines, split the list (for example `split -l 50000 models.txt part.` makes lists of
+50,000 paths) and run one `reduce3` per list. For scale: the complete PDB archive (242,013 entries
+processed; those over 5,000 residues and C-alpha-only traces left out) took 2.5 hours on 12 cores
+with a separate process per entry, which batch mode makes unnecessary.
+
+**Throughput.** On a 16-core Apple-silicon Mac, a 225-residue AlphaFold model (1,940 atoms) takes
+about 14 ms of one core from PDB and 16 ms from mmCIF, and a batch run processes about 700 such
+models per second from PDB files and 640 per second from mmCIF.
+
+**From Python.** [Nibbler](https://github.com/jamaliki/Nibbler) includes Reduce3 as
+`nibbler.reduce.run`, which works on a parsed document in memory, so no intermediate file is
+written. It loads the monomer library once per process and releases the GIL, so a thread pool runs
+models in parallel (about 400 AlphaFold models per second with 16 threads):
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+import nibbler
+
+def protonate(path):  # path to an mmCIF file, e.g. "models/x.cif"
+    result = nibbler.reduce.run(path, add_flip_movers=True)
+    nibbler.dump(result.document, path.removesuffix(".cif") + "FH.cif")
+
+with ThreadPoolExecutor(max_workers=16) as pool:
+    list(pool.map(protonate, paths))
+```
+
+Use the command line for files on disk and Nibbler when the models are already in a Python
+pipeline.
 
 ## Library use
 
@@ -107,28 +204,29 @@ documents the cctbx interpretation behavior that Reduce3 reproduces.
 
 ## Performance
 
-These are wall-clock times on an Apple-silicon Mac, including file I/O. Reduce3 is the best of 3
-runs; Reduce2 is a single run, and its time includes about 1.5 s of Python/cctbx start-up.
+These are wall-clock times for one model per run with `add_flip_movers=True` on an Apple-silicon
+Mac, including start-up and file I/O. Reduce3 is the best of 3 runs; Reduce2 is a single run, and
+its time includes about 1.5 s of Python/cctbx start-up.
 
 | Structure | Atoms in | Reduce2 | Reduce3 fixed | Reduce3 compat | Speed-up (fixed) |
 |---|---:|---:|---:|---:|---:|
-| 1crn | 327 | 1.73 s | 0.010 s | 0.010 s | 173× |
+| 1crn | 327 | 1.73 s | 0.011 s | 0.011 s | 157× |
 | 1ubq | 660 | 1.93 s | 0.012 s | 0.015 s | 161× |
-| 7c31 | 1,532 | 2.53 s | 0.015 s | 0.022 s | 169× |
-| 1ehz | 1,821 | 2.92 s | 0.020 s | 0.026 s | 146× |
-| 4fen | 2,084 | 17.27 s | 0.028 s | 1.50 s | 617× |
+| 7c31 | 1,532 | 2.53 s | 0.016 s | 0.022 s | 158× |
+| 1ehz | 1,821 | 2.92 s | 0.019 s | 0.026 s | 154× |
+| 4fen | 2,084 | 17.27 s | 0.027 s | 1.48 s | 640× |
 | 1xso | 2,541 | 5.86 s | 0.028 s | 0.043 s | 209× |
-| 3gfh | 3,291 | 4.76 s | 0.027 s | 0.040 s | 176× |
-| 1a28 | 4,262 | 6.22 s | 0.036 s | 0.054 s | 173× |
-| 6oge | 11,494 | 12.73 s | 0.077 s | 0.142 s | 165× |
-| 1d3z (10 models) | 12,310 | 12.48 s | 0.053 s | 0.040 s | 235× |
+| 3gfh | 3,291 | 4.76 s | 0.026 s | 0.038 s | 183× |
+| 1a28 | 4,262 | 6.22 s | 0.033 s | 0.056 s | 188× |
+| 6oge | 11,494 | 12.73 s | 0.076 s | 0.141 s | 168× |
+| 1d3z (10 models) | 12,310 | 12.48 s | 0.051 s | 0.039 s | 245× |
 | 3j3q (HIV capsid, mmCIF) | 2,440,800 | not run | 24 s (about 10 GB peak memory) | | |
 
-**Many models.** Batch mode (`--batch`, `--out-dir`) loads the monomer library once and runs one
-model per core. For a 225-residue AlphaFold model (AF-A0A2K6V5L6-F1, v6, 1,940 atoms) on a 16-core
-Apple-silicon Mac, a model takes 16 ms (PDB) or 18 ms (mmCIF, every category kept) of one core once
-the dictionaries are loaded, and batch mode runs about 650 such models per second from PDB files
-and 570 from mmCIF. The whole local PDB archive (250,059 entries; 242,013 run, the others over
+**Many models.** Batch mode (see "Batch runs") loads the monomer library once and runs one model
+per core. For a 225-residue AlphaFold model (AF-A0A2K6V5L6-F1, v6, 1,940 atoms) on a 16-core
+Apple-silicon Mac, a model takes 14 ms (PDB) or 16 ms (mmCIF, every category kept) of one core once
+the dictionaries are loaded, and batch mode runs about 700 such models per second from PDB files
+and 640 from mmCIF. The whole local PDB archive (250,059 entries; 242,013 run, the others over
 5,000 residues or C-alpha traces) took 2.5 hours on 12 workers with one process per entry.
 
 Where the speed comes from:
@@ -139,7 +237,7 @@ Where the speed comes from:
   reach them. For 4fen, whose cobalt hexammine forms a 7-Mover clique, this took the optimizer from
   1.6 s to 0.03 s.
 * Compat mode runs a direct port of Reduce2's `OptimizerC` (vertex cuts, brute force, caches), so
-  its cost follows Reduce2's search. That is why 4fen takes 1.9 s there.
+  its cost follows Reduce2's search. That is why 4fen takes 1.5 s there.
 * A clique too dense for exact search within a work budget is optimized by block coordinate
   ascent instead (see "Dense cliques" above), so no structure stalls the optimizer.
 * Interpretation, riding placement and scoring are flat-array code with spatial grids, so every
@@ -147,6 +245,11 @@ Where the speed comes from:
   (residue interpretation, dictionary coordinates) is done once per run or once per process, each
   Mover atom's static neighbors are found once for all of its positions, and dot targets are
   prepared once per atom position rather than per dot.
+* Dots are scored in groups of four against each target with fixed-width arrays that the compiler
+  turns into vector instructions (NEON on Apple silicon, SSE2 on x86-64). Each group carries a
+  bounding sphere, so targets and exclusions out of its reach are skipped for all four dots at
+  once. The arithmetic is the same operations in the same order as the scalar code, without fused
+  multiply-adds, so the scores are bit-identical.
 * Numbers are written by an exact fixed-point formatter (the same text as `format!`), and the
   command-line tool allocates with mimalloc.
 
