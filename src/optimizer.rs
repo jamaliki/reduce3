@@ -40,7 +40,8 @@ impl Default for OptParams {
     fn default() -> Self {
         OptParams {
             probe: ProbeParams::reduce2_defaults(),
-            add_flip_movers: false,
+            // Reduce2 defaults to False; flips are on unless asked otherwise.
+            add_flip_movers: true,
             alt_id: None,
             bonded_neighbor_depth: 4,
             use_neutron_distances: false,

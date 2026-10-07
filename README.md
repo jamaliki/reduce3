@@ -33,18 +33,20 @@ then `$REDUCE3_CHEM_DATA`, `$CHEM_DATA`, and finally the active conda environmen
 ## Usage
 
 ```bash
-reduce3 model.pdb                              # writes modelH.pdb and modelH.txt
-reduce3 model.cif add_flip_movers=True         # writes modelFH.cif and modelFH.txt
-reduce3 --compat model.pdb -o out.pdb          # behave exactly like Reduce2
-reduce3 modelH.pdb approach=optimize           # optimize existing hydrogens
-reduce3 modelH.pdb approach=remove             # strip hydrogens
+reduce3 model.pdb                              # writes modelFH.pdb and modelFH.txt
+reduce3 model.cif add_flip_movers=False        # no Asn/Gln/His flips: modelH.cif, modelH.txt
+reduce3 --compat model.pdb add_flip_movers=False -o out.pdb   # exactly a default Reduce2 run
+reduce3 modelFH.pdb approach=optimize          # optimize existing hydrogens
+reduce3 modelFH.pdb approach=remove            # strip hydrogens
 reduce3 --out-dir out/ a.cif b.cif.gz c.pdb    # several models in one run
-reduce3 --out-dir out/ --batch models.txt add_flip_movers=True   # paths, one per line
+reduce3 --out-dir out/ --batch models.txt      # paths, one per line
 ```
 
 To process many models, see "Batch runs" below.
 
-Reduce2's `name=value` parameters work the same way, with the same defaults: `approach`,
+Reduce2's `name=value` parameters work the same way, with the same defaults except one:
+`add_flip_movers` is True (Reduce2: False), so Asn/Gln/His flips are considered unless
+`add_flip_movers=False` is given, in either mode. The parameters are `approach`,
 `add_flip_movers`, `n_terminal_charge`, `keep_existing_H`, `exclude_water`,
 `use_neutron_distances`, `preference_magnitude`, `non_flip_preference`, `skip_bond_fix_up`,
 `set_flip_states`, `model_id`, `alt_id`, `bonded_neighbor_depth`, `verbosity`,
@@ -63,13 +65,13 @@ busy, one model per core.
 
 ```bash
 # models named on the command line
-reduce3 --out-dir hydrogenated/ a.cif b.cif c.pdb add_flip_movers=True
+reduce3 --out-dir hydrogenated/ a.cif b.cif c.pdb
 
 # a list of paths in a file
-reduce3 --out-dir hydrogenated/ --batch models.txt add_flip_movers=True
+reduce3 --out-dir hydrogenated/ --batch models.txt
 
 # a list on standard input: every model under a directory, gzipped or not
-find afdb/ -name '*.cif.gz' | reduce3 --out-dir hydrogenated/ --batch - add_flip_movers=True
+find afdb/ -name '*.cif.gz' | reduce3 --out-dir hydrogenated/ --batch -
 ```
 
 **When batch mode applies.** A run is a batch run when it names more than one model, or uses
@@ -84,13 +86,13 @@ detected by their contents and decompressed on the fly, so `.cif.gz` and `.pdb.g
 used as they are.
 
 **Outputs.** Each model is written to `--out-dir` (default: the current directory, created if
-missing) in the format it was read in, uncompressed, as `<name>H.<ext>`, or `<name>FH.<ext>` with
-`add_flip_movers=True`. `<name>` is the file name without its directory, `.gz` and extension, so
+missing) in the format it was read in, uncompressed, as `<name>FH.<ext>`, or `<name>H.<ext>` with
+`add_flip_movers=False`. `<name>` is the file name without its directory, `.gz` and extension, so
 `afdb/AF-P69905-F1-model_v4.cif.gz` becomes `hydrogenated/AF-P69905-F1-model_v4FH.cif`. The
-description (report) goes next to it as `<name>H.txt` or `<name>FH.txt`; `--no-description` skips
+description (report) goes next to it as `<name>FH.txt` or `<name>H.txt`; `--no-description` skips
 it. Existing files are overwritten. Before starting, `reduce3` checks that no two inputs would
 write the same file (for example `x/1abc.cif` and `y/1abc.cif`, or `1abc.pdb` and `1abc.cif`, whose
-reports are both `1abcH.txt`) and stops with an error if they would. `output.filename` and
+reports are both `1abcFH.txt`) and stops with an error if they would. `output.filename` and
 `output.description_file_name` name a single model's files, so they are refused in batch mode.
 
 **Parameters.** `name=value` parameters and `--compat` apply to every model in the run. To process
@@ -144,7 +146,7 @@ from concurrent.futures import ThreadPoolExecutor
 import nibbler
 
 def protonate(path):  # path to an mmCIF file, e.g. "models/x.cif"
-    result = nibbler.reduce.run(path, add_flip_movers=True)
+    result = nibbler.reduce.run(path)
     nibbler.dump(result.document, path.removesuffix(".cif") + "FH.cif")
 
 with ThreadPoolExecutor(max_workers=16) as pool:

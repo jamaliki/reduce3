@@ -39,8 +39,8 @@ Options:
   -h, --help            this help
   -V, --version         print the version
 
-Reduce2 parameters (name=value), with the same defaults:
-  approach=add|remove|optimize     add_flip_movers=False
+Reduce2 parameters (name=value), with the same defaults except add_flip_movers:
+  approach=add|remove|optimize     add_flip_movers=True (Reduce2: False)
   n_terminal_charge=residue_one|first_in_chain|no_charge
   keep_existing_H=False            exclude_water=True
   use_neutron_distances=False      preference_magnitude=1.0
@@ -48,7 +48,7 @@ Reduce2 parameters (name=value), with the same defaults:
   set_flip_states=None             model_id=None   alt_id=None
   bonded_neighbor_depth=4          verbosity=2
   stop_on_any_missing_hydrogen=False   ignore_missing_restraints=False
-  output.filename=<input>H.pdb (FH with flips)
+  output.filename=<input>FH.pdb (H without flips)
   output.description_file_name=<output>.txt   output.write_files=True
   probe.probe_radius=0.25 ... (all probe.* scoring parameters)
 ";
