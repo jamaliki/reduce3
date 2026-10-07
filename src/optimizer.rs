@@ -378,6 +378,8 @@ struct Ctx<'a> {
     atom_movers: FxHashMap<u32, SmallVec<[u32; 4]>>,
     exclude: FxHashMap<u32, Vec<u32>>,
     dots: FxHashMap<u32, Arc<Vec<DotPair>>>,
+    /// The same dots as coordinate arrays.
+    dots_soa: FxHashMap<u32, Arc<DotsSoa>>,
     /// Largest distance of an atom's dots from its center.
     dot_reach: FxHashMap<u32, f64>,
     /// Per Mover atom: the static atoms near any of its positions that can
@@ -577,6 +579,21 @@ impl<'a> Ctx<'a> {
                 return self.scorer_score(pa, &ia, d, &buf.targets, &mut buf.prepared);
             }
         }
+        if trim.is_none() {
+            // all dots in coordinate arrays: trimming and scoring in one pass
+            let s = &self.scorer;
+            let mut ret = ScoreDotsResult::default();
+            if ia.is_ion && s.ignore_ions {
+                return ret;
+            }
+            prepare_targets(s, &ia, pa, &buf.targets, pr, &mut buf.prepared);
+            score_dot_lanes(s, &ia, pa, &self.dots_soa[&a], &buf.excl, &buf.prepared, &mut buf.lane_targets, &mut ret);
+            let density = self.p.probe.density;
+            ret.bump /= density;
+            ret.hbond /= density;
+            ret.attract /= density;
+            return ret;
+        }
         let dots = &self.dots[&a];
         buf.dots.clear();
         'dot: for dp in dots.iter() {
@@ -764,6 +781,194 @@ fn check_dot(s: &DotScorer, src: &AtomInfo, dot_abs: Vec3, probe_loc: Vec3, targ
     f.finish(s, src, dot_abs)
 }
 
+/// Dots per chunk in `score_dot_lanes`.
+const LANES: usize = 4;
+
+/// The dot offsets of one dot sphere as coordinate arrays (dot and probe),
+/// padded to whole chunks.
+struct DotsSoa {
+    n: usize,
+    d: [Vec<f64>; 3],
+    p: [Vec<f64>; 3],
+    /// Per chunk: center and radius of a sphere holding its dot offsets, and
+    /// of one holding its probe offsets.
+    bounds: Vec<(Vec3, f64, Vec3, f64)>,
+}
+
+/// Slack on the chunk bounds (far above rounding error).
+const CHUNK_MARGIN: f64 = 1e-6;
+
+impl DotsSoa {
+    fn new(dots: &[DotPair]) -> DotsSoa {
+        let padded = dots.len().div_ceil(LANES) * LANES;
+        let col = |f: &dyn Fn(&DotPair) -> f64| {
+            let mut v: Vec<f64> = dots.iter().map(f).collect();
+            v.resize(padded, 0.0);
+            v
+        };
+        let sphere = |pts: &[Vec3]| {
+            let c = pts.iter().fold(Vec3::ZERO, |a, &q| a + q) / pts.len() as f64;
+            (c, pts.iter().map(|q| q.dist(c)).fold(0.0, f64::max))
+        };
+        let bounds = dots
+            .chunks(LANES)
+            .map(|ch| {
+                let (cd, rd) = sphere(&ch.iter().map(|x| x.d).collect::<Vec<_>>());
+                let (cp, rp) = sphere(&ch.iter().map(|x| x.probe).collect::<Vec<_>>());
+                (cd, rd + CHUNK_MARGIN, cp, rp + CHUNK_MARGIN)
+            })
+            .collect();
+        DotsSoa {
+            n: dots.len(),
+            d: [col(&|x| x.d.x), col(&|x| x.d.y), col(&|x| x.d.z)],
+            p: [col(&|x| x.probe.x), col(&|x| x.probe.y), col(&|x| x.probe.z)],
+            bounds,
+        }
+    }
+}
+
+/// What `DotFold::step` needs of a target for one source atom.
+#[derive(Clone, Copy)]
+struct LaneTarget {
+    pos: Vec3,
+    prb2: f64,
+    /// Probe reach (for the chunk cull).
+    prb: f64,
+    vdw: f64,
+    hb: bool,
+    hbm: f64,
+    /// Fold state bits of the target: hydrogen bond, dummy cause, index.
+    base: u64,
+}
+
+const LANE_NO_TARGET: u64 = u64::MAX;
+
+/// Score the dots of one atom state against `targets` in order, as
+/// `check_dot` and `accumulate_dot` do one dot at a time: dots inside an atom
+/// of `excl` are skipped and the rest accumulate into `ret` in dot order.
+/// Dots go through in chunks of `LANES`, each test over a chunk at once (the
+/// compiler vectorizes the fixed-size loops) with the scalar arithmetic, so
+/// the results are the same bits; each dot's fold keeps the target order.
+fn score_dot_lanes(
+    s: &DotScorer,
+    src: &AtomInfo,
+    pa: Vec3,
+    dots: &DotsSoa,
+    excl: &[(Vec3, f64)],
+    targets: &[PTarget],
+    lt: &mut Vec<LaneTarget>,
+    ret: &mut ScoreDotsResult,
+) {
+    // per-target constants of `DotFold::step`; a target the step leaves
+    // alone for every dot is dropped
+    lt.clear();
+    let cs = src.charge as i32;
+    for (t, b) in targets.iter().enumerate() {
+        let bi = &b.info;
+        let cb = bi.charge as i32;
+        let both = cs != 0 && cb != 0;
+        let comp = both && cs * cb < 0;
+        let could = (src.is_donor && bi.is_acceptor) || (src.is_acceptor && bi.is_donor);
+        let hb = could && (!both || comp);
+        if !hb && (src.is_dummy_hydrogen || bi.is_dummy_hydrogen) {
+            continue;
+        }
+        let hbm = if both { s.max_charged_h_overlap } else { s.max_regular_h_overlap };
+        let base = ((t as u64) << 8) | hb as u64 | ((bi.is_dummy_hydrogen as u64) << 2);
+        lt.push(LaneTarget { pos: b.pos, prb2: b.prb2, prb: b.prb2.sqrt(), vdw: bi.vdw_radius, hb, hbm, base });
+    }
+    let [dx, dy, dz] = &dots.d;
+    let [px, py, pz] = &dots.p;
+    // a chunk with no target in reach of its probes cannot score, and only
+    // excluded atoms near its dots can remove one
+    let mut near_t: Vec<LaneTarget> = Vec::with_capacity(lt.len());
+    let mut near_e: Vec<(Vec3, f64)> = Vec::with_capacity(excl.len());
+    let mut start = 0;
+    for &(cd, rd, cp, rp) in &dots.bounds {
+        let m = (dots.n - start).min(LANES);
+        let pc = pa + cp;
+        near_t.clear();
+        near_t.extend(lt.iter().filter(|t| {
+            let reach = t.prb + rp;
+            pc.dist_sq(t.pos) <= reach * reach
+        }));
+        if near_t.is_empty() {
+            start += LANES;
+            continue;
+        }
+        let dc = pa + cd;
+        near_e.clear();
+        near_e.extend(excl.iter().filter(|&&(pe, re)| {
+            let reach = re + rd;
+            dc.dist_sq(pe) < reach * reach
+        }));
+        let (mut ax, mut ay, mut az) = ([0.0f64; LANES], [0.0f64; LANES], [0.0f64; LANES]);
+        let (mut qx, mut qy, mut qz) = ([0.0f64; LANES], [0.0f64; LANES], [0.0f64; LANES]);
+        for l in 0..LANES {
+            ax[l] = pa.x + dx[start + l];
+            ay[l] = pa.y + dy[start + l];
+            az[l] = pa.z + dz[start + l];
+            qx[l] = pa.x + px[start + l];
+            qy[l] = pa.y + py[start + l];
+            qz[l] = pa.z + pz[start + l];
+        }
+        let mut live = [false; LANES];
+        for (l, v) in live.iter_mut().enumerate() {
+            *v = l < m;
+        }
+        for &(pe, re) in &near_e {
+            let r2 = re * re;
+            for l in 0..LANES {
+                let (ex, ey, ez) = (ax[l] - pe.x, ay[l] - pe.y, az[l] - pe.z);
+                live[l] &= !(ex * ex + ey * ey + ez * ez < r2);
+            }
+        }
+        if !live.iter().any(|&x| x) {
+            start += LANES;
+            continue;
+        }
+        let mut bg = [1e100f64; LANES];
+        let mut st = [LANE_NO_TARGET; LANES];
+        let mut hm = [0.0f64; LANES];
+        for t in near_t.iter() {
+            let mut within = [false; LANES];
+            for l in 0..LANES {
+                let (rx, ry, rz) = (qx[l] - t.pos.x, qy[l] - t.pos.y, qz[l] - t.pos.z);
+                within[l] = live[l] & (rx * rx + ry * ry + rz * rz <= t.prb2);
+            }
+            if !within.iter().any(|&x| x) {
+                continue;
+            }
+            let neg_hbm = -t.hbm;
+            for l in 0..LANES {
+                let (rx, ry, rz) = (ax[l] - t.pos.x, ay[l] - t.pos.y, az[l] - t.pos.z);
+                let gap = (rx * rx + ry * ry + rz * rz).sqrt() - t.vdw;
+                let upd = within[l] & (gap < bg[l]);
+                let new_state = t.base | (((t.hb & (gap < neg_hbm)) as u64) << 1);
+                bg[l] = if upd { gap } else { bg[l] };
+                st[l] = if upd { new_state } else { st[l] };
+                hm[l] = if upd & t.hb { t.hbm } else { hm[l] };
+            }
+        }
+        // finish and accumulate in dot order
+        for l in 0..m {
+            if !live[l] || st[l] == LANE_NO_TARGET {
+                continue;
+            }
+            let fold = DotFold {
+                best_gap: bg[l],
+                best: Some(targets[(st[l] >> 8) as usize]),
+                is_hbond: st[l] & 1 != 0,
+                too_close: st[l] & 2 != 0,
+                hb_min: hm[l],
+                cause_dummy: st[l] & 4 != 0,
+            };
+            accumulate_dot(s, fold.finish(s, src, v3(ax[l], ay[l], az[l])), ret);
+        }
+        start += LANES;
+    }
+}
+
 /// Add one dot's result to the running sums (the body of `score_dots`).
 #[inline]
 fn accumulate_dot(s: &DotScorer, r: Option<(OverlapType, f64, f64, bool)>, ret: &mut ScoreDotsResult) {
@@ -794,6 +999,7 @@ fn accumulate_dot(s: &DotScorer, r: Option<(OverlapType, f64, f64, bool)>, ret: 
 struct ScoreBuf {
     targets: Vec<Target>,
     prepared: Vec<PTarget>,
+    lane_targets: Vec<LaneTarget>,
     excl: Vec<(Vec3, f64)>,
     dots: Vec<DotPair>,
 }
@@ -1381,6 +1587,8 @@ fn run_one(
     let mut cache = DotSphereCache::new(p.probe.density);
     let mut dots: FxHashMap<u32, Arc<Vec<DotPair>>> = FxHashMap::default();
     let mut dot_reach: FxHashMap<u32, f64> = FxHashMap::default();
+    let mut dots_soa: FxHashMap<u32, Arc<DotsSoa>> = FxHashMap::default();
+    let mut soa_by_radius: FxHashMap<u64, Arc<DotsSoa>> = FxHashMap::default();
     let mut by_radius: FxHashMap<u64, Arc<Vec<DotPair>>> = FxHashMap::default();
     for &a in &mover_atoms {
         let r = w.info[a as usize].vdw_radius;
@@ -1399,6 +1607,8 @@ fn run_one(
             })
             .clone();
         dot_reach.insert(a, dp.iter().map(|x| x.d.length()).fold(0.0, f64::max));
+        let soa = soa_by_radius.entry(r.to_bits()).or_insert_with(|| Arc::new(DotsSoa::new(&dp))).clone();
+        dots_soa.insert(a, soa);
         dots.insert(a, dp);
     }
     info += &tm.report("construct dot scorer");
@@ -1471,6 +1681,7 @@ fn run_one(
         atom_movers,
         exclude,
         dots,
+        dots_soa,
         dot_reach,
         near,
         max_vdw,
@@ -1746,6 +1957,8 @@ fn atom_factors_dotwise(
     let mut st = CliqueState { movers: comp, cfg: vec![Cfg::Coarse(0); comp.len()] };
     let (mut evaluated, mut stand_for) = (0usize, 0usize);
     let mut dot_work = 0usize;
+    let mut lane_list: Vec<PTarget> = Vec::new();
+    let mut lane_targets: Vec<LaneTarget> = Vec::new();
     for own in 0..doms[i] {
         let own_cfg = Cfg::Coarse(own as u16);
         if ctx.mover_atom_deleted(m, slot, own_cfg) {
@@ -1842,60 +2055,73 @@ fn atom_factors_dotwise(
         // classify dots
         let mut base = ScoreDotsResult::default();
         let mut groups: FxHashMap<Vec<usize>, Vec<(usize, DotFold)>> = FxHashMap::default();
-        'dot: for (di, dp) in dots_all.iter().enumerate() {
-            let dot_abs = pa + dp.d;
-            let probe_loc = pa + dp.probe;
-            for &(pe, re) in &excl_fixed {
-                if dot_abs.dist_sq(pe) < re * re {
-                    continue 'dot;
+        if others.is_empty() {
+            // no other Mover reaches a dot: each dot folds the static targets
+            // and then its own Mover's, which the chunked kernel scores
+            lane_list.clear();
+            lane_list.extend_from_slice(&static_p);
+            for (q, &(_, so)) in seq.iter().enumerate() {
+                if so.is_none() {
+                    lane_list.extend_from_slice(&seg_prepared[q][0]);
                 }
             }
-            let mut fold = DotFold::START;
-            for b in &static_p {
-                fold.step(sc, &ia, dot_abs, probe_loc, b);
-            }
-            let mut dep: Vec<usize> = Vec::new();
-            for (k, &o) in others.iter().enumerate() {
-                let mut reach = false;
-                'st: for sidx in 0..doms[o] {
-                    for &(pe, re) in &excl_dyn[k][sidx] {
-                        if dot_abs.dist_sq(pe) < re * re {
-                            reach = true;
-                            break 'st;
-                        }
+            score_dot_lanes(sc, &ia, pa, &ctx.dots_soa[&a], &excl_fixed, &lane_list, &mut lane_targets, &mut base);
+        } else {
+            'dot: for (di, dp) in dots_all.iter().enumerate() {
+                let dot_abs = pa + dp.d;
+                let probe_loc = pa + dp.probe;
+                for &(pe, re) in &excl_fixed {
+                    if dot_abs.dist_sq(pe) < re * re {
+                        continue 'dot;
                     }
                 }
-                if !reach {
-                    'st2: for (q, &(_, so)) in seq.iter().enumerate() {
-                        if so != Some(o) {
-                            continue;
+                let mut fold = DotFold::START;
+                for b in &static_p {
+                    fold.step(sc, &ia, dot_abs, probe_loc, b);
+                }
+                let mut dep: Vec<usize> = Vec::new();
+                for (k, &o) in others.iter().enumerate() {
+                    let mut reach = false;
+                    'st: for sidx in 0..doms[o] {
+                        for &(pe, re) in &excl_dyn[k][sidx] {
+                            if dot_abs.dist_sq(pe) < re * re {
+                                reach = true;
+                                break 'st;
+                            }
                         }
-                        for ts in &seg_targets[q] {
-                            for b in ts {
-                                let prb = b.info.vdw_radius + pr;
-                                if probe_loc.dist_sq(b.pos) <= prb * prb {
-                                    reach = true;
-                                    break 'st2;
+                    }
+                    if !reach {
+                        'st2: for (q, &(_, so)) in seq.iter().enumerate() {
+                            if so != Some(o) {
+                                continue;
+                            }
+                            for ts in &seg_targets[q] {
+                                for b in ts {
+                                    let prb = b.info.vdw_radius + pr;
+                                    if probe_loc.dist_sq(b.pos) <= prb * prb {
+                                        reach = true;
+                                        break 'st2;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if reach {
-                    dep.push(o);
-                }
-            }
-            if dep.is_empty() {
-                for (q, &(_, so)) in seq.iter().enumerate() {
-                    if so.is_none() {
-                        for b in &seg_prepared[q][0] {
-                            fold.step(sc, &ia, dot_abs, probe_loc, b);
-                        }
+                    if reach {
+                        dep.push(o);
                     }
                 }
-                accumulate_dot(sc, fold.finish(sc, &ia, dot_abs), &mut base);
-            } else {
-                groups.entry(dep).or_default().push((di, fold));
+                if dep.is_empty() {
+                    for (q, &(_, so)) in seq.iter().enumerate() {
+                        if so.is_none() {
+                            for b in &seg_prepared[q][0] {
+                                fold.step(sc, &ia, dot_abs, probe_loc, b);
+                            }
+                        }
+                    }
+                    accumulate_dot(sc, fold.finish(sc, &ia, dot_abs), &mut base);
+                } else {
+                    groups.entry(dep).or_default().push((di, fold));
+                }
             }
         }
         // the dots that no other Mover reaches
