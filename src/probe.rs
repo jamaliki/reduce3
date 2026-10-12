@@ -346,6 +346,16 @@ pub struct Target {
     pub info: AtomInfo,
 }
 
+/// One scored dot, with the index of its occluding target retained.
+#[derive(Clone, Copy, Debug)]
+pub struct DotContact {
+    pub target_index: usize,
+    pub overlap_type: OverlapType,
+    pub gap: f64,
+    pub overlap: f64,
+    pub annular: bool,
+}
+
 /// Precomputed scorer constants.
 #[derive(Clone, Debug)]
 pub struct DotScorer {
@@ -442,7 +452,7 @@ impl DotScorer {
                 if l > 0.0 { src_pos + *d * ((l + probe_radius) / l) } else { src_pos }
             };
             let r = self.check_dot_core(src, src_pos, dot_abs, probe_loc, targets, probe_radius);
-            let Some((ot, gap, overlap, annular)) = r else { continue };
+            let Some(DotContact { overlap_type: ot, gap, overlap, annular, .. }) = r else { continue };
             let it = self.interaction_type(ot, gap, true);
             match it {
                 InteractionType::Invalid => {}
@@ -484,7 +494,7 @@ impl DotScorer {
         probe_loc: Vec3,
         targets: &[Target],
         probe_radius: f64,
-    ) -> Option<(OverlapType, f64, f64, bool)> {
+    ) -> Option<DotContact> {
         let mut best_gap = 1e100;
         let mut best: usize = usize::MAX;
         let mut is_hbond = false;
@@ -557,9 +567,21 @@ impl DotScorer {
             ot = OverlapType::Ignore;
         }
         if ot == OverlapType::Ignore {
-            return if keep { Some((OverlapType::Ignore, gap, overlap, annular)) } else { None };
+            return if keep { Some(DotContact { target_index: best, overlap_type: OverlapType::Ignore, gap, overlap, annular }) } else { None };
         }
-        Some((ot, gap, overlap, annular))
+        Some(DotContact { target_index: best, overlap_type: ot, gap, overlap, annular })
+    }
+
+    /// Score one contact dot against targets after bonded-surface trimming.
+    pub fn check_dot(&self, source_position: Vec3, source: &AtomInfo,
+        offset: Vec3, targets: &[Target], probe_radius: f64) -> Option<DotContact> {
+        if source.is_ion && self.ignore_ions { return None; }
+        let length = offset.length();
+        let factor = if length > 0.0 {
+            (length + probe_radius) / length
+        } else { return None; };
+        self.check_dot_core(source, source_position, source_position + offset,
+            source_position + offset * factor, targets, probe_radius)
     }
 }
 
