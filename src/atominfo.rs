@@ -52,6 +52,31 @@ pub fn extra_atom_info(
     bonded: &[Vec<u32>],
     set_polar_hydrogen_radius: bool,
 ) -> ExtraInfo {
+    extra_atom_info_with_mode(st, flat, etype, ml, bonded, set_polar_hydrogen_radius, false)
+}
+
+/// Probe validation typing with CCTBX's electron or neutron energy radii.
+/// Polar hydrogens retain Probe's 1.05 A override in both modes.
+pub fn extra_atom_info_validation(
+    st: &Structure,
+    flat: &FlatAtoms,
+    etype: &[EType],
+    ml: &MonLib,
+    bonded: &[Vec<u32>],
+    nuclear: bool,
+) -> ExtraInfo {
+    extra_atom_info_with_mode(st, flat, etype, ml, bonded, true, nuclear)
+}
+
+fn extra_atom_info_with_mode(
+    st: &Structure,
+    flat: &FlatAtoms,
+    etype: &[EType],
+    ml: &MonLib,
+    bonded: &[Vec<u32>],
+    set_polar_hydrogen_radius: bool,
+    nuclear: bool,
+) -> ExtraInfo {
     let n = flat.pos.len();
     let mut info = Vec::with_capacity(n);
     let mut w = String::new();
@@ -79,7 +104,7 @@ pub fn extra_atom_info(
             EType::Unknown => ml.ener.get("").ok_or_else(|| "''".to_string()),
         };
         let radius: Result<(), String> = entry.as_ref().map_err(|m| m.clone()).and_then(|en| {
-            let vdw = en.vdw_radius;
+            let vdw = energy_radius(en, nuclear);
             if e.is_ion {
                 match en.ion_radius {
                     Some(r) => {
@@ -106,7 +131,7 @@ pub fn extra_atom_info(
                 msg
             );
             if e.vdw_radius <= 0.0 {
-                if let Some(r) = ml.ener.get(elem).and_then(|x| x.vdw_radius).filter(|&r| r != 0.0) {
+                if let Some(r) = ml.ener.get(elem).and_then(|x| energy_radius(x, nuclear)).filter(|&r| r != 0.0) {
                     e.vdw_radius = r;
                     w += &format!("Using element-based VDW radius for {}: {}\n", full_name(), py_float(r));
                 }
@@ -157,6 +182,14 @@ pub fn extra_atom_info(
         info.push(e);
     }
     ExtraInfo { info, warnings: w }
+}
+
+fn energy_radius(entry: &crate::monlib::EnerAtom, nuclear: bool) -> Option<f64> {
+    if nuclear {
+        entry.vdw_radius_neutron.or(entry.vdw_radius)
+    } else {
+        entry.vdw_radius
+    }
 }
 
 /// The Boost.Python message for assigning None to a double property.

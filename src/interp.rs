@@ -12,6 +12,8 @@ use crate::resclass::{self, ResClass};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
+pub mod validation;
+
 pub const ORIGIN_COVALENT: u16 = 0;
 pub const ORIGIN_SS: u16 = 1;
 pub const ORIGIN_METAL: u16 = 3;

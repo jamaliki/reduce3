@@ -23,6 +23,8 @@ pub struct CompBond {
     pub value_dist: Option<f64>,
     pub esd: Option<f64>,
     pub value_dist_neutron: Option<f64>,
+    /// Nuclear target and optional nuclear sigma, retained for validation.
+    pub nuclear: Option<(f64, Option<f64>)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -241,6 +243,7 @@ pub struct ModBond {
     pub new_value_dist: Option<f64>,
     pub new_esd: Option<f64>,
     pub new_value_dist_neutron: Option<f64>,
+    pub nuclear: Option<(f64, Option<f64>)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -383,6 +386,16 @@ impl MonLib {
     }
 
     pub fn load(root: &Path) -> Result<MonLib, String> {
+        Self::load_with_list(root, false)
+    }
+
+    /// Load the effective list used by CCTBX's normal repository lookup.
+    /// Keep this separate from preparation's historic merged-list preference.
+    pub fn load_validation(root: &Path) -> Result<MonLib, String> {
+        Self::load_with_list(root, true)
+    }
+
+    fn load_with_list(root: &Path, validation: bool) -> Result<MonLib, String> {
         let mut ml = MonLib {
             root: root.to_path_buf(),
             comp_synonyms: FxHashMap::default(),
@@ -405,7 +418,13 @@ impl MonLib {
         // mon_lib_list.cif with the geostd list merged on top; cctbx finds the
         // copy under geostd first (`mon_lib_list_cif`)
         let geostd_mlist = root.join("geostd/list/mon_lib_list.cif");
-        let mlist = if geostd_mlist.exists() { read(geostd_mlist)? } else { read(root.join("mon_lib/list/mon_lib_list.cif"))? };
+        let mlist = if validation {
+            read(root.join("mon_lib/list/mon_lib_list.cif"))?
+        } else if geostd_mlist.exists() {
+            read(geostd_mlist)?
+        } else {
+            read(root.join("mon_lib/list/mon_lib_list.cif"))?
+        };
         let glist = read(root.join("geostd/list/geostd_list.cif")).unwrap_or_default();
         let mdoc = cif::parse(&mlist);
         let gdoc = cif::parse(&glist);
@@ -858,6 +877,7 @@ impl MonLib {
                     value_dist: mb.new_value_dist,
                     esd: mb.new_esd,
                     value_dist_neutron: mb.new_value_dist_neutron,
+                    nuclear: mb.nuclear,
                 }),
                 "delete" => c.bonds.retain(|b| !same(b)),
                 "change" => {
@@ -874,6 +894,7 @@ impl MonLib {
                         if mb.new_value_dist_neutron.is_some() {
                             b.value_dist_neutron = mb.new_value_dist_neutron;
                         }
+                        if mb.nuclear.is_some() { b.nuclear=mb.nuclear; }
                     }
                 }
                 _ => {}
@@ -1047,6 +1068,8 @@ pub fn parse_comp_doc(doc: &cif::Document, path: &Path) -> Vec<Comp> {
                     value_dist: opt_f(Some(get(c, r, cols[3]))),
                     esd: opt_f(Some(get(c, r, cols[4]))),
                     value_dist_neutron: neutron,
+                    nuclear: neutron.map(|v| (v,opt_f(Some(get(c,r,c.col("value_dist_neutron_esd"))))
+                        .or_else(||opt_f(Some(get(c,r,c.col("value_dist_nucleus_esd"))))))),
                 });
             }
         }
@@ -1231,6 +1254,10 @@ fn parse_mod_block(b: &cif::Block, m: &mut ChemMod) {
                 new_value_dist: opt_f(Some(get(c, r, cols[4]))),
                 new_esd: opt_f(Some(get(c, r, cols[5]))),
                 new_value_dist_neutron: opt_f(Some(get(c, r, cols[6]))),
+                nuclear: opt_f(Some(get(c,r,cols[6])))
+                    .or_else(||opt_f(Some(get(c,r,c.col("new_value_dist_nucleus")))))
+                    .map(|v|(v,opt_f(Some(get(c,r,c.col("new_value_dist_neutron_esd"))))
+                        .or_else(||opt_f(Some(get(c,r,c.col("new_value_dist_nucleus_esd"))))))),
             });
         }
     }

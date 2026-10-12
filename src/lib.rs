@@ -12,6 +12,7 @@ pub mod atomtypes;
 pub mod autolink;
 pub mod ccdrestraints;
 pub mod cell;
+pub mod clashcheck;
 pub mod cif;
 pub mod cifsource;
 pub mod fastfmt;

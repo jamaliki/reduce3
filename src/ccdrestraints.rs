@@ -482,6 +482,7 @@ pub fn comp_from_ccd(text: &str, source: &Path, strict: bool) -> Option<Comp> {
             value_dist: Some(rounded(bond_length(&pos, i, j) * 0.9, 3)),
             esd: Some(0.1),
             value_dist_neutron: None,
+            nuclear: None,
         });
     }
     for [a, b, c] in enumerate_angles(&nbrs) {
@@ -796,6 +797,7 @@ fn comp_from_ccd_lenient(text: &str, source: &Path) -> Option<Comp> {
             value_dist: Some(xray),
             esd: Some(0.1),
             value_dist_neutron: Some(neutron),
+            nuclear: None,
         });
     }
     for [a, b, c] in enumerate_angles(&nbrs) {
