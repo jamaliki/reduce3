@@ -141,6 +141,7 @@ fn validate_metadata(doc: &cif::Document) -> Result<(), String> {
                     "_chem_comp_plane_atom",
                     "_chem_comp_tor",
                     "_chem_comp_tree",
+                    "_chem_comp_rotamer_info",
                     "_chem_link",
                     "_chem_link_bond",
                     "_chem_link_angle",
