@@ -35,6 +35,37 @@ fn reported_location(position: crate::geom::Vec3) -> Result<crate::geom::Vec3, S
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::reported_gap;
+
+    #[test]
+    fn decimal_output_matches_python_format_on_binary_neighbors() {
+        // CPython format(value, ".3f") oracle, including both neighbors of
+        // the -0.4005 clash boundary. Scaling first would change this tie.
+        for (value, expected) in [
+            (0.4005_f64, [0.400_f64, 0.401, 0.401]),
+            (-0.4005, [-0.401, -0.401, -0.400]),
+            (1.2345, [1.234, 1.234, 1.235]),
+            (-1.2345, [-1.235, -1.234, -1.234]),
+            (2.6755, [2.675, 2.675, 2.676]),
+            (0.0005, [0.000, 0.001, 0.001]),
+            (-0.0005, [-0.001, -0.001, -0.000]),
+            (1234.5675, [1234.567, 1234.568, 1234.568]),
+        ] {
+            let bits = value.to_bits();
+            let neighbors = if value.is_sign_negative() {
+                [f64::from_bits(bits + 1), value, f64::from_bits(bits - 1)]
+            } else {
+                [f64::from_bits(bits - 1), value, f64::from_bits(bits + 1)]
+            };
+            for (input, output) in neighbors.into_iter().zip(expected) {
+                assert_eq!(reported_gap(input).unwrap().to_bits(), output.to_bits());
+            }
+        }
+    }
+}
+
 pub(super) fn evaluate(
     world: World,
     options: &Options,
