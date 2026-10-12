@@ -1,0 +1,19 @@
+{
+  "source": "CCTBX mmtbx.conformation_dependent_library.cdl_database",
+  "cctbx_version": "2026.9",
+  "database_version": "CDL v1.2",
+  "groups": [
+    "Gly_nonxpro",
+    "Gly_xpro",
+    "IleVal_nonxpro",
+    "IleVal_xpro",
+    "NonPGIV_nonxpro",
+    "NonPGIV_xpro",
+    "Pro_nonxpro",
+    "Pro_xpro"
+  ],
+  "source_sha256": "79c197e5692986cde26db9aa492cecfb5b8b7d5b1f3cba4dc222bb2e04d23c68",
+  "binary_sha256": "38bd7b7d5a96b3864a5a864a33555cda11a65de4780a27b6d461ae2c2c1e94de",
+  "encoding": "8 groups x 36 phi bins x 36 psi bins x 24 little-endian f64 values",
+  "source_license": "CCTBX BSD license; see CCTBX project LICENSE.txt"
+}

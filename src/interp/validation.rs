@@ -1,0 +1,208 @@
+//! Build weighted validation restraints without changing hydrogen preparation.
+
+mod builder;
+mod cdl;
+mod charges;
+mod chirality;
+mod nomenclature;
+
+use super::*;
+
+/// Parameters that affect chemical targets.
+#[derive(Clone, Debug)]
+pub struct ValidationOptions {
+    pub nuclear: bool,
+    pub use_cdl: bool,
+    pub link_distance_cutoff: f64,
+    pub chirality_sigma: f64,
+}
+
+impl Default for ValidationOptions {
+    fn default() -> Self {
+        Self {
+            nuclear: false,
+            use_cdl: true,
+            link_distance_cutoff: 3.0,
+            chirality_sigma: 0.2,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WeightedBond {
+    pub indices: [u32; 2],
+    pub ideal: f64,
+    pub weight: f64,
+    pub origin: u16,
+}
+
+#[derive(Clone, Debug)]
+pub struct WeightedAngle {
+    pub indices: [u32; 3],
+    pub ideal: f64,
+    pub weight: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct WeightedChirality {
+    pub indices: [u32; 4],
+    pub ideal: f64,
+    pub weight: f64,
+    pub both_signs: bool,
+    pub pseudochiral: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct WeightedPlane {
+    pub indices: Vec<u32>,
+    pub weights: Vec<f64>,
+}
+
+/// A check is complete only when no unsupported interpretation remains.
+#[derive(Clone, Debug)]
+pub struct Coverage {
+    pub check: &'static str,
+    pub unsupported: Vec<String>,
+    pub unresolved: usize,
+}
+
+impl Coverage {
+    pub fn complete(&self) -> bool {
+        self.unsupported.is_empty() && self.unresolved == 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DictionaryUse {
+    pub residue: String,
+    pub source: std::path::PathBuf,
+    pub modifications: Vec<String>,
+}
+
+pub struct ValidationGraph {
+    pub sites: Vec<Vec3>,
+    pub atom_paths: Vec<AtomPath>,
+    pub hydrogen_flags: Vec<bool>,
+    /// Per-atom formal charges after reference scattering-label normalization.
+    pub typed_charges: Vec<i32>,
+    pub bonds: Vec<WeightedBond>,
+    pub angles: Vec<WeightedAngle>,
+    pub chiralities: Vec<WeightedChirality>,
+    pub planes: Vec<WeightedPlane>,
+    pub coverage: Vec<Coverage>,
+    pub dictionaries: Vec<DictionaryUse>,
+    pub topology: Interp,
+    bond_keys: FxHashMap<[u32; 2], usize>,
+    angle_keys: FxHashMap<[u32; 3], usize>,
+    chiral_keys: FxHashMap<[u32; 4], usize>,
+    plane_keys: FxHashMap<Vec<u32>, usize>,
+}
+
+impl ValidationGraph {
+    pub fn complete(&self) -> bool {
+        self.coverage.iter().all(Coverage::complete)
+    }
+
+    fn unsupported(&mut self, checks: &[&str], reason: impl Into<String>) {
+        let reason = reason.into();
+        for coverage in &mut self.coverage {
+            if checks.contains(&coverage.check) && !coverage.unsupported.contains(&reason) {
+                coverage.unsupported.push(reason.clone());
+            }
+        }
+    }
+
+    fn unresolved(&mut self, check: &str) {
+        self.coverage
+            .iter_mut()
+            .find(|c| c.check == check)
+            .unwrap()
+            .unresolved += 1;
+    }
+
+    fn bond(&mut self, mut indices: [u32; 2], ideal: f64, sigma: f64, origin: u16) {
+        indices.sort_unstable();
+        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+            self.unsupported(
+                &["bonds", "hydrogens"],
+                "Missing or invalid bond target uncertainty",
+            );
+            return;
+        }
+        let weight = 1. / sigma.powi(2);
+        if let Some(&k) = self.bond_keys.get(&indices) {
+            if self.bonds[k].ideal != ideal || self.bonds[k].weight != weight {
+                self.unsupported(
+                    &["bonds"],
+                    "Conflicting bond proxies require reference registry resolution",
+                );
+            }
+            return;
+        }
+        self.bond_keys.insert(indices, self.bonds.len());
+        self.bonds.push(WeightedBond {
+            indices,
+            ideal,
+            weight,
+            origin,
+        });
+        self.topology
+            .upsert_bond(indices[0], indices[1], ideal, origin);
+    }
+
+    fn angle(&mut self, mut indices: [u32; 3], ideal: f64, sigma: f64) {
+        if indices[0] > indices[2] {
+            indices.swap(0, 2);
+        }
+        if !ideal.is_finite() || !sigma.is_finite() || sigma <= 0. {
+            self.unsupported(&["angles"], "Missing or invalid angle target uncertainty");
+            return;
+        }
+        let weight = 1. / sigma.powi(2);
+        if let Some(&k) = self.angle_keys.get(&indices) {
+            if self.angles[k].ideal != ideal || self.angles[k].weight != weight {
+                self.unsupported(
+                    &["angles"],
+                    "Conflicting angle proxies require reference registry resolution",
+                );
+            }
+            return;
+        }
+        self.angle_keys.insert(indices, self.angles.len());
+        self.angles.push(WeightedAngle {
+            indices,
+            ideal,
+            weight,
+        });
+    }
+
+    fn plane(&mut self, mut atoms: Vec<(u32, f64)>) {
+        if atoms.len() < 4 {
+            return;
+        }
+        atoms.sort_by_key(|a| a.0);
+        let indices: Vec<u32> = atoms.iter().map(|a| a.0).collect();
+        let weights: Vec<f64> = atoms.iter().map(|a| 1. / a.1.powi(2)).collect();
+        if let Some(&k) = self.plane_keys.get(&indices) {
+            if self.planes[k].weights != weights {
+                self.unsupported(
+                    &["planarities"],
+                    "Conflicting plane weights need reference registry resolution",
+                );
+            }
+            return;
+        }
+        self.plane_keys.insert(indices.clone(), self.planes.len());
+        self.planes.push(WeightedPlane { indices, weights });
+    }
+}
+
+/// Interpret fresh input sites and retain explicit coverage for every check.
+pub fn build(
+    st: &Structure,
+    flat: &FlatAtoms,
+    ml: &MonLib,
+    options: &ValidationOptions,
+) -> Result<ValidationGraph, String> {
+    builder::build(st, flat, ml, options)
+}
