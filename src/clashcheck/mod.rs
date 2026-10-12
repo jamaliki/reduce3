@@ -6,7 +6,7 @@
 //! This module never infers missing chemical types or alters real atom sites.
 
 mod evaluate;
-mod neighbors;
+pub(crate) mod neighbors;
 mod prepare;
 
 use crate::geom::Vec3;

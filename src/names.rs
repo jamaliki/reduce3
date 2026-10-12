@@ -441,6 +441,14 @@ pub struct Mapping {
 }
 
 pub fn map_atoms(comp: &Comp, model_names: &[String], ani: Option<&[Option<String>]>, is_na: bool, atom_synonyms: Option<&FxHashMap<String, String>>) -> Mapping {
+    map_atoms_mode(comp, model_names, ani, is_na, atom_synonyms, false)
+}
+
+pub(crate) fn map_validation_atoms(comp: &Comp, model_names: &[String], ani: Option<&[Option<String>]>, is_na: bool, atom_synonyms: Option<&FxHashMap<String, String>>) -> Mapping {
+    map_atoms_mode(comp, model_names, ani, is_na, atom_synonyms, true)
+}
+
+fn map_atoms_mode(comp: &Comp, model_names: &[String], ani: Option<&[Option<String>]>, is_na: bool, atom_synonyms: Option<&FxHashMap<String, String>>, terminal_names: bool) -> Mapping {
     let mut ids = vec![None; model_names.len()];
     let mut unexpected = Vec::new();
     let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
@@ -457,6 +465,10 @@ pub fn map_atoms(comp: &Comp, model_names: &[String], ani: Option<&[Option<Strin
             given = given.to_ascii_uppercase();
         }
         let mut name = ani.and_then(|a| a[i].clone()).unwrap_or_else(|| given.clone());
+        if terminal_names && comp.test_for_peptide() && matches!(name.as_str(), "H1" | "H2" | "H3") && !comp.has_atom(&name) {
+            if seen.insert(name.clone()) { unexpected.push(name); }
+            continue;
+        }
         if !comp.has_atom(&name) {
             let mut cands: Vec<String> = Vec::new();
             let rot = |s: &str| -> Option<String> {

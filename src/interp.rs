@@ -463,6 +463,13 @@ fn interpret_residue(
     neutron_unused: bool,
     log: &mut String,
 ) -> (ResInterp, Vec<Option<String>>) {
+    interpret_residue_mode(ml, auto_comps, flat, res, neutron_unused, log, true)
+}
+
+fn interpret_residue_mode(
+    ml: &MonLib, auto_comps: &FxHashMap<String, Arc<Comp>>, flat: &FlatAtoms,
+    res: &ConfResidue, neutron_unused: bool, log: &mut String, preparation: bool,
+) -> (ResInterp, Vec<Option<String>>) {
     let _ = neutron_unused;
     let resname = res.resname.trim().to_ascii_uppercase();
     let names: Vec<String> = res.atoms.iter().map(|&a| flat.name[a as usize].clone()).collect();
@@ -508,7 +515,8 @@ fn interpret_residue(
         is_water = true;
     }
     let syn = ml.atom_synonyms.get(&comp.id);
-    let mut mapping = names::map_atoms(&comp, &names, ani.as_deref(), is_na, syn);
+    let map = if preparation { names::map_atoms } else { names::map_validation_atoms };
+    let mut mapping = map(&comp, &names, ani.as_deref(), is_na, syn);
     // ---------------- resolve_unexpected (terminal modifications)
     // `_get_incomplete_info`: no unexpected atoms, some heavy atoms missing,
     // and the atoms present are exactly a backbone fragment (or a lone P)
@@ -531,7 +539,7 @@ fn interpret_residue(
     let apply = |comp: &mut Arc<Comp>, mod_id: &str, mapping: &mut names::Mapping, log: &mut String| {
         if let Some(c) = ml.apply_mod(comp, mod_id) {
             *comp = Arc::new(c);
-            *mapping = names::map_atoms(comp, &names, ani.as_deref(), is_na, syn);
+            *mapping = map(comp, &names, ani.as_deref(), is_na, syn);
             log.push_str(&format!("  mod {} on {}\n", mod_id, resname));
         }
     };
@@ -567,6 +575,15 @@ fn interpret_residue(
             }
             if comp.id == "ASP" && u.contains("HD2") {
                 apply(&mut comp, "ACID-ASP", &mut mapping, log);
+            }
+            // CCTBX applies all residue mods before retaining the terminal
+            // hydrogen translation. Later COO/COOH mods must not erase it.
+            if !preparation {
+                if n_term == 2 {
+                    rename_terminal(&mut mapping, &names, ani.as_deref(), &["HN1", "HN2"]);
+                } else if n_term == 1 {
+                    rename_terminal(&mut mapping, &names, ani.as_deref(), &["HN"]);
+                }
             }
         } else if is_na {
             let has = |n: &str| names.iter().any(|x| names::na_reference_name(x) == n);
@@ -622,7 +639,7 @@ fn interpret_residue_memo(
     auto_comps: &FxHashMap<String, Arc<Comp>>,
     flat: &FlatAtoms,
     res: &ConfResidue,
-    neutron: bool,
+    preparation: bool,
     log: &mut String,
 ) -> ResInterp {
     use std::hash::{Hash, Hasher};
@@ -655,7 +672,11 @@ fn interpret_residue_memo(
         };
     }
     let mut own_log = String::new();
-    let (ri, ids) = interpret_residue(ml, auto_comps, flat, res, neutron, &mut own_log);
+    let (ri, ids) = if preparation {
+        interpret_residue(ml, auto_comps, flat, res, false, &mut own_log)
+    } else {
+        interpret_residue_mode(ml, auto_comps, flat, res, false, &mut own_log, false)
+    };
     log.push_str(&own_log);
     memo.entry(key).or_default().push(ResTemplate {
         resname: res.resname.clone(),
@@ -938,6 +959,15 @@ fn add_residue_restraints(it: &mut Interp, flat: &FlatAtoms, r: &ResInterp, neut
 
 /// Run the interpretation over the whole structure.
 pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams) -> Interp {
+    interpret_impl(st, flat, ml, p, true)
+}
+
+/// Build the validation topology without hydrogen-preparation metal rules.
+fn interpret_validation(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams) -> Interp {
+    interpret_impl(st, flat, ml, p, false)
+}
+
+fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams, preparation: bool) -> Interp {
     let n = flat.pos.len();
     let mut it = Interp::new(n);
     let mut flat_index: FxHashMap<AtomPath, u32> = FxHashMap::default();
@@ -953,7 +983,7 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
         for residues in model_confs {
             // interpret all residues of this chain conformer first (pucker needs next P)
             let mut interps: Vec<ResInterp> =
-                residues.iter().map(|r| interpret_residue_memo(&mut memo, ml, &p.auto_comps, flat, r, p.neutron, &mut log)).collect();
+                residues.iter().map(|r| interpret_residue_memo(&mut memo, ml, &p.auto_comps, flat, r, preparation, &mut log)).collect();
             for k in 0..interps.len() {
                 if interps[k].is_rna_dna && interps[k].comp.is_some() && interps[k].id_to_atom.contains_key("O2'") {
                     let next_p = interps.get(k + 1).and_then(|nx| nx.id_to_atom.get("P").copied());
@@ -1040,11 +1070,13 @@ pub fn interpret(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams
         &mut link_log,
     );
     it.log.push_str(&link_log);
-    add_iron_sulfur_coordination(&mut it, st, flat, p.compat);
-    add_zinc_coordination(&mut it, st, flat);
-    if !p.compat {
-        add_zinc_symmetry_coordination(&mut it, st, flat);
-        add_thiolate_metal_coordination(&mut it, st, flat);
+    if preparation {
+        add_iron_sulfur_coordination(&mut it, st, flat, p.compat);
+        add_zinc_coordination(&mut it, st, flat);
+        if !p.compat {
+            add_zinc_symmetry_coordination(&mut it, st, flat);
+            add_thiolate_metal_coordination(&mut it, st, flat);
+        }
     }
     adjust_for_ph_variants(&mut it, st, flat, &flat_index, ml, p);
     it

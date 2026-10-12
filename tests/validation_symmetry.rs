@@ -21,3 +21,18 @@ fn singular_operator_cannot_supply_a_reverse_symmetry_bond() {
     };
     assert!(operation.inverse().is_none());
 }
+
+#[test]
+fn composition_uses_fractional_affine_order() {
+    let first = SymOp::parse("-y,x-y,z+1/3").unwrap();
+    let second = SymOp::parse("x+1,y-2,-z").unwrap();
+    for input in [v3(0., 0., 0.), v3(2.3, -4.5, 0.12)] {
+        assert!(
+            first
+                .compose(&second)
+                .apply(input)
+                .dist(first.apply(second.apply(input)))
+                < 1e-12
+        );
+    }
+}

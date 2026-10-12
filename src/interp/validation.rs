@@ -126,6 +126,22 @@ impl ValidationGraph {
         self.coverage.iter().all(Coverage::complete)
     }
 
+    fn image_bond(&mut self, mut indices: [u32;2], mut image: crate::cell::SymOp, ideal: f64, sigma: f64, origin: u16) {
+        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+            self.unsupported(&["bonds", "hydrogens"], "Missing or invalid symmetry bond target uncertainty");
+            return;
+        }
+        let Some(reverse) = image.inverse() else {
+            self.unsupported(builder::ALL, "Symmetry bond operator is singular");
+            return;
+        };
+        if indices[0] > indices[1] { indices.swap(0,1); image = reverse; }
+        self.symmetry_bonds.push(WeightedSymmetryBond { indices, image, ideal, weight: 1. / sigma.powi(2), origin });
+        // MCL inserts one directed ASU proxy. Disulfide discovery supplies its
+        // two directed images separately.
+        self.topology.sym_bonds.push(BondProxy { i:indices[0], j:indices[1], ideal, origin });
+    }
+
     fn unsupported(&mut self, checks: &[&str], reason: impl Into<String>) {
         let reason = reason.into();
         for coverage in &mut self.coverage {

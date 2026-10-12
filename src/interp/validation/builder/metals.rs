@@ -1,42 +1,100 @@
 use super::*;
+mod candidates;
+mod images;
+mod zinc_targets;
+use candidates::{Candidate, group};
 
 /// Weighted targets from CCTBX's Metal Coordination Library.
-pub(super) fn emit(graph: &mut ValidationGraph, st: &Structure, flat: &FlatAtoms) {
-    let pairs: Vec<_> = graph
-        .topology
-        .bonds
-        .iter()
-        .copied()
-        .filter(|b| b.origin == ORIGIN_METAL)
-        .collect();
-    let mut zincs: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    let mut clusters = Vec::new();
-    for bond in pairs {
-        let (i, j) = (bond.i as usize, bond.j as usize);
-        if !flat.altloc[i].is_empty()
-            && !flat.altloc[j].is_empty()
-            && flat.altloc[i] != flat.altloc[j]
-        {
-            graph.unsupported(
-                ALL,
-                "Metal candidate joins incompatible alternate conformers",
-            );
-            continue;
+pub(super) fn emit(
+    graph: &mut ValidationGraph,
+    st: &Structure,
+    flat: &FlatAtoms,
+    ml: &MonLib,
+    options: &ValidationOptions,
+) {
+    let candidates = match candidates::collect(graph, st, flat, ml, options) {
+        Ok(pairs) => pairs,
+        Err(reason) => {
+            graph.unsupported(ALL, reason);
+            return;
         }
-        if flat.name[i].trim() == "ZN" && flat.element[i] == "ZN" {
-            zincs.entry(bond.i).or_default().push(bond.j);
-        } else if flat.name[j].trim() == "ZN" && flat.element[j] == "ZN" {
-            zincs.entry(bond.j).or_default().push(bond.i);
-        } else if cluster_name(st, flat, i).is_some() && flat.element[i] == "FE" {
-            clusters.push((bond.i, bond.j));
-        } else if cluster_name(st, flat, j).is_some() && flat.element[j] == "FE" {
-            clusters.push((bond.j, bond.i));
-        }
-    }
+    };
+    let zincs = zinc_partners(&candidates, flat);
+    let clusters = cluster_partners(&candidates, st, flat);
+    iron_sulfur(graph, st, flat, &clusters);
     for (metal, others) in zincs {
         zinc(graph, st, flat, metal, &others);
     }
-    iron_sulfur(graph, st, flat, &clusters);
+}
+
+fn zinc_partners(candidates: &[Candidate], flat: &FlatAtoms) -> FxHashMap<u32, Vec<Candidate>> {
+    let mut zincs: FxHashMap<u32, Vec<Candidate>> = FxHashMap::default();
+    for &pair in candidates {
+        let [i, j] = pair.indices.map(|index| index as usize);
+        if pair.distance > 3. {
+            continue;
+        }
+        for (metal, other) in [(i, j), (j, i)] {
+            if flat.name[metal].trim() != "ZN"
+                || flat.element[metal] != "ZN"
+                || !matches!(flat.name[other].trim(), "SG" | "ND1" | "NE2")
+            {
+                continue;
+            }
+            let donors = zincs.entry(metal as u32).or_default();
+            if !donors
+                .iter()
+                .any(|existing| group(flat, existing.indices[1]) == group(flat, other as u32))
+            {
+                donors.push(directed(pair, metal as u32));
+            }
+        }
+    }
+    zincs
+}
+
+fn cluster_partners(candidates: &[Candidate], st: &Structure, flat: &FlatAtoms) -> Vec<(u32, u32)> {
+    let mut clusters = Vec::new();
+    let mut cluster_residues = FxHashSet::default();
+    for pair in candidates {
+        let [i, j] = pair.indices.map(|index| index as usize);
+        if cluster_name(st, flat, i).is_some() && cluster_name(st, flat, j).is_some() {
+            // Different cluster names also do not define an external partner.
+            if cluster_name(st, flat, i) != cluster_name(st, flat, j) {
+                continue;
+            }
+        }
+        let cluster = if cluster_name(st, flat, i).is_some() {
+            i
+        } else if cluster_name(st, flat, j).is_some() {
+            j
+        } else {
+            continue;
+        };
+        // CCTBX clears all cluster partners on any symmetry contact, before
+        // it tests whether the candidate is a coordinating S or N atom.
+        if !pair.image.is_identity() {
+            clusters.clear();
+            break;
+        }
+        let other = if cluster == i { j } else { i };
+        if flat.element[cluster] == "FE"
+            && matches!(flat.element[other].as_str(), "S" | "N")
+            && cluster_name(st, flat, other).is_none()
+            && cluster_residues.insert(group(flat, other as u32))
+        {
+            clusters.push((cluster as u32, other as u32));
+        }
+    }
+    clusters
+}
+
+fn directed(mut pair: Candidate, metal: u32) -> Candidate {
+    if pair.indices[0] != metal {
+        pair.indices.swap(0, 1);
+        pair.image = pair.image.inverse().unwrap();
+    }
+    pair
 }
 
 fn cluster_name(st: &Structure, flat: &FlatAtoms, i: usize) -> Option<&'static str> {
@@ -48,61 +106,52 @@ fn cluster_name(st: &Structure, flat: &FlatAtoms, i: usize) -> Option<&'static s
     }
 }
 
-fn zinc(graph: &mut ValidationGraph, st: &Structure, flat: &FlatAtoms, metal: u32, others: &[u32]) {
-    if others
-        .iter()
-        .any(|&i| !matches!(flat.name[i as usize].trim(), "SG" | "ND1" | "NE2"))
-    {
-        return;
-    }
+fn zinc(
+    graph: &mut ValidationGraph,
+    st: &Structure,
+    flat: &FlatAtoms,
+    metal: u32,
+    others: &[Candidate],
+) {
     let count = |name| {
         others
             .iter()
-            .filter(|&&i| st.atom_group(flat.path[i as usize]).resname.trim() == name)
+            .filter(|pair| {
+                st.atom_group(flat.path[pair.indices[1] as usize])
+                    .resname
+                    .trim()
+                    == name
+            })
             .count()
     };
-    let (sulfur, nitrogen, sulfur_angle, nitrogen_angle) = if others.len() < 4 {
-        (Some((2.3, 0.03)), Some((2.3, 0.03)), None, None)
-    } else {
-        match (count("CYS"), count("HIS")) {
-            (4, 0) => (Some((2.330, 0.029)), None, Some((109.45, 5.46)), None),
-            (3, 1) => (
-                Some((2.318, 0.027)),
-                Some((2.074, 0.056)),
-                Some((112.15, 3.96)),
-                None,
-            ),
-            (2, 2) => (
-                Some((2.306, 0.029)),
-                Some((2.040, 0.050)),
-                Some((116.23, 4.58)),
-                Some((102.38, 5.44)),
-            ),
-            (1, 3) => (
-                Some((2.298, 0.017)),
-                Some((2.002, 0.045)),
-                None,
-                Some((107.23, 4.78)),
-            ),
-            _ => (None, None, None, None),
-        }
+    let counts = (count("CYS"), count("HIS"));
+    let target = |names: &[&str]| {
+        zinc_targets::TARGETS
+            .iter()
+            .find(|(key, atoms, _, _)| *key == counts && *atoms == names)
+            .map(|(_, _, target, sigma)| (*target, *sigma))
     };
-    for (k, &other) in others.iter().enumerate() {
+    for (k, pair) in others.iter().enumerate() {
+        let other = pair.indices[1];
         let name = flat.name[other as usize].trim();
-        if let Some((target, sigma)) = if name == "SG" { sulfur } else { nitrogen } {
-            graph.bond([metal, other], target, sigma, ORIGIN_METAL);
+        if let Some((target, sigma)) = if others.len() < 4 {
+            Some((2.3, 0.03))
+        } else {
+            target(&["ZN", name])
+        } {
+            if pair.image.is_identity() {
+                graph.bond([metal, other], target, sigma, ORIGIN_METAL);
+            } else {
+                graph.image_bond([metal, other], pair.image, target, sigma, ORIGIN_METAL);
+            }
         }
-        for &previous in &others[..k] {
+        for previous_pair in &others[..k] {
+            let previous = previous_pair.indices[1];
             let previous_name = flat.name[previous as usize].trim();
-            // The reference has separate ND1 and NE2 keys, no mixed-N key.
-            if name != previous_name {
+            if others.len() < 4 {
                 continue;
             }
-            if let Some((target, sigma)) = if name == "SG" {
-                sulfur_angle
-            } else {
-                nitrogen_angle
-            } {
+            if let Some((target, sigma)) = target(&[name, "ZN", previous_name]) {
                 graph.angle_with_origin([previous, metal, other], target, sigma, ORIGIN_METAL);
             }
         }

@@ -8,7 +8,7 @@ mod link;
 mod metals;
 mod restraints;
 
-const ALL: &[&str] = &[
+pub(super) const ALL: &[&str] = &[
     "bonds",
     "angles",
     "chiralities",
@@ -50,7 +50,7 @@ pub(super) fn build(
         compat: false,
         auto_comps: FxHashMap::default(),
     };
-    let topology = interpret(st, flat, ml, &params);
+    let topology = interpret_validation(st, flat, ml, &params);
     let mut graph = ValidationGraph {
         sites: flat.pos.clone(),
         atom_paths: flat.path.clone(),
@@ -102,8 +102,9 @@ pub(super) fn build(
         }
     }
     let links = connections::prepare_declared(&mut graph, &mut all_residues, ml, options)?;
+    connections::emit_declared(&mut graph, &all_residues, &links, ml, options);
     automatic::prepare(&mut graph, &mut all_residues, ml);
-    metals::emit(&mut graph, st, flat);
+    metals::emit(&mut graph, st, flat, ml, options);
     for (range, sources) in prepared_chains {
         chains::emit(
             &mut graph,
@@ -114,7 +115,6 @@ pub(super) fn build(
             options,
         );
     }
-    connections::emit_declared(&mut graph, &all_residues, &links, ml, options);
     automatic::emit(&mut graph, &all_residues, ml, st, flat, options);
     connections::disulfides(&mut graph, &all_residues, ml, options);
     connections::explicit_links(&mut graph, st, flat);
@@ -143,6 +143,10 @@ fn symmetry_bonds(graph: &mut ValidationGraph, ml: &MonLib) {
             graph.unsupported(ALL, "Undefined symmetry disulfide target uncertainty");
             continue;
         };
+        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+            graph.unsupported(&["bonds", "hydrogens"], "Invalid symmetry disulfide target uncertainty");
+            continue;
+        }
         if image.bond.i != image.bond.j {
             let Some(reverse) = image.image.inverse() else {
                 graph.unsupported(ALL, "Symmetry bond operator is singular");

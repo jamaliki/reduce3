@@ -36,6 +36,7 @@ pub(super) fn residue(
                 .topology
                 .bonds
                 .iter()
+                .chain(&graph.topology.sym_bonds)
                 .any(|b| (b.i == sg && Some(b.j) != cb) || (b.j == sg && Some(b.i) != cb))
         });
     let optional = |name: &str| {

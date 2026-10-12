@@ -2,7 +2,7 @@ use crate::geom::Vec3;
 use crate::probe::SpatialGrid;
 use rustc_hash::FxHashMap;
 
-pub(super) enum Query {
+pub(crate) enum Query {
     Dense(SpatialGrid),
     Sparse {
         cells: FxHashMap<[i64; 3], Vec<u32>>,

@@ -333,6 +333,17 @@ pub struct SymOp {
 }
 
 impl SymOp {
+    /// Compose affine fractional operators, applying `other` first.
+    pub fn compose(&self, other: &Self) -> Self {
+        let mut result = Self { r: [[0.;3];3], t: self.t };
+        for row in 0..3 {
+            for column in 0..3 {
+                result.r[row][column] = (0..3).map(|k| self.r[row][k]*other.r[k][column]).sum();
+            }
+            result.t[row] += (0..3).map(|k| self.r[row][k]*other.t[k]).sum::<f64>();
+        }
+        result
+    }
     /// Invert a nonsingular fractional-space affine operator.
     pub fn inverse(&self) -> Option<Self> {
         let [a, b, c] = self.r;

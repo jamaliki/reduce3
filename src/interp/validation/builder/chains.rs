@@ -11,13 +11,14 @@ pub(super) fn prepare(
     let mut interpreted: Vec<ResInterp> = chain
         .iter()
         .map(|r| {
-            interpret_residue(
+            interpret_residue_mode(
                 ml,
                 &FxHashMap::default(),
                 flat,
                 r,
                 options.nuclear,
                 &mut log,
+                false,
             )
             .0
         })
