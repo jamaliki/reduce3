@@ -96,10 +96,7 @@ pub(super) fn residue(
             continue;
         };
         let target = if options.nuclear {
-            b.nuclear
-                .map(|v| v.0)
-                .or(b.value_dist_neutron)
-                .or(b.value_dist)
+            b.value_dist_neutron.or(b.value_dist)
         } else {
             b.value_dist
         };

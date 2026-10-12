@@ -31,6 +31,12 @@ keeps the ordinary bond ESD. CCTBX's `add_bond_proxies` follows that rule. The
 library reader retains nuclear ESD metadata for provenance; validation does
 not use it as a weight.
 
+CCTBX accepts `new_value_dist_neutron` in bond modifications but ignores
+`new_value_dist_nucleus`. Validation follows that distinction even when the
+reader retains the latter field as metadata. Applying the ignored alias
+would change linked N-H targets from the reference's 1.02 A to 1.036 A in
+the full crambin fixture.
+
 Chiral targets derive from the dictionary's three bond lengths and three
 angles. The default volume sigma is 0.2. The graph records both-signs and
 pseudochiral flags for the evaluator. Planes require at least four supplied

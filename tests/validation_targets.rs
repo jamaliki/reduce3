@@ -102,30 +102,32 @@ fn validation_uses_effective_library_and_sequential_link_modifications() {
 }
 
 #[test]
-fn nuclear_link_targets_keep_the_ordinary_esd() {
-    let fixture = library();
-    let file = fixture.0.join("mon_lib/list/mon_lib_list.cif");
-    let text = std::fs::read_to_string(&file).unwrap().replace(
-        "_chem_mod_bond.new_value_dist_esd\nchange N H .914 .010",
-        "_chem_mod_bond.new_value_dist_esd\n_chem_mod_bond.new_value_dist_nucleus\n_chem_mod_bond.new_value_dist_nucleus_esd\nchange N H .914 .010 1.023 .123",
-    );
-    std::fs::write(file, text).unwrap();
-    let ml = MonLib::load_validation(&fixture.0).unwrap();
-    let st = structure();
-    let graph = build(
-        &st,
-        &FlatAtoms::from_structure(&st),
-        &ml,
-        &ValidationOptions {
-            nuclear: true,
-            use_cdl: false,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let second_nh = graph.bonds.iter().find(|b| b.indices == [5, 9]).unwrap();
-    assert_eq!(second_nh.ideal, 1.023);
-    assert_eq!(second_nh.weight, 10000.);
+fn nuclear_link_targets_use_only_reference_fields_and_the_ordinary_esd() {
+    for (column, expected) in [("neutron", 1.023), ("nucleus", 0.914)] {
+        let fixture = library();
+        let file = fixture.0.join("mon_lib/list/mon_lib_list.cif");
+        let text = std::fs::read_to_string(&file).unwrap().replace(
+            "_chem_mod_bond.new_value_dist_esd\nchange N H .914 .010",
+            &format!("_chem_mod_bond.new_value_dist_esd\n_chem_mod_bond.new_value_dist_{column}\n_chem_mod_bond.new_value_dist_{column}_esd\nchange N H .914 .010 1.023 .123"),
+        );
+        std::fs::write(file, text).unwrap();
+        let ml = MonLib::load_validation(&fixture.0).unwrap();
+        let st = structure();
+        let graph = build(
+            &st,
+            &FlatAtoms::from_structure(&st),
+            &ml,
+            &ValidationOptions {
+                nuclear: true,
+                use_cdl: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let second_nh = graph.bonds.iter().find(|b| b.indices == [5, 9]).unwrap();
+        assert_eq!(second_nh.ideal, expected);
+        assert_eq!(second_nh.weight, 10000.);
+    }
 }
 
 #[test]
