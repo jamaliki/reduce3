@@ -143,10 +143,10 @@ fn symmetry_bonds(graph: &mut ValidationGraph, ml: &MonLib) {
             graph.unsupported(ALL, "Undefined symmetry disulfide target uncertainty");
             continue;
         };
-        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+        let Some(weight) = bond_weight(ideal,sigma) else {
             graph.unsupported(&["bonds", "hydrogens"], "Invalid symmetry disulfide target uncertainty");
             continue;
-        }
+        };
         if image.bond.i != image.bond.j {
             let Some(reverse) = image.image.inverse() else {
                 graph.unsupported(ALL, "Symmetry bond operator is singular");
@@ -156,7 +156,7 @@ fn symmetry_bonds(graph: &mut ValidationGraph, ml: &MonLib) {
                 indices: [image.bond.j, image.bond.i],
                 image: reverse,
                 ideal,
-                weight: 1. / sigma.powi(2),
+                weight,
                 origin: ORIGIN_SS,
             });
         }
@@ -164,7 +164,7 @@ fn symmetry_bonds(graph: &mut ValidationGraph, ml: &MonLib) {
             indices: [image.bond.i, image.bond.j],
             image: image.image,
             ideal,
-            weight: 1. / sigma.powi(2),
+            weight,
             origin: ORIGIN_SS,
         });
     }

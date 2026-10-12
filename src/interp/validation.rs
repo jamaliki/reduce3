@@ -121,22 +121,28 @@ pub struct ValidationGraph {
     plane_keys: FxHashMap<Vec<u32>, usize>,
 }
 
+fn bond_weight(ideal: f64, sigma: f64) -> Option<f64> {
+    let weight = 1. / sigma.powi(2);
+    (ideal.is_finite() && ideal > 0. && sigma.is_finite() && sigma > 0.
+        && weight.is_finite() && weight > 0.).then_some(weight)
+}
+
 impl ValidationGraph {
     pub fn complete(&self) -> bool {
         self.coverage.iter().all(Coverage::complete)
     }
 
     fn image_bond(&mut self, mut indices: [u32;2], mut image: crate::cell::SymOp, ideal: f64, sigma: f64, origin: u16) {
-        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+        let Some(weight) = bond_weight(ideal,sigma) else {
             self.unsupported(&["bonds", "hydrogens"], "Missing or invalid symmetry bond target uncertainty");
             return;
-        }
+        };
         let Some(reverse) = image.inverse() else {
             self.unsupported(builder::ALL, "Symmetry bond operator is singular");
             return;
         };
         if indices[0] > indices[1] { indices.swap(0,1); image = reverse; }
-        self.symmetry_bonds.push(WeightedSymmetryBond { indices, image, ideal, weight: 1. / sigma.powi(2), origin });
+        self.symmetry_bonds.push(WeightedSymmetryBond { indices, image, ideal, weight, origin });
         // MCL inserts one directed ASU proxy. Disulfide discovery supplies its
         // two directed images separately.
         self.topology.sym_bonds.push(BondProxy { i:indices[0], j:indices[1], ideal, origin });
@@ -161,14 +167,13 @@ impl ValidationGraph {
 
     fn bond(&mut self, mut indices: [u32; 2], ideal: f64, sigma: f64, origin: u16) {
         indices.sort_unstable();
-        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+        let Some(weight) = bond_weight(ideal,sigma) else {
             self.unsupported(
                 &["bonds", "hydrogens"],
                 "Missing or invalid bond target uncertainty",
             );
             return;
-        }
-        let weight = 1. / sigma.powi(2);
+        };
         if let Some(&k) = self.bond_keys.get(&indices) {
             if self.bonds[k].ideal != ideal || self.bonds[k].weight != weight {
                 self.unsupported(
@@ -298,4 +303,17 @@ pub fn build(
     options: &ValidationOptions,
 ) -> Result<ValidationGraph, String> {
     builder::build(st, flat, ml, options)
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::bond_weight;
+
+    #[test]
+    fn bond_targets_need_finite_positive_weights() {
+        assert_eq!(bond_weight(2.,0.5),Some(4.));
+        for sigma in [0.,-0.1, f64::NAN, f64::INFINITY, 1e-250, 1e250] {
+            assert!(bond_weight(2.,sigma).is_none());
+        }
+    }
 }
