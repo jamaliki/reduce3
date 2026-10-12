@@ -6,6 +6,8 @@ mod charges;
 mod chirality;
 mod nomenclature;
 
+pub use nomenclature::{SiteSwap, normalized_copy};
+
 use super::*;
 
 /// Parameters that affect chemical targets.
@@ -15,6 +17,14 @@ pub struct ValidationOptions {
     pub use_cdl: bool,
     pub link_distance_cutoff: f64,
     pub chirality_sigma: f64,
+    pub dictionary_links: Vec<DictionaryLink>,
+}
+
+/// Apply a declared link to the residues containing these flat atom indices.
+#[derive(Clone, Debug)]
+pub struct DictionaryLink {
+    pub id: String,
+    pub atom_indices: [u32; 2],
 }
 
 impl Default for ValidationOptions {
@@ -24,6 +34,7 @@ impl Default for ValidationOptions {
             use_cdl: true,
             link_distance_cutoff: 3.0,
             chirality_sigma: 0.2,
+            dictionary_links: Vec::new(),
         }
     }
 }
@@ -194,6 +205,50 @@ impl ValidationGraph {
         }
         self.plane_keys.insert(indices.clone(), self.planes.len());
         self.planes.push(WeightedPlane { indices, weights });
+    }
+
+    fn chirality(
+        &mut self,
+        mut indices: [u32; 4],
+        mut ideal: f64,
+        weight: f64,
+        both_signs: bool,
+        pseudochiral: bool,
+    ) {
+        for i in 1..4 {
+            for j in i + 1..4 {
+                if indices[i] > indices[j] {
+                    indices.swap(i, j);
+                    ideal = -ideal;
+                }
+            }
+        }
+        if !ideal.is_finite() || !weight.is_finite() || weight <= 0. {
+            self.unsupported(&["chiralities"], "Invalid chiral target or uncertainty");
+            return;
+        }
+        if let Some(&index) = self.chiral_keys.get(&indices) {
+            let previous = &self.chiralities[index];
+            if previous.ideal != ideal
+                || previous.weight != weight
+                || previous.both_signs != both_signs
+                || previous.pseudochiral != pseudochiral
+            {
+                self.unsupported(
+                    &["chiralities"],
+                    "Conflicting chiral proxies need reference registry resolution",
+                );
+            }
+            return;
+        }
+        self.chiral_keys.insert(indices, self.chiralities.len());
+        self.chiralities.push(WeightedChirality {
+            indices,
+            ideal,
+            weight,
+            both_signs,
+            pseudochiral,
+        });
     }
 }
 

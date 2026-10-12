@@ -7,6 +7,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+mod validation_input;
+mod shared;
+pub use shared::Shared;
+
 #[derive(Clone, Debug, Default)]
 pub struct CompAtom {
     pub id: String,
@@ -318,20 +322,20 @@ pub struct CcdEntry {
 
 pub struct MonLib {
     pub root: PathBuf,
-    pub comp_synonyms: FxHashMap<String, String>,
-    pub atom_synonyms: FxHashMap<String, FxHashMap<String, String>>,
-    pub links: Vec<ChemLink>,
-    pub link_index: FxHashMap<String, usize>,
+    pub comp_synonyms: Shared<FxHashMap<String, String>>,
+    pub atom_synonyms: Shared<FxHashMap<String, FxHashMap<String, String>>>,
+    pub links: Shared<Vec<ChemLink>>,
+    pub link_index: Shared<FxHashMap<String, usize>>,
     /// Links in cctbx's `link_link_id_list` order: the link blocks of the list
     /// files that hold restraints, then the RNA/DNA chain links.
-    pub link_list_order: Vec<usize>,
-    pub mods: FxHashMap<String, ChemMod>,
-    pub ener: FxHashMap<String, EnerAtom>,
-    comp_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
-    ccd_cache: RwLock<FxHashMap<String, Option<Arc<CcdEntry>>>>,
-    ccd_comp_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
-    variant_cache: RwLock<FxHashMap<String, Option<Arc<Comp>>>>,
-    sites_cache: RwLock<FxHashMap<(PathBuf, String), Option<Arc<FxHashMap<String, crate::geom::Vec3>>>>>,
+    pub link_list_order: Shared<Vec<usize>>,
+    pub mods: Shared<FxHashMap<String, ChemMod>>,
+    pub ener: Shared<FxHashMap<String, EnerAtom>>,
+    comp_cache: Arc<RwLock<FxHashMap<String, Option<Arc<Comp>>>>>,
+    ccd_cache: Arc<RwLock<FxHashMap<String, Option<Arc<CcdEntry>>>>>,
+    ccd_comp_cache: Arc<RwLock<FxHashMap<String, Option<Arc<Comp>>>>>,
+    variant_cache: Arc<RwLock<FxHashMap<String, Option<Arc<Comp>>>>>,
+    sites_cache: Arc<RwLock<FxHashMap<(PathBuf, String), Option<Arc<FxHashMap<String, crate::geom::Vec3>>>>>>,
     /// User-supplied dictionaries (restraint CIF files), which win over the library.
     user_comps: FxHashMap<String, Arc<Comp>>,
 }
@@ -398,18 +402,18 @@ impl MonLib {
     fn load_with_list(root: &Path, validation: bool) -> Result<MonLib, String> {
         let mut ml = MonLib {
             root: root.to_path_buf(),
-            comp_synonyms: FxHashMap::default(),
-            atom_synonyms: FxHashMap::default(),
-            links: Vec::new(),
-            link_index: FxHashMap::default(),
-            link_list_order: Vec::new(),
-            mods: FxHashMap::default(),
-            ener: FxHashMap::default(),
-            comp_cache: RwLock::new(FxHashMap::default()),
-            ccd_cache: RwLock::new(FxHashMap::default()),
-            ccd_comp_cache: RwLock::new(FxHashMap::default()),
-            variant_cache: RwLock::new(FxHashMap::default()),
-            sites_cache: RwLock::new(FxHashMap::default()),
+            comp_synonyms: Shared::default(),
+            atom_synonyms: Shared::default(),
+            links: Shared::default(),
+            link_index: Shared::default(),
+            link_list_order: Shared::default(),
+            mods: Shared::default(),
+            ener: Shared::default(),
+            comp_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            ccd_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            ccd_comp_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            variant_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            sites_cache: Arc::new(RwLock::new(FxHashMap::default())),
             user_comps: FxHashMap::default(),
         };
         let read = |p: PathBuf| -> Result<String, String> {
@@ -439,7 +443,7 @@ impl MonLib {
                         let id = s(get(c, r, ci));
                         let alt = s(get(c, r, ai));
                         if !id.is_empty() && !alt.is_empty() {
-                            ml.comp_synonyms.insert(alt.to_ascii_uppercase(), id);
+                            ml.comp_synonyms.insert(if validation { alt } else { alt.to_ascii_uppercase() }, id);
                         }
                     }
                 }
@@ -595,7 +599,7 @@ impl MonLib {
             };
             parse_link_block(b, &mut ml.links[idx]);
         }
-        ml.link_list_order = order_ids.iter().filter_map(|id| ml.link_index.get(id).copied()).collect();
+        ml.link_list_order = order_ids.iter().filter_map(|id| ml.link_index.get(id).copied()).collect::<Vec<_>>().into();
         for (id, b) in &mod_blocks {
             let mut m = ChemMod { id: id.clone(), name: mod_names.get(id).cloned().unwrap_or_default(), ..Default::default() };
             parse_mod_block(b, &mut m);

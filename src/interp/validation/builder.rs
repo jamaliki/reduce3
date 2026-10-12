@@ -2,6 +2,8 @@ use super::*;
 
 mod chains;
 mod connections;
+mod enol;
+mod link;
 mod restraints;
 
 const ALL: &[&str] = &[
@@ -95,11 +97,27 @@ pub(super) fn build(
         .collect();
     let chains = conformer_residues(st, &index);
     let mut all_residues = Vec::new();
-    for model in chains {
+    let mut prepared_chains = Vec::new();
+    for model in &chains {
         for chain in model {
-            all_residues.extend(chains::build_chain(&mut graph, &chain, flat, ml, options));
+            let prepared = chains::prepare(&mut graph, chain, flat, ml, options);
+            let start = all_residues.len();
+            all_residues.extend(prepared);
+            prepared_chains.push((start..all_residues.len(), chain));
         }
     }
+    let links = connections::prepare_declared(&mut graph, &mut all_residues, ml, options)?;
+    for (range, sources) in prepared_chains {
+        chains::emit(
+            &mut graph,
+            &mut all_residues[range],
+            sources,
+            flat,
+            ml,
+            options,
+        );
+    }
+    connections::emit_declared(&mut graph, &all_residues, &links, ml, options);
     connections::disulfides(&mut graph, &all_residues, ml, options);
     connections::explicit_links(&mut graph, st, flat);
     let missing = graph.topology.bonds.iter().any(|bond| {

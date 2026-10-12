@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn build_chain(
+pub(super) fn prepare(
     graph: &mut ValidationGraph,
     chain: &[ConfResidue],
     flat: &FlatAtoms,
@@ -22,6 +22,7 @@ pub(super) fn build_chain(
             .0
         })
         .collect();
+    nucleotide_targets(graph, &mut interpreted, chain, flat, ml);
     for (residue, source) in interpreted.iter_mut().zip(chain) {
         if names::l_given_d(source.resname.trim()).is_some() {
             let mut mods = vec!["PEPT-D"];
@@ -42,28 +43,72 @@ pub(super) fn build_chain(
             }
         }
     }
-    if let Some(first) = interpreted.first() {
-        super::restraints::residue(graph, first, &chain[0], ml, options);
+    super::enol::prepare(graph, &mut interpreted, chain, flat);
+    interpreted
+}
+
+pub(super) fn emit(
+    graph: &mut ValidationGraph,
+    residues: &mut [ResInterp],
+    sources: &[ConfResidue],
+    flat: &FlatAtoms,
+    ml: &MonLib,
+    options: &ValidationOptions,
+) {
+    if let Some(first) = residues.first() {
+        super::restraints::residue(graph, first, &sources[0], ml, options);
     }
-    for current in 1..interpreted.len() {
+    for current in 1..residues.len() {
         if let Some(id) =
-            apply_polymer_modification(graph, &mut interpreted, chain, flat, ml, options, current)
+            apply_polymer_modification(graph, residues, sources, flat, ml, options, current)
         {
-            restraints::link(
+            super::link::emit(
                 graph,
-                &interpreted[current - 1],
-                &interpreted[current],
+                &residues[current - 1],
+                &residues[current],
                 ml.link(&id).unwrap(),
                 options,
             );
         }
-        restraints::residue(graph, &interpreted[current], &chain[current], ml, options);
+        restraints::residue(graph, &residues[current], &sources[current], ml, options);
     }
     if options.use_cdl {
-        super::cdl::apply(graph, &interpreted, chain);
+        super::cdl::apply(graph, residues, sources);
     }
+    super::enol::links(graph, residues, sources);
+}
 
-    interpreted
+fn nucleotide_targets(
+    graph: &mut ValidationGraph,
+    residues: &mut [ResInterp],
+    chain: &[ConfResidue],
+    flat: &FlatAtoms,
+    ml: &MonLib,
+) {
+    for k in 0..residues.len() {
+        if !residues[k].is_rna_dna || lookup(&residues[k], "O2'").is_none() {
+            continue;
+        }
+        let next_p = residues.get(k + 1).and_then(|r| lookup(r, "P"));
+        let Some(two) = rna_pucker(flat, &residues[k], next_p) else {
+            continue;
+        };
+        residues[k].is_rna2p = Some(two);
+        let base = names::rna_dna_mon_lib_name(chain[k].resname.trim(), true);
+        let family = match base {
+            Some("A" | "G") => "_pur",
+            Some("C" | "U") => "_pyr",
+            _ => "",
+        };
+        let id = format!("{}{}", if two { "rna2p" } else { "rna3p" }, family);
+        if let Some(comp) = &residues[k].comp {
+            if let Some(modified) = ml.apply_mod(comp, &id) {
+                residues[k].comp = Some(Arc::new(modified));
+            } else {
+                graph.unsupported(ALL, format!("Missing nucleotide modification {id}"));
+            }
+        }
+    }
 }
 
 fn apply_polymer_modification(
