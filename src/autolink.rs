@@ -647,6 +647,12 @@ impl<'a> Ctx<'a> {
         for (_, atoms) in planes {
             it.add_plane(atoms);
         }
+        if !bonds.is_empty() {
+            let anchors = [self.ags[g1 as usize].atoms[0], self.ags[g2 as usize].atoms[0]];
+            it.automatic_links.push(crate::interp::AutomaticLink::Dictionary {
+                id: link.id.clone(), anchors, origin,
+            });
+        }
         bonds
     }
 
@@ -769,6 +775,7 @@ impl<'a> Ctx<'a> {
         let origin = link_origin(&isomer).unwrap_or(ORIGIN_GLYCO_CUSTOM);
         it.upsert_bond(g.anomeric_carbon, g.link_oxygen, 1.439, origin);
         let lc = g.link_carbon;
+        let mut angles = Vec::new();
         for (atoms, v) in [
             ([lc, Some(g.link_oxygen), Some(g.anomeric_carbon)], 108.7),
             ([Some(g.link_oxygen), Some(g.anomeric_carbon), g.ring_oxygen], 112.3),
@@ -777,8 +784,17 @@ impl<'a> Ctx<'a> {
         ] {
             if let [Some(a), Some(b), Some(c)] = atoms {
                 it.add_angle(a, b, c, v, 3.0);
+                angles.push(crate::interp::AngleProxy { i: [a, b, c], ideal: v, esd: 3.0 });
             }
         }
+        let chirality = g.ring_oxygen.zip(g.ring_carbon).and_then(|(oxygen, carbon)| {
+            let rn = self.ag(g.anomeric_carbon).resname.trim();
+            linkdata::GLYCO_VOLUMES.iter().find(|(name, _)| *name == rn)
+                .map(|(_, value)| ([g.anomeric_carbon, g.link_oxygen, oxygen, carbon], *value))
+        });
+        it.automatic_links.push(crate::interp::AutomaticLink::Glycosidic {
+            id: isomer, bond: [g.anomeric_carbon, g.link_oxygen], angles, chirality, origin,
+        });
         Some((g.anomeric_carbon, g.link_oxygen))
     }
 
@@ -1215,6 +1231,7 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
     for (i, j, origin) in custom {
         let ideal = default_bond_length(cx.elem(i), cx.elem(j));
         if it.add_bond(i, j, ideal, origin) {
+            it.automatic_links.push(crate::interp::AutomaticLink::Custom { indices: [i, j], origin });
             log.push_str(&format!("  Custom bond: {} - {}\n", cx.id_str(i), cx.id_str(j)));
         }
     }

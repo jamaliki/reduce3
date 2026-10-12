@@ -28,11 +28,32 @@ pub struct BondProxy {
     pub origin: u16,
 }
 
+/// Bond to a fractional-space image of the second atom.
+#[derive(Clone, Debug)]
+pub struct SymmetryBond {
+    pub bond: BondProxy,
+    pub image: crate::cell::SymOp,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AngleProxy {
     pub i: [u32; 3],
     pub ideal: f64,
     pub esd: f64,
+}
+
+/// The selected automatic link, retained before weighted validation.
+#[derive(Clone, Debug)]
+pub enum AutomaticLink {
+    Custom { indices: [u32; 2], origin: u16 },
+    Dictionary { id: String, anchors: [u32; 2], origin: u16 },
+    Glycosidic {
+        id: String,
+        bond: [u32; 2],
+        angles: Vec<AngleProxy>,
+        chirality: Option<([u32; 4], f64)>,
+        origin: u16,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +96,8 @@ pub struct Interp {
     /// Bonds to a symmetry copy (cctbx `bond_asu_proxy`): disulfides across
     /// crystal symmetry, with `j` the atom whose copy is bonded.
     pub sym_bonds: Vec<BondProxy>,
+    pub symmetry_images: Vec<SymmetryBond>,
+    pub automatic_links: Vec<AutomaticLink>,
     pub etype: Vec<EType>,
     pub dict: Vec<AtomDictInfo>,
     /// Residue dictionaries that could not be found (residue names).
@@ -100,6 +123,8 @@ impl Interp {
             planes: Vec::new(),
             plane_keys: FxHashSet::default(),
             sym_bonds: Vec::new(),
+            symmetry_images: Vec::new(),
+            automatic_links: Vec::new(),
             etype: vec![EType::Unknown; n],
             dict: vec![AtomDictInfo::default(); n],
             missing_residues: Vec::new(),
@@ -1264,6 +1289,14 @@ fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32]
                                     continue;
                                 }
                                 hit = true;
+                                let mut image = *op;
+                                image.t[0] += shift.x;
+                                image.t[1] += shift.y;
+                                image.t[2] += shift.z;
+                                it.symmetry_images.push(SymmetryBond {
+                                    bond: BondProxy { i: a, j: b, ideal: 2.031, origin: ORIGIN_SS },
+                                    image,
+                                });
                             }
                         }
                     }

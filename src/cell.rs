@@ -333,6 +333,21 @@ pub struct SymOp {
 }
 
 impl SymOp {
+    /// Invert a nonsingular fractional-space affine operator.
+    pub fn inverse(&self) -> Option<Self> {
+        let [a, b, c] = self.r;
+        let det = a[0] * (b[1] * c[2] - b[2] * c[1])
+            - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        if !det.is_finite() || det == 0.0 { return None; }
+        let r = [
+            [(b[1]*c[2]-b[2]*c[1])/det, (a[2]*c[1]-a[1]*c[2])/det, (a[1]*b[2]-a[2]*b[1])/det],
+            [(b[2]*c[0]-b[0]*c[2])/det, (a[0]*c[2]-a[2]*c[0])/det, (a[2]*b[0]-a[0]*b[2])/det],
+            [(b[0]*c[1]-b[1]*c[0])/det, (a[1]*c[0]-a[0]*c[1])/det, (a[0]*b[1]-a[1]*b[0])/det],
+        ];
+        let t = r.map(|row| -(row[0]*self.t[0] + row[1]*self.t[1] + row[2]*self.t[2]));
+        Some(Self { r, t })
+    }
     /// Parse an operator such as `-x+1/2,y,-z` or `x-y,x,z+1/6`.
     pub fn parse(s: &str) -> Option<SymOp> {
         let mut op = SymOp { r: [[0.0; 3]; 3], t: [0.0; 3] };

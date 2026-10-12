@@ -20,27 +20,29 @@ pub(super) fn residue(
             "CCD-derived restraints have not passed reference interpretation parity",
         );
     }
-    if r.is_rna_dna
-        && names::rna_dna_mon_lib_name(&source.resname, lookup(r, "O2'").is_some()).is_none()
-    {
-        graph.unsupported(
-            ALL,
-            "Modified nucleotide targets need reference interpretation",
-        );
-    }
     let disulfide = comp.id == "CYS"
         && lookup(r, "SG").is_some_and(|sg| {
             graph
                 .topology
                 .bonds
                 .iter()
+                .chain(&graph.topology.sym_bonds)
                 .any(|b| b.origin == ORIGIN_SS && (b.i == sg || b.j == sg))
+        });
+    let substituted_thiol = comp.id == "CYS"
+        && lookup(r, "SG").is_some_and(|sg| {
+            let cb = lookup(r, "CB");
+            graph
+                .topology
+                .bonds
+                .iter()
+                .any(|b| (b.i == sg && Some(b.j) != cb) || (b.j == sg && Some(b.i) != cb))
         });
     let optional = |name: &str| {
         if lookup(r, name).is_some() {
             return false;
         }
-        if disulfide && name == "HG" {
+        if (disulfide || substituted_thiol) && name == "HG" {
             return true;
         }
         let is_h = comp

@@ -100,7 +100,14 @@ pub(super) fn emit_declared(
 ) {
     for (first, second, id) in links {
         let link = ml.link(id).unwrap();
+        let (angles, chiralities) = (graph.angles.len(), graph.chiralities.len());
         super::link::emit(graph, &residues[*first], &residues[*second], link, options);
+        for angle in &mut graph.angles[angles..] {
+            angle.origin = ORIGIN_MISC;
+        }
+        for chirality in &mut graph.chiralities[chiralities..] {
+            chirality.origin = ORIGIN_MISC;
+        }
         let side = |c| {
             if c == 1 {
                 &residues[*first]
@@ -149,7 +156,11 @@ pub(super) fn disulfides(
         let first = residues.iter().find(|r| lookup(r, "SG") == Some(a));
         let second = residues.iter().find(|r| lookup(r, "SG") == Some(b));
         if let (Some(first), Some(second)) = (first, second) {
+            let before = graph.angles.len();
             super::link::emit(graph, first, second, link, options);
+            for angle in &mut graph.angles[before..] {
+                angle.origin = ORIGIN_SS;
+            }
             let key = [a.min(b), a.max(b)];
             if let Some(&k) = graph.bond_keys.get(&key) {
                 graph.bonds[k].origin = ORIGIN_SS;

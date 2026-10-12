@@ -48,10 +48,20 @@ pub struct WeightedBond {
 }
 
 #[derive(Clone, Debug)]
+pub struct WeightedSymmetryBond {
+    pub indices: [u32; 2],
+    pub image: crate::cell::SymOp,
+    pub ideal: f64,
+    pub weight: f64,
+    pub origin: u16,
+}
+
+#[derive(Clone, Debug)]
 pub struct WeightedAngle {
     pub indices: [u32; 3],
     pub ideal: f64,
     pub weight: f64,
+    pub origin: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +71,7 @@ pub struct WeightedChirality {
     pub weight: f64,
     pub both_signs: bool,
     pub pseudochiral: bool,
+    pub origin: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +108,7 @@ pub struct ValidationGraph {
     /// Per-atom formal charges after reference scattering-label normalization.
     pub typed_charges: Vec<i32>,
     pub bonds: Vec<WeightedBond>,
+    pub symmetry_bonds: Vec<WeightedSymmetryBond>,
     pub angles: Vec<WeightedAngle>,
     pub chiralities: Vec<WeightedChirality>,
     pub planes: Vec<WeightedPlane>,
@@ -184,7 +196,16 @@ impl ValidationGraph {
             indices,
             ideal,
             weight,
+            origin: ORIGIN_COVALENT,
         });
+    }
+
+    fn angle_with_origin(&mut self, indices: [u32; 3], ideal: f64, sigma: f64, origin: u16) {
+        let before = self.angles.len();
+        self.angle(indices, ideal, sigma);
+        for angle in &mut self.angles[before..] {
+            angle.origin = origin;
+        }
     }
 
     fn plane(&mut self, mut atoms: Vec<(u32, f64)>) {
@@ -248,6 +269,7 @@ impl ValidationGraph {
             weight,
             both_signs,
             pseudochiral,
+            origin: ORIGIN_COVALENT,
         });
     }
 }

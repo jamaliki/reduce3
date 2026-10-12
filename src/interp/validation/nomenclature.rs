@@ -144,6 +144,7 @@ fn convention(name: &str) -> Option<Convention> {
 }
 
 /// CCTBX swaps coordinates under these labels before building restraints.
+#[cfg(test)]
 pub(super) fn needs_reference_swaps(st: &Structure) -> bool {
     st.models.iter().any(|model| {
         model.chains.iter().any(|chain| {
