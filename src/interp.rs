@@ -13,6 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 pub mod validation;
+mod disulfides;
 
 pub const ORIGIN_COVALENT: u16 = 0;
 pub const ORIGIN_SS: u16 = 1;
@@ -1019,7 +1020,7 @@ fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParam
                     continue;
                 }
                 if let Some(pk) = prev {
-                    if r.link_to_previous {
+                    if r.link_to_previous && (p.compat || residues[pk].rg.2 + 1 == r.rg.2) {
                         if let Some(lid) = lib_link_id(ml, &interps[pk], ri) {
                             add_link(&mut it, ml, flat, &lid, &interps[pk], ri, p.link_distance_cutoff);
                         }
@@ -1233,6 +1234,7 @@ fn copy_in_model(flat: &FlatAtoms, atoms: impl IntoIterator<Item = usize>, model
 }
 
 fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32], compat: bool) {
+    let explicit = if compat { FxHashSet::default() } else { disulfides::add_explicit(it, st, flat) };
     // exclude SG near atoms that are not H D T S O P N C SE (typically metals)
     let ok_el = ["H", "D", "T", "S", "O", "P", "N", "C", "SE"];
     let n = flat.pos.len();
@@ -1242,7 +1244,7 @@ fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32]
         .copied()
         .filter(|&sg| {
             let p = flat.pos[sg as usize];
-            others.iter().any(|&a| flat.pos[a].dist(p) <= 3.0 && flat.path[a].model == flat.path[sg as usize].model)
+            explicit.contains(&sg) || others.iter().any(|&a| flat.pos[a].dist(p) <= 3.0 && flat.path[a].model == flat.path[sg as usize].model)
         })
         .collect();
     // candidate pairs within 3 A through a coarse grid (pairs in input order)

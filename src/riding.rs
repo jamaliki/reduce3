@@ -6,6 +6,9 @@ use crate::interp::{angle_delta_deg, Interp};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::f64::consts::PI;
 
+#[cfg(test)]
+mod plane_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HType {
     Flat2,
@@ -66,6 +69,7 @@ struct Nb {
     nh: usize,
     nnonh: usize,
     is_in_plane: bool,
+    explicit_plane: bool,
     valid: bool,
 }
 
@@ -88,6 +92,8 @@ pub struct RidingAtoms<'a> {
     /// on the parent bond axis (a ligand on a crystallographic two-fold, say).
     /// Reduce2 divides by zero there.
     pub reroute_axial_reference: bool,
+    /// Use explicit planes when a single H has inconsistent angle restraints.
+    pub use_plane_restraints: bool,
 }
 
 pub struct RidingResult {
@@ -207,11 +213,15 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             angle_dict.insert((ih, parent, second), ap.ideal);
         }
     }
-    // 4. plane proxies: first H of each plane is "in plane"
+    // 4. Retain Reduce2's first-H placement for restraints that already work.
     let mut plane_h: FxHashSet<u32> = FxHashSet::default();
+    let mut explicit_plane_h: FxHashSet<u32> = FxHashSet::default();
     for pl in &it.planes {
-        if let Some(&first_h) = pl.iter().find(|&&a| at.is_h[a as usize]) {
-            plane_h.insert(first_h);
+        if let Some(&h) = pl.iter().find(|&&a| at.is_h[a as usize]) {
+            plane_h.insert(h);
+        }
+        if at.use_plane_restraints {
+            explicit_plane_h.extend(pl.iter().copied().filter(|&a| at.is_h[a as usize]));
         }
     }
     // 5. process second neighbors
@@ -437,6 +447,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
     for ih in 0..n {
         if let Some(nb) = conn[ih].as_mut() {
             nb.is_in_plane = plane_h.contains(&(ih as u32));
+            nb.explicit_plane = explicit_plane_h.contains(&(ih as u32));
         }
     }
 
@@ -458,7 +469,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             continue;
         }
         let r = if nb.nnonh == 2 {
-            process_2(&nb, &conn, sites, &mut coef)
+            process_2(&nb, &conn, sites, &mut coef, at.use_plane_restraints)
         } else if nb.nnonh == 3 && nb.nh == 0 {
             process_3(&nb, sites, &mut coef)
         } else if nb.nnonh == 1 && (nb.nh == 0 || nb.nh == 2) {
@@ -690,7 +701,7 @@ fn process_1_arg(
     Ok(())
 }
 
-fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>]) -> Result<(), ()> {
+fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>], use_plane_restraints: bool) -> Result<(), ()> {
     let _ = conn;
     let ih = nb.ih;
     let (i_a0, disth) = nb.a0.ok_or(())?;
@@ -718,7 +729,9 @@ fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<Ri
     let root = 1.0 - c1 * c1 - c2 * c2 - c0 * c0 + 2.0 * c0 * c1 * c2;
     let mut h = 0.0;
     let htype;
-    if sumang > 2.0 * PI + 0.05 && root < 0.0 {
+    if use_plane_restraints && nb.explicit_plane && nb.nh == 0 && sumang > 2.0 * PI + 0.05 && root < 0.0 {
+        htype = HType::Flat2;
+    } else if sumang > 2.0 * PI + 0.05 && root < 0.0 {
         return Err(());
     } else if flat {
         htype = HType::Flat2;

@@ -35,6 +35,9 @@ pub struct Params {
     /// Keep these components as contact context if their dictionary is absent.
     /// This does not allow unparameterized hydrogens or affect known dictionaries.
     pub allow_missing_restraints_for: Vec<String>,
+    /// Original heavy atom rows whose unplaced hydrogens must still fail.
+    /// Other unique parents remain contact context; their unplaced H are audited.
+    pub required_hydrogen_parent_sources: Option<Vec<u32>>,
     pub opt: OptParams,
 }
 
@@ -50,6 +53,7 @@ impl Default for Params {
             ignore_missing_restraints: false,
             stop_on_any_missing_hydrogen: false,
             allow_missing_restraints_for: Vec::new(),
+            required_hydrogen_parent_sources: None,
             opt: OptParams::default(),
         }
     }
@@ -124,6 +128,7 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
     if let Some(mid) = p.model_id {
         select_model(&mut st, mid, p.compat)?;
     }
+    let required_sources = required_parent_sources(&st, p)?;
     let mut held = if p.compat { HeldAtoms::default() } else { st.take_atoms(|_, a| a.elem() == "X") };
     if !held.is_empty() {
         let note = format!("Kept {} atoms of unknown element (X) unchanged; they get no hydrogens and are not scored\n", held.len());
@@ -194,10 +199,24 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                         desc += &note;
                     }
                 }
-                if p.stop_on_any_missing_hydrogen && !placed.site_labels_no_para.is_empty() {
+                let mut required_unplaced = Vec::new();
+                let mut context_unplaced = Vec::new();
+                for (label, parent) in placed.site_labels_no_para.iter().zip(&placed.unparameterized_parent_sources) {
+                    if required_sources.as_ref().is_some_and(|required| parent.is_some_and(|row| !required.contains(&row))) {
+                        context_unplaced.push(label.as_str());
+                    } else {
+                        required_unplaced.push(label.as_str());
+                    }
+                }
+                if !context_unplaced.is_empty() {
+                    let note = format!("Removed unplaced context hydrogens outside required target parents: {}\n", context_unplaced.join(","));
+                    log += &note;
+                    desc += &note;
+                }
+                if p.stop_on_any_missing_hydrogen && !required_unplaced.is_empty() {
                     return Err(format!(
                         "Insufficient restraints were found for the following atoms:{}",
-                        placed.site_labels_no_para.join(",")
+                        required_unplaced.join(",")
                     ));
                 }
                 if !st.has_hydrogens() {
@@ -256,6 +275,22 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
     st.reset_serial();
     st.reset_i_seq();
     Ok(Output { structure: st, description: desc, log })
+}
+
+fn required_parent_sources(st: &Structure, p: &Params) -> Result<Option<rustc_hash::FxHashSet<u32>>, String> {
+    let Some(rows) = &p.required_hydrogen_parent_sources else { return Ok(None) };
+    if p.compat || p.approach != Approach::Add || !p.stop_on_any_missing_hydrogen {
+        return Err("Required hydrogen parents need strict fixed-mode hydrogen addition".into());
+    }
+    let required: rustc_hash::FxHashSet<u32> = rows.iter().copied().collect();
+    let heavy: rustc_hash::FxHashSet<u32> = st.atom_paths().into_iter().filter_map(|p| {
+        let atom = st.atom(p);
+        (!atom.is_hydrogen() && atom.src != crate::model::Atom::NEW).then_some(atom.src)
+    }).collect();
+    if required.is_empty() || required.len() != rows.len() || !required.is_subset(&heavy) {
+        return Err("Required hydrogen parents must be unique heavy source rows in the selected model".into());
+    }
+    Ok(Some(required))
 }
 
 /// Restraint data that hydrogen placement leaves on the model. Reduce2 keeps
@@ -336,6 +371,7 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
                 expected_heavy: &expected_heavy,
                 dictionary_nh2_torsion: !p.compat,
                 reroute_axial_reference: !p.compat,
+                use_plane_restraints: !p.compat,
             };
             let rr = crate::riding::riding(&it, &mut sites, &ra, false);
             if let Some(&h) = rr.axial_reference.first() {

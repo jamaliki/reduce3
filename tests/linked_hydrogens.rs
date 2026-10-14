@@ -105,3 +105,20 @@ fn compat_keeps_the_prior_missing_restraint_error() {
     }).err().unwrap();
     assert!(error.contains("H351") && error.contains("H352"), "{error}");
 }
+
+#[test]
+fn public_dictionary_selection_matches_placement_name_rules() {
+    let Some(library) = library() else { return };
+    for (component, names, from_ccd) in [
+        ("PEE", vec!["C1", "C2", "O2", "O2P"], false),
+        ("HSO", vec!["C", "N", "CA", "CB", "O"], false),
+        ("XY5", vec!["N", "NB2", "CA", "C", "O"], true),
+    ] {
+        let names: Vec<_> = names.into_iter().map(String::from).collect();
+        let chosen = hplace::hydrogen_dictionary(&library, component, &names, false).unwrap();
+        assert_eq!(chosen.from_ccd, from_ccd, "{component}");
+        if !from_ccd {
+            assert_eq!(chosen.source, hplace::residue_dictionary(&library, component, &names).unwrap().source);
+        }
+    }
+}

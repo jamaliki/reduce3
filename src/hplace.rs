@@ -43,6 +43,8 @@ pub struct Placed {
     pub dict: Vec<interp::AtomDictInfo>,
     pub no_h_placed: Vec<String>,
     pub site_labels_no_para: Vec<String>,
+    /// Source rows of unique heavy parents, aligned with `site_labels_no_para`.
+    pub unparameterized_parent_sources: Vec<Option<u32>>,
     /// H whose third neighbor lies on the parent bond axis (compat mode,
     /// where Reduce2 divides by zero on them).
     pub axial_reference: Vec<String>,
@@ -80,6 +82,24 @@ pub fn residue_dictionary(ml: &MonLib, resname: &str, names: &[String]) -> Optio
         }
     }
     ml.comp(&work)
+}
+
+/// Choose the dictionary used for hydrogen placement from observed heavy names.
+/// Callers must filter atom names by element, rather than by name prefix.
+pub fn hydrogen_dictionary(ml: &MonLib, resname: &str, heavy_names: &[String], compat: bool) -> Option<Arc<Comp>> {
+    select_hydrogen_dictionary(ml, resname, heavy_names, heavy_names, compat)
+}
+
+fn select_hydrogen_dictionary(
+    ml: &MonLib, resname: &str, names: &[String], heavy_names: &[String], compat: bool,
+) -> Option<Arc<Comp>> {
+    residue_dictionary(ml, resname, names)
+        .map(|library| {
+            if compat { library.clone() } else {
+                ccd_for_unmatched_names(ml, &library, resclass::get_class(resname), resname, heavy_names).unwrap_or(library)
+            }
+        })
+        .or_else(|| ml.ccd_comp(resname, compat))
 }
 
 /// `_terminal_h`: free-form-only H of a peptide-like dictionary.
@@ -148,31 +168,19 @@ fn add_missing_h(
                     let actual: FxHashSet<String> = ag.atoms.iter().map(|a| a.name.trim().to_ascii_uppercase()).collect();
                     // `mon_lib_query`: the libraries, else restraints built from the CCD
                     let key = ag.resname.trim().to_ascii_uppercase();
-                    let library = match auto_comps.get(&key) {
+                    let heavy_names: Vec<String> = ag.atoms.iter().filter(|a| !a.is_hydrogen()).map(|a| a.name.clone()).collect();
+                    let comp = match auto_comps.get(&key) {
                         Some(c) => Some(c.clone()),
-                        None => residue_dictionary(ml, &ag.resname, &names).map(|c| {
-                            match (!p.compat).then(|| ccd_for_unmatched_names(ml, &c, cls, ag)).flatten() {
-                                Some(ccd) => {
-                                    auto_comps.insert(key.clone(), ccd.clone());
-                                    ccd
-                                }
-                                None => c,
-                            }
-                        }),
+                        None => select_hydrogen_dictionary(ml, &ag.resname, &names, &heavy_names, p.compat),
                     };
-                    let comp = match library {
+                    let comp = match comp {
                         Some(c) => c,
-                        None => match ml.ccd_comp(&ag.resname, p.compat) {
-                            Some(c) => {
-                                auto_comps.entry(ag.resname.trim().to_ascii_uppercase()).or_insert_with(|| c.clone());
-                                c
-                            }
-                            None => {
-                                no_h_placed.push(ag.resname.clone());
-                                continue;
-                            }
-                        },
+                        None => {
+                            no_h_placed.push(ag.resname.clone());
+                            continue;
+                        }
                     };
+                    if comp.from_ccd { auto_comps.entry(key).or_insert_with(|| comp.clone()); }
                     let mut removed: Vec<String> = Vec::new();
                     if comp.test_for_peptide() {
                         removed = terminal_h(&comp);
@@ -601,9 +609,8 @@ fn server_comp(ml: &MonLib, auto_comps: &FxHashMap<String, Arc<Comp>>, resname: 
 /// other atom names than the model (the old `C1*` names of mon_lib's GTP, GDP,
 /// GSP, ... for the model's `C1'`), when the CCD names cover every heavy atom
 /// of the residue. Reduce2 leaves such atoms untyped and without hydrogens.
-fn ccd_for_unmatched_names(ml: &MonLib, lib: &Comp, cls: ResClass, ag: &AtomGroup) -> Option<Arc<Comp>> {
-    let heavy: Vec<String> =
-        ag.atoms.iter().filter(|a| !a.is_hydrogen()).map(|a| a.name.trim().to_ascii_uppercase()).collect();
+fn ccd_for_unmatched_names(ml: &MonLib, lib: &Comp, cls: ResClass, resname: &str, heavy_names: &[String]) -> Option<Arc<Comp>> {
+    let heavy: Vec<String> = heavy_names.iter().map(|n| n.trim().to_ascii_uppercase()).collect();
     // nucleotides keep their own name handling; a code that only shares a
     // nucleotide's name (GUA, glutaric acid) has no backbone atoms
     let nucleotide = cls == ResClass::CommonRnaDna && heavy.iter().any(|n| matches!(n.as_str(), "P" | "C1'" | "C1*" | "O4'" | "O4*"));
@@ -615,7 +622,7 @@ fn ccd_for_unmatched_names(ml: &MonLib, lib: &Comp, cls: ResClass, ag: &AtomGrou
     if heavy.iter().all(|n| known(n)) {
         return None;
     }
-    let ccd = ml.ccd_comp(&ag.resname, false)?;
+    let ccd = ml.ccd_comp(resname, false)?;
     heavy.iter().all(|n| ccd.has_atom(n)).then_some(ccd)
 }
 
@@ -726,6 +733,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         expected_heavy: &expected_heavy,
         dictionary_nh2_torsion: !p.compat,
         reroute_axial_reference: !p.compat,
+        use_plane_restraints: !p.compat,
     };
     crate::model::mem_checkpoint("placement: interpreted");
     let rr = riding::riding(&it, &mut sites, &ra, true);
@@ -737,6 +745,11 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let axial_reference: Vec<String> = rr.axial_reference.iter().map(|&h| label(st, w.flat.path[h as usize])).collect();
     let mut coefs = rr.coef;
     w.flat.pos = sites;
+
+    if !p.compat {
+        // A linked oxygen with two heavy neighbors cannot keep its hydroxyl H.
+        exclude_h_on_esterified_o(&mut w, &it);
+    }
 
     // ---------------- remove H that could not be parameterized (waters keep theirs)
     let bonds_all: Vec<(u32, u32)> = it.bonds.iter().map(|b| (b.i, b.j)).collect();
@@ -752,6 +765,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         v
     };
     let mut site_labels_no_para = Vec::new();
+    let mut unparameterized_parent_sources = Vec::new();
     let mut removed_on_links = Vec::new();
     let unpara: Vec<u32> = rr
         .unparameterized
@@ -761,6 +775,10 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         .collect();
     let placed_anchorless = place_anchorless_h(&it, ml, &auto_comps, st, &mut w, &unpara, &nbrs);
     for &h in &unpara {
+        if w.removed[h as usize] {
+            coefs[h as usize] = None;
+            continue;
+        }
         if placed_anchorless.contains(&h) {
             continue;
         }
@@ -776,6 +794,10 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
             let missing_neighbor = parents.len() == 1 && heavy_neighbors(&nbrs, &w.flat, parents[0]).len() < 2;
             if !missing_neighbor {
                 site_labels_no_para.push(label(st, w.flat.path[h as usize]));
+                unparameterized_parent_sources.push(if parents.len() == 1 {
+                    let source = st.atom(w.flat.path[parents[0] as usize]).src;
+                    (source != Atom::NEW).then_some(source)
+                } else { None });
             }
         }
         w.removed[h as usize] = true;
@@ -870,6 +892,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         dict,
         no_h_placed: uniq_missing,
         site_labels_no_para,
+        unparameterized_parent_sources,
         axial_reference,
         removed_on_links,
         n_h_initial,
