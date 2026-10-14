@@ -213,6 +213,19 @@ written by `reference/harness/dump_ref.py`. [reference/README.md](reference/READ
 how to recreate the reference data, and [docs/INTERPRETATION_SPEC.md](docs/INTERPRETATION_SPEC.md)
 documents the cctbx interpretation behavior that Reduce3 reproduces.
 
+## Linked covalent models
+
+Fixed mode also places hydrogens on linked states whose free-monomer restraints
+omit a link angle. In 8ZJE, this removes the H on the tertiary HYP amide and
+keeps one XZA N-H and the following LEU N-H. In 9HJ3, an explicit identity-symmetry
+`covale` connection replaces the absent Z41 O5 with CYS SG. Reduce3 uses the
+dictionary angles and prochiral reference for that unique replacement to place
+H351/H352, keeping their names and C-H lengths. This applies only to a carbon
+with two heavy neighbors, two H atoms and single bonds. Missing or ambiguous
+link annotations, an ambiguous leaving group and overvalent parents still lack
+these restraints; `stop_on_any_missing_hydrogen=True` reports them. Compat mode
+keeps its prior placement behavior.
+
 ## Benchmark against neutron structures
 
 Neutron crystallography locates hydrogens (usually as deuterium) instead of inferring them, so

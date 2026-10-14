@@ -10,6 +10,10 @@ use crate::riding::{self, RidingAtoms, RidingCoef};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
+mod linked;
+#[cfg(test)]
+mod linked_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NTermCharge {
     ResidueOne,
@@ -700,7 +704,8 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     log += &it.log;
     let mut w = Work { flat, removed: vec![false; n] };
 
-    add_link_h_restraints(&mut it, ml, &w.flat);
+    add_link_h_restraints(&mut it, ml, &w.flat, p.compat);
+    let replacements = if !p.compat { linked::add_replacement_angles(&mut it, st, &w.flat) } else { Vec::new() };
 
     // ---------------- riding
     let occ: Vec<f64> = w.flat.path.iter().map(|&pp| st.atom(pp).occ).collect();
@@ -747,6 +752,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         v
     };
     let mut site_labels_no_para = Vec::new();
+    let mut removed_on_links = Vec::new();
     let unpara: Vec<u32> = rr
         .unparameterized
         .iter()
@@ -756,6 +762,12 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let placed_anchorless = place_anchorless_h(&it, ml, &auto_comps, st, &mut w, &unpara, &nbrs);
     for &h in &unpara {
         if placed_anchorless.contains(&h) {
+            continue;
+        }
+        if !p.compat && linked::tertiary_amide_h(&it, st, &w.flat, h) {
+            w.removed[h as usize] = true;
+            coefs[h as usize] = None;
+            removed_on_links.push((label(st, w.flat.path[h as usize]), "a tertiary amide".into()));
             continue;
         }
         let isolated = nbrs[h as usize].is_empty();
@@ -779,10 +791,10 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
 
     // ---------------- prochiral naming, links, esterified O
     let mut name_done: FxHashSet<u32> = FxHashSet::default();
-    name_prochiral_h(st, ml, &w, &[2], &mut name_done);
-    let removed_on_links = exclude_h_on_links(st, ml, &mut w, &it);
+    name_prochiral_h(st, ml, &w, &[2], &mut name_done, &replacements);
+    removed_on_links.extend(exclude_h_on_links(st, ml, &mut w, &it));
     exclude_h_on_esterified_o(&mut w, &it);
-    name_prochiral_h(st, ml, &w, &[3], &mut name_done);
+    name_prochiral_h(st, ml, &w, &[3], &mut name_done, &replacements);
     // write back any positions changed by exclude_h_on_links
     for k in 0..n {
         let pth = w.flat.path[k];
@@ -868,7 +880,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
 
 /// `add_link_h_restraints`: amide H named other than H/D get the TRANS
 /// C-N-H angle (and plane), and their amine CA-N-H angle is replaced.
-fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms) {
+fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms, compat: bool) {
     let Some(link) = ml.link("TRANS") else { return };
     let Some(def) = link.angles.iter().find(|a| a.a[1] == "N" && (a.a[2] == "H" || a.a[2] == "D") && a.value.is_some() && a.esd.unwrap_or(0.0) > 0.0)
     else {
@@ -901,17 +913,25 @@ fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms) {
         if flat.name[nn as usize].trim() != "N" {
             continue;
         }
-        for &c in &nbrs[nn as usize] {
+        let n_heavy: Vec<u32> = nbrs[nn as usize].iter().copied().filter(|&x| !flat.is_h[x as usize]).collect();
+        if !compat && n_heavy.len() != 2 {
+            continue;
+        }
+        for &c in &n_heavy {
             if flat.name[c as usize].trim() != "C" || rg_key(c) == rg_key(nn) {
                 continue;
             }
-            if it.has_angle(c, nn, h) {
-                continue;
+            let alpha = n_heavy.iter().copied().find(|&x| x != c && rg_key(x) == rg_key(nn) && (!compat || flat.name[x as usize].trim() == "CA"));
+            if let (false, Some(alpha), Some(ca_val)) = (compat, alpha, ca_val) {
+                if !it.has_angle(c, nn, alpha) {
+                    new_angles.push((c, nn, alpha, ca_val, esd));
+                }
             }
-            new_angles.push((c, nn, h, ideal, esd));
-            let ca: Vec<u32> = nbrs[nn as usize].iter().copied().filter(|&x| flat.name[x as usize].trim() == "CA" && rg_key(x) == rg_key(nn)).collect();
-            if ca_ideal.is_some() && !ca.is_empty() {
-                stale.push((ca[0], nn, h));
+            if !it.has_angle(c, nn, h) {
+                new_angles.push((c, nn, h, ideal, esd));
+                if let Some(alpha) = alpha.filter(|_| ca_ideal.is_some()) {
+                    stale.push((alpha, nn, h));
+                }
             }
         }
     }
@@ -1107,7 +1127,7 @@ fn reset_h_adp_occ(st: &mut Structure, w: &Work, it: &Interp, scale: f64, cell: 
 
 type ProchiralGroup = (String, Vec<String>, Vec<String>, FxHashMap<String, Vec3>);
 
-fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], done: &mut FxHashSet<u32>) {
+fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], done: &mut FxHashSet<u32>, replacements: &[(u32, u32, String)]) {
     let mut cache: FxHashMap<(String, usize), Vec<ProchiralGroup>> = FxHashMap::default();
     // flat index by path, to honor removals
     let mut idx: FxHashMap<AtomPath, u32> = FxHashMap::default();
@@ -1157,7 +1177,7 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
                         if refs.is_empty() {
                             continue;
                         }
-                        let atoms: FxHashMap<&str, AtomPath> = paths.iter().map(|&pth| (st.atom(pth).name.trim(), pth)).collect();
+                        let atoms = linked::prochiral_atoms(st, &w.flat, &paths, replacements);
                         for (k, (p, hv, hs, sites)) in refs {
                             if !std::iter::once(p).chain(hv.iter()).chain(hs.iter()).all(|n| atoms.contains_key(n.as_str())) {
                                 continue;

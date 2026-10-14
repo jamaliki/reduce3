@@ -265,9 +265,46 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         crystal = Some(CrystalSymmetry { cell: [a, b, c, al, be, ga], space_group: sg });
     }
     let had = crystal.is_some();
-    let mut st = Structure { models, crystal, had_cell_record: had, links: Vec::new(), pdb_records: PdbRecords::default() };
+    let mut st = Structure { models, crystal, had_cell_record: had, links: covalent_links(block), pdb_records: PdbRecords::default() };
     st.reset_i_seq();
     Ok(st)
+}
+
+fn covalent_links<S: CifSource + ?Sized>(source: &S) -> Vec<LinkRecord> {
+    let Some(table) = source.table("struct_conn") else { return Vec::new() };
+    let value = |row, name: &str| {
+        table.column(name).map(|col| table.cell(row, col).into_owned())
+            .filter(|s| !cif::is_null(s)).unwrap_or_default()
+    };
+    let partner = |row, side| {
+        let field = |stem: &str| value(row, &format!("ptnr{side}_{stem}"));
+        let fallback = |auth, label| {
+            let result = field(auth);
+            if result.is_empty() { field(label) } else { result }
+        };
+        AtomLabel {
+            name: field("label_atom_id"),
+            altloc: value(row, &format!("pdbx_ptnr{side}_label_alt_id")),
+            resname: fallback("auth_comp_id", "label_comp_id"),
+            chain: fallback("auth_asym_id", "label_asym_id"),
+            resseq: fallback("auth_seq_id", "label_seq_id"),
+            icode: value(row, &format!("pdbx_ptnr{side}_PDB_ins_code")),
+        }
+    };
+    (0..table.row_count()).filter_map(|row| {
+        if value(row, "conn_type_id") != "covale"
+            || value(row, "ptnr1_symmetry") != "1_555"
+            || value(row, "ptnr2_symmetry") != "1_555" {
+            return None;
+        }
+        let (atom1, atom2) = (partner(row, 1), partner(row, 2));
+        if [&atom1, &atom2].iter().any(|a| a.name.is_empty() || a.resname.is_empty() || a.chain.is_empty() || a.resseq.is_empty()) {
+            return None;
+        }
+        Some(LinkRecord {
+            atom1, atom2, distance: table.column("pdbx_dist_value").and_then(|col| table.number(row, col)), kind: "covale".into(),
+        })
+    }).collect()
 }
 
 /// `all_label_asym_ids()[n]`: A..Z, then AA, AB, ... (letters with repeats).
