@@ -104,23 +104,19 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
     }
 
     let mut models: Vec<Model> = Vec::new();
-    let (mut cur_model, mut cur_label_asym, mut cur_auth_asym, mut cur_res, mut cur_ins): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = (None, None, None, None, None);
+    // Rows may return to a chain or residue earlier in the same model block.
+    let mut chain_index = rustc_hash::FxHashMap::default();
+    let mut residue_index = rustc_hash::FxHashMap::default();
+    let (mut cur_model, mut cur_label_asym, mut cur_auth_asym): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut cur_chain = 0;
     let mut prev_comp: Option<String> = None;
-    let mut first_in_chain = true;
-    // (altloc, resname) -> atom group index, for the current residue group
-    let mut ag_index: Vec<(String, String, usize)> = Vec::new();
     for r in 0..cat.row_count() {
         let model_id = c_model.map(|c| get(r, c).into_owned()).unwrap_or_else(|| "1".into());
         let new_model = cur_model.as_deref() != Some(model_id.as_str());
         if new_model {
             models.push(Model { id: model_id.clone(), chains: Vec::new() });
         }
+        let mi = models.len() - 1;
         let label_asym = get(r, c_label_asym).into_owned();
         let auth_asym = get(r, c_auth_asym).into_owned();
         if matches!(auth_asym.as_str(), "." | "?" | " " | "") {
@@ -128,25 +124,20 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         }
         let label_changed = cur_label_asym.as_deref() != Some(label_asym.as_str());
         let auth_changed = cur_auth_asym.as_deref() != Some(auth_asym.as_str());
-        let model = models.last_mut().unwrap();
-        let mut new_chain = false;
-        if auth_changed || new_model || (label_changed && r > 0 && prev_comp.as_deref().map_or(false, is_aa_or_rna_dna)) {
-            model.chains.push(Chain { id: auth_asym.clone(), residue_groups: Vec::new() });
-            first_in_chain = true;
-            new_chain = true;
-        }
+        let model = &mut models[mi];
+        let ci = *chain_index.entry((mi, auth_asym.clone(), label_asym.clone())).or_insert_with(|| {
+            if auth_changed || new_model || (label_changed && r > 0 && prev_comp.as_deref().map_or(false, is_aa_or_rna_dna)) {
+                model.chains.push(Chain { id: auth_asym.clone(), residue_groups: Vec::new() });
+                model.chains.len() - 1
+            } else { cur_chain }
+        });
         let res = get(r, c_seq).into_owned();
         let mut ins = c_ins.map(|c| get(r, c).into_owned()).unwrap_or_else(|| " ".into());
         if matches!(ins.as_str(), "?" | ".") {
             ins = " ".into();
         }
-        let chain = model.chains.last_mut().unwrap();
-        if new_chain
-            || cur_res.as_deref() != Some(res.as_str())
-            || cur_ins.as_deref() != Some(ins.as_str())
-            || auth_changed
-            || new_model
-        {
+        let chain = &mut model.chains[ci];
+        let ri = if let Some(&index) = residue_index.get(&(mi, ci, res.clone(), ins.clone())) { index } else {
             let resseq = match res.trim().parse::<i64>() {
                 Ok(v) => hy36_encode(4, v).unwrap_or_else(|| res.clone()),
                 Err(_) => {
@@ -158,7 +149,7 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
             };
             let mut link = true;
             if let Some(cb) = c_break {
-                if !first_in_chain && get(r, cb) == "1" {
+                if !chain.residue_groups.is_empty() && get(r, cb) == "1" {
                     link = false;
                 }
             }
@@ -168,29 +159,26 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
                 link_to_previous: link,
                 atom_groups: Vec::new(),
             });
-            first_in_chain = false;
-            ag_index.clear();
-        }
-        let rg = chain.residue_groups.last_mut().unwrap();
+            let index = chain.residue_groups.len() - 1;
+            residue_index.insert((mi, ci, res.clone(), ins.clone()), index);
+            index
+        };
+        let rg = &mut chain.residue_groups[ri];
         let mut alt = get(r, c_alt).into_owned();
         if alt == "." || alt == "?" {
             alt.clear();
         }
         let comp = get(r, c_comp).into_owned();
-        let gi = match ag_index.iter().find(|(a, c, _)| *a == alt && *c == comp) {
-            Some(&(_, _, i)) => i,
+        let resname = format!("{:>3}", comp);
+        let gi = match rg.atom_groups.iter().position(|group| group.altloc == alt && group.resname == resname) {
+            Some(i) => i,
             None => {
-                let ag = AtomGroup { altloc: alt.clone(), resname: format!("{:>3}", comp), atoms: Vec::new() };
+                let ag = AtomGroup { altloc: alt.clone(), resname, atoms: Vec::new() };
                 if alt.is_empty() {
                     rg.atom_groups.insert(0, ag);
-                    for e in ag_index.iter_mut() {
-                        e.2 += 1;
-                    }
-                    ag_index.push((alt.clone(), comp.clone(), 0));
                     0
                 } else {
                     rg.atom_groups.push(ag);
-                    ag_index.push((alt.clone(), comp.clone(), rg.atom_groups.len() - 1));
                     rg.atom_groups.len() - 1
                 }
             }
@@ -230,8 +218,7 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         cur_model = Some(model_id);
         cur_label_asym = Some(label_asym);
         cur_auth_asym = Some(auth_asym);
-        cur_res = Some(res);
-        cur_ins = Some(ins);
+        cur_chain = ci;
         prev_comp = Some(comp);
     }
     if models.len() == 1 {
