@@ -1,0 +1,68 @@
+# FOR A101 and its deposited CYS/PRO partners from 5LBM assembly 1, model 1.
+# Source CIF SHA256: 3e7b1e89e88ab93bfd7a306f7e382fb1fe400c3038993649dc4ef39a65bb9a79
+data_default
+loop_
+  _struct_asym.id
+   A
+   B
+   C
+
+loop_
+  _chem_comp.id
+   CYS
+   FOR
+   PRO
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   ATOM 1 N . CYS A 35 ? 31.75600 -19.03400 15.75200 1.000 85.04000 N ? A ? 1 N 1
+   ATOM 2 CA . CYS A 35 ? 30.74500 -18.32600 14.98100 1.000 81.72000 C ? A ? 1 CA 1
+   ATOM 3 C . CYS A 35 ? 30.30600 -19.15600 13.75400 1.000 81.62000 C ? A ? 1 C 1
+   ATOM 4 O . CYS A 35 ? 29.17300 -19.04900 13.33700 1.000 84.14000 O ? A ? 1 O 1
+   ATOM 5 CB . CYS A 35 ? 31.24900 -16.95400 14.56900 1.000 80.61000 C ? A ? 1 CB 1
+   ATOM 6 SG . CYS A 35 ? 29.93600 -15.73500 14.48700 1.000 89.57000 S ? A ? 1 SG 1
+   ATOM 7 N . PRO D 2 ? 29.03800 -14.98800 16.76400 1.000 102.27000 N ? B ? 1 N 1
+   ATOM 8 CA . PRO D 2 ? 29.58900 -13.84100 17.56400 1.000 106.15000 C ? B ? 1 CA 1
+   ATOM 9 C . PRO D 2 ? 30.77100 -14.17600 18.51700 1.000 109.06000 C ? B ? 1 C 1
+   ATOM 10 O . PRO D 2 ? 30.68100 -15.12400 19.30700 1.000 111.17000 O ? B ? 1 O 1
+   ATOM 11 CB . PRO D 2 ? 28.37200 -13.38100 18.40000 1.000 105.19000 C ? B ? 1 CB 1
+   ATOM 12 CG . PRO D 2 ? 27.54500 -14.61500 18.54900 1.000 105.36000 C ? B ? 1 CG 1
+   ATOM 13 CD . PRO D 2 ? 27.70900 -15.40000 17.26700 1.000 103.36000 C ? B ? 1 CD 1
+   HETATM 14 C . FOR A 101 ? 29.03000 -14.86500 15.50300 1.000 91.36000 C ? C ? . C 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+covale1 covale SG CYS A 35 1_555 C FOR A 101 1_555 1.616 ?
+covale4 covale C FOR A 101 1_555 N PRO D 2 1_555 1.267 sing

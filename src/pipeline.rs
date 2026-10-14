@@ -13,6 +13,9 @@ use crate::riding::HType;
 use crate::world::World;
 use std::time::Instant;
 
+pub mod uncertainty;
+pub use uncertainty::{HydrogenUncertainty, HydrogenUncertaintyReason};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Approach {
     Add,
@@ -38,6 +41,13 @@ pub struct Params {
     /// Original heavy atom rows whose unplaced hydrogens must still fail.
     /// Other unique parents remain contact context; their unplaced H are audited.
     pub required_hydrogen_parent_sources: Option<Vec<u32>>,
+    /// Original heavy rows explicitly allowed to retain undefined H targets.
+    /// The caller sets target eligibility. Empty keeps the existing strict policy.
+    pub allowed_unplaced_hydrogen_parent_sources: Vec<u32>,
+    /// Explicit H names and both original parent rows of validated metal hydrides.
+    pub allowed_unplaced_bridge_hydrogens: Vec<(String, [u32; 2])>,
+    /// Mask only targets that the accepted graph marks as unresolved.
+    pub allow_unresolved_bond_targets: bool,
     pub opt: OptParams,
 }
 
@@ -54,6 +64,9 @@ impl Default for Params {
             stop_on_any_missing_hydrogen: false,
             allow_missing_restraints_for: Vec::new(),
             required_hydrogen_parent_sources: None,
+            allowed_unplaced_hydrogen_parent_sources: Vec::new(),
+            allowed_unplaced_bridge_hydrogens: Vec::new(),
+            allow_unresolved_bond_targets: false,
             opt: OptParams::default(),
         }
     }
@@ -65,6 +78,10 @@ pub struct Output {
     pub description: String,
     /// Messages for the terminal.
     pub log: String,
+    /// Undefined H targets on explicitly allowed original parents.
+    pub hydrogen_uncertainties: Vec<HydrogenUncertainty>,
+    /// Heavy-atom targets with unresolved source geometry or chemistry.
+    pub bond_uncertainties: Vec<interp::target_uncertainty::BondUncertainty>,
 }
 
 fn res_name_and_id(st: &Structure, p: crate::model::AtomPath) -> String {
@@ -129,6 +146,9 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
         select_model(&mut st, mid, p.compat)?;
     }
     let required_sources = required_parent_sources(&st, p)?;
+    let mut uncertainty = uncertainty::Policy::read(&st, ml, p)?;
+    let mut hydrogen_uncertainties = Vec::new();
+    let mut bond_uncertainties = Vec::new();
     let mut held = if p.compat { HeldAtoms::default() } else { st.take_atoms(|_, a| a.elem() == "X") };
     if !held.is_empty() {
         let note = format!("Kept {} atoms of unknown element (X) unchanged; they get no hydrogens and are not scored\n", held.len());
@@ -170,7 +190,14 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                     compat: p.compat,
                     cell: cell.clone(),
                 };
-                let placed = hplace::place_hydrogens(&mut st, ml, &hp);
+                let mut placed = hplace::place_hydrogens(&mut st, ml, &hp);
+                bond_uncertainties = interp::target_uncertainty::inspect(&st, &placed.bonds);
+                if p.allow_unresolved_bond_targets && !placed.unplaced_hydrogens.is_empty() {
+                    interp::target_uncertainty::add_degenerate_heavy_bonds(&st, &placed.bonds, &mut bond_uncertainties);
+                }
+                uncertainty.annotate_observed_bond_targets(&st, &placed, &mut bond_uncertainties);
+                uncertainty.authorize_bond_targets(&bond_uncertainties);
+                hydrogen_uncertainties.extend(uncertainty.prepare_targets(&mut st, &mut placed, &bond_uncertainties, ml)?);
                 log += &placed.log;
                 if let Some(h) = placed.axial_reference.first() {
                     return Err(axial_reference_error(h));
@@ -201,11 +228,23 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                 }
                 let mut required_unplaced = Vec::new();
                 let mut context_unplaced = Vec::new();
-                for (label, parent) in placed.site_labels_no_para.iter().zip(&placed.unparameterized_parent_sources) {
-                    if required_sources.as_ref().is_some_and(|required| parent.is_some_and(|row| !required.contains(&row))) {
-                        context_unplaced.push(label.as_str());
-                    } else {
-                        required_unplaced.push(label.as_str());
+                for site in &placed.unplaced_hydrogens {
+                    let parent = match site.parent_sources.as_slice() { [row] => Some(*row), _ => None };
+                    if uncertainty.allows_bridge(&site.hydrogen_name, &site.parent_sources) {
+                        continue;
+                    } else if parent.is_some_and(|row| uncertainty.allows(row)) {
+                        hydrogen_uncertainties.push(HydrogenUncertainty {
+                            parent_sources: site.parent_sources.clone(),
+                            hydrogen_name: site.hydrogen_name.clone(),
+                            reason: site.reason,
+                        });
+                    } else if site.strict_restraints {
+                        if required_sources.as_ref().is_some_and(|required| parent.is_some_and(|row| !required.contains(&row))) {
+                            context_unplaced.push(site.label.as_str());
+                        } else { required_unplaced.push(site.label.as_str()); }
+                    } else if uncertainty.enabled() && parent.is_some_and(|row|
+                        required_sources.as_ref().is_none_or(|required| required.contains(&row))) {
+                        required_unplaced.push(site.label.as_str());
                     }
                 }
                 if !context_unplaced.is_empty() {
@@ -270,11 +309,12 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
             st.retain_atoms(|a| a.elem() != "H");
         }
     }
+    uncertainty.restore_observed(&mut st, &hydrogen_uncertainties, &bond_uncertainties, ml)?;
     st.restore_atoms(held);
     st.sort_atoms_in_place();
     st.reset_serial();
     st.reset_i_seq();
-    Ok(Output { structure: st, description: desc, log })
+    Ok(Output { structure: st, description: desc, log, hydrogen_uncertainties, bond_uncertainties })
 }
 
 fn required_parent_sources(st: &Structure, p: &Params) -> Result<Option<rustc_hash::FxHashSet<u32>>, String> {

@@ -31,7 +31,7 @@ pub(super) fn tertiary_amide_h(it: &Interp, st: &Structure, flat: &FlatAtoms, h:
 }
 
 pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms,
-    bond_order: &impl Fn(&Comp, &crate::monlib::CompBond) -> Option<u8>) -> Vec<(u32, u32, String)> {
+    bond_order: &impl Fn(&Comp, &crate::monlib::CompBond, &str) -> Option<u8>) -> Vec<(u32, u32, String)> {
     let mut pairs = Vec::new();
     let mut annotated = FxHashSet::default();
     for link in &st.links {
@@ -54,19 +54,19 @@ pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &Fla
         if pairs.iter().filter(|&&(p, _)| p == parent).count() != 1 {
             continue;
         }
-        if let Some(leaving) = replacement_angles(it, flat, parent, partner, None) {
+        if let Some(leaving) = replacement_angles(it, st, flat, parent, partner, None, bond_order) {
             replacements.push((parent, partner, leaving));
         }
     }
-    let templates: Vec<_> = replacements.iter().filter(|&&(p, q, _)| product_bond(it, flat, p, q, bond_order)).cloned().collect();
+    let templates: Vec<_> = replacements.iter().filter(|&&(p, q, _)| product_bond(it, st, flat, p, q, bond_order)).cloned().collect();
     let bonds: Vec<_> = it.bonds.iter().filter(|b| b.origin == interp::ORIGIN_MISC).map(|b| (b.i, b.j)).collect();
     for (a, b) in bonds {
         for (parent, partner) in [(a, b), (b, a)] {
-            if annotated.contains(&parent) || !product_bond(it, flat, parent, partner, bond_order) { continue; }
+            if annotated.contains(&parent) || !product_bond(it, st, flat, parent, partner, bond_order) { continue; }
             let matches: Vec<_> = templates.iter().filter(|&&(p, q, _)| same_site(it, parent, p) && same_site(it, partner, q)).collect();
             let Some(first) = matches.first() else { continue };
             if matches.iter().any(|t| t.2 != first.2) { continue; }
-            if let Some(leaving) = replacement_angles(it, flat, parent, partner, Some(&first.2)) {
+            if let Some(leaving) = replacement_angles(it, st, flat, parent, partner, Some(&first.2), bond_order) {
                 replacements.push((parent, partner, leaving));
             }
         }
@@ -81,8 +81,8 @@ fn same_site(it: &Interp, a: u32, b: u32) -> bool {
         && ac.applied_mods == bc.applied_mods && ac.from_ccd == bc.from_ccd
 }
 
-fn product_bond(it: &Interp, flat: &FlatAtoms, parent: u32, partner: u32,
-    bond_order: &impl Fn(&Comp, &crate::monlib::CompBond) -> Option<u8>) -> bool {
+fn product_bond(it: &Interp, st: &Structure, flat: &FlatAtoms, parent: u32, partner: u32,
+    bond_order: &impl Fn(&Comp, &crate::monlib::CompBond, &str) -> Option<u8>) -> bool {
     let sulfur = &it.dict[partner as usize];
     let Some(comp) = &sulfur.comp else { return false };
     let heavy: Vec<_> = neighbors(it, partner).into_iter().filter(|&i| !flat.is_h[i as usize]).collect();
@@ -95,7 +95,7 @@ fn product_bond(it: &Interp, flat: &FlatAtoms, parent: u32, partner: u32,
     flat.element[parent as usize] == "C" && flat.element[partner as usize] == "S"
         && comp.id == "CYS" && sulfur.dict_id.as_deref() == Some("SG")
         && it.dict[beta as usize].dict_id.as_deref() == Some("CB")
-        && bond_order(comp, single) == Some(2)
+        && bond_order(comp, single, &st.atom_group(flat.path[partner as usize]).resname) == Some(2)
         && parent_path.model == partner_path.model && residue(flat, parent) != residue(flat, partner)
         && (flat.altloc[parent as usize].is_empty() || flat.altloc[partner as usize].is_empty()
             || flat.altloc[parent as usize] == flat.altloc[partner as usize])
@@ -103,7 +103,8 @@ fn product_bond(it: &Interp, flat: &FlatAtoms, parent: u32, partner: u32,
         && heavy.len() == 2 && heavy.contains(&parent)
 }
 
-fn replacement_angles(it: &mut Interp, flat: &FlatAtoms, parent: u32, partner: u32, required_leaving: Option<&str>) -> Option<String> {
+fn replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms, parent: u32, partner: u32,
+    required_leaving: Option<&str>, bond_order: &impl Fn(&Comp, &crate::monlib::CompBond, &str) -> Option<u8>) -> Option<String> {
     let info = &it.dict[parent as usize];
     let (Some(comp), Some(id)) = (&info.comp, &info.dict_id) else { return None };
     let Some(atom) = comp.atom(id) else { return None };
@@ -117,7 +118,7 @@ fn replacement_angles(it: &mut Interp, flat: &FlatAtoms, parent: u32, partner: u
         (!comp.is_h(other)).then_some(other.as_str())
     }).collect();
     if expected.len() != 2 || comp.bonds.iter().any(|b| {
-        (&b.a1 == id || &b.a2 == id) && !matches!(b.type_.as_str(), "single" | "SING")
+        (&b.a1 == id || &b.a2 == id) && bond_order(comp, b, &st.atom_group(flat.path[parent as usize]).resname) != Some(2)
     }) {
         return None;
     }

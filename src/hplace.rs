@@ -46,6 +46,8 @@ pub struct Placed {
     pub site_labels_no_para: Vec<String>,
     /// Source rows of unique heavy parents, aligned with `site_labels_no_para`.
     pub unparameterized_parent_sources: Vec<Option<u32>>,
+    /// Every unplaced H, including those whose parent lacks heavy neighbors.
+    pub unplaced_hydrogens: Vec<crate::pipeline::uncertainty::UnplacedHydrogen>,
     /// H whose third neighbor lies on the parent bond axis (compat mode,
     /// where Reduce2 divides by zero on them).
     pub axial_reference: Vec<String>,
@@ -723,7 +725,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
 
     add_link_h_restraints(&mut it, ml, &w.flat, p.compat);
     let replacements = if !p.compat { linked::add_replacement_angles(&mut it, st, &w.flat,
-        &|comp, bond| interp::source_bond_order(ml, comp, bond)) } else { Vec::new() };
+        &|comp, bond, actual_component| interp::source_bond_order(ml, comp, bond, actual_component)) } else { Vec::new() };
 
     // ---------------- riding
     let occ: Vec<f64> = w.flat.path.iter().map(|&pp| st.atom(pp).occ).collect();
@@ -777,6 +779,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     };
     let mut site_labels_no_para = Vec::new();
     let mut unparameterized_parent_sources = Vec::new();
+    let mut unplaced_hydrogens = Vec::new();
     let mut removed_on_links = Vec::new();
     let unpara: Vec<u32> = rr
         .unparameterized
@@ -800,9 +803,20 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
             continue;
         }
         let isolated = nbrs[h as usize].is_empty();
+        let parents = heavy_neighbors(&nbrs, &w.flat, h);
+        let missing_neighbor = parents.len() == 1 && heavy_neighbors(&nbrs, &w.flat, parents[0]).len() < 2;
+        unplaced_hydrogens.push(crate::pipeline::uncertainty::UnplacedHydrogen {
+            parent_sources: if parents.iter().all(|&parent| st.atom(w.flat.path[parent as usize]).src != Atom::NEW) {
+                parents.iter().map(|&parent| st.atom(w.flat.path[parent as usize]).src).collect()
+            } else { Vec::new() },
+            hydrogen_name: st.atom(w.flat.path[h as usize]).name.trim().to_owned(),
+            label: label(st, w.flat.path[h as usize]),
+            strict_restraints: !isolated && !missing_neighbor,
+            reason: if missing_neighbor || isolated {
+                crate::pipeline::HydrogenUncertaintyReason::MissingHeavyNeighbor
+            } else { crate::pipeline::HydrogenUncertaintyReason::InsufficientRestraints },
+        });
         if !isolated {
-            let parents = heavy_neighbors(&nbrs, &w.flat, h);
-            let missing_neighbor = parents.len() == 1 && heavy_neighbors(&nbrs, &w.flat, parents[0]).len() < 2;
             if !missing_neighbor {
                 site_labels_no_para.push(label(st, w.flat.path[h as usize]));
                 unparameterized_parent_sources.push(if parents.len() == 1 {
@@ -904,6 +918,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         no_h_placed: uniq_missing,
         site_labels_no_para,
         unparameterized_parent_sources,
+        unplaced_hydrogens,
         axial_reference,
         removed_on_links,
         n_h_initial,

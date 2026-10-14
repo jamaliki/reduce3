@@ -13,9 +13,37 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 pub mod validation;
+pub mod target_uncertainty;
 mod disulfides;
 mod covalent;
-pub(crate) use covalent::source_order as source_bond_order;
+
+/// Resolve generic bond types against the component present in the model.
+pub(crate) fn source_bond_order(ml: &MonLib, comp: &Comp, bond: &crate::monlib::CompBond, actual_component: &str) -> Option<u8> {
+    if !bond.type_.eq_ignore_ascii_case("coval") || comp.id.eq_ignore_ascii_case(actual_component) {
+        return covalent::source_order(ml, comp, bond);
+    }
+    let has_o2 = comp.has_atom("O2'") || comp.has_atom("O2*");
+    let Some(selected) = names::rna_dna_mon_lib_name(actual_component, has_o2) else {
+        return covalent::source_order(ml, comp, bond);
+    };
+    if !comp.id.eq_ignore_ascii_case(selected) { return None; }
+    let source = ml.comp(selected)?;
+    if source.test_for_rna_dna().is_none() || source.source != comp.source || source.from_ccd != comp.from_ccd {
+        return None;
+    }
+    let ccd = ml.ccd(actual_component)?;
+    for name in [&bond.a1, &bond.a2] {
+        let atoms: Vec<_> = comp.atoms.iter().filter(|a| &a.id == name).collect();
+        let [atom] = atoms[..] else { return None };
+        let matches: Vec<_> = ccd.atoms.iter().filter(|a| &a.0 == name).collect();
+        let [source] = matches[..] else { return None };
+        if source.1 != atom.type_symbol { return None; }
+    }
+    covalent::source_order(ml, &Comp { id: actual_component.into(), ..Comp::default() }, bond)
+}
+
+#[cfg(test)]
+mod source_order_tests;
 
 pub const ORIGIN_COVALENT: u16 = 0;
 pub const ORIGIN_SS: u16 = 1;

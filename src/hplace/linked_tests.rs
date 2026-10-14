@@ -1,7 +1,7 @@
 use super::*;
 
 fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms) -> Vec<(u32, u32, String)> {
-    super::linked::add_replacement_angles(it, st, flat, &|_, bond|
+    super::linked::add_replacement_angles(it, st, flat, &|_, bond, _|
         (bond.type_.eq_ignore_ascii_case("single") || bond.type_.eq_ignore_ascii_case("sing")).then_some(2))
 }
 
@@ -173,4 +173,36 @@ fn nonterminal_or_ambiguous_missing_atoms_get_no_replacement_restraints() {
         assert!(it.angles.is_empty());
         assert_eq!(unparameterized(&it, &flat), [2, 3]);
     }
+}
+
+#[test]
+fn actual_dt_replacement_keeps_source_angles_bonds_and_coordinates() {
+    let ml = crate::monlib::MonLib::load(&crate::monlib::MonLib::locate(None).unwrap()).unwrap();
+    let mut st = crate::mmcif::read_mmcif(include_str!("../../tests/data/ptr_dt_3px7.cif")).unwrap();
+    let params = HPlaceParams { neutron: false, n_terminal_charge: NTermCharge::ResidueOne,
+        exclude_water: true, keep_existing_h: false, adp_scale: 1.0, compat: false, cell: None };
+    let mut auto_comps = FxHashMap::default();
+    add_missing_h(&mut st, &ml, &params, &mut Vec::new(), &mut auto_comps);
+    st.sort_atoms_in_place();
+    let flat = FlatAtoms::from_structure(&st);
+    let mut it = interp::interpret(&st, &flat, &ml, &InterpParams {
+        neutron: false, link_distance_cutoff: 3.0, compat: false, auto_comps,
+    });
+    let bonds = it.bonds.iter().map(|b| (b.i, b.j, b.ideal, b.origin)).collect::<Vec<_>>();
+    let positions = flat.pos.clone();
+    let initial_angles = it.angles.len();
+    let replacements = super::linked::add_replacement_angles(&mut it, &st, &flat,
+        &|comp, bond, actual| interp::source_bond_order(&ml, comp, bond, actual));
+    let [(parent, partner, leaving)] = &replacements[..] else { panic!("expected the declared DT replacement") };
+    assert_eq!(flat.name[*parent as usize].trim(), "C5'");
+    assert_eq!(flat.name[*partner as usize].trim(), "O3P");
+    assert_eq!(leaving, "O5'");
+    let comp = it.dict[*parent as usize].comp.as_ref().unwrap();
+    assert_eq!(comp.id, "Td");
+    assert_eq!(comp.applied_mods, ["5*END"]);
+    assert_eq!(it.angles[initial_angles..].iter().map(|a| (a.ideal, a.esd)).collect::<Vec<_>>(),
+        [(109.4, 0.8), (109.0, 1.5), (109.0, 1.5)]);
+    assert!(it.angles[initial_angles..].iter().all(|a| a.i[1] == *parent && a.i.contains(partner)));
+    assert_eq!(bonds, it.bonds.iter().map(|b| (b.i, b.j, b.ideal, b.origin)).collect::<Vec<_>>());
+    assert_eq!(flat.pos, positions);
 }
