@@ -32,6 +32,9 @@ pub struct Params {
     pub model_id: Option<usize>,
     pub ignore_missing_restraints: bool,
     pub stop_on_any_missing_hydrogen: bool,
+    /// Keep these components as contact context if their dictionary is absent.
+    /// This does not allow unparameterized hydrogens or affect known dictionaries.
+    pub allow_missing_restraints_for: Vec<String>,
     pub opt: OptParams,
 }
 
@@ -46,6 +49,7 @@ impl Default for Params {
             model_id: None,
             ignore_missing_restraints: false,
             stop_on_any_missing_hydrogen: false,
+            allow_missing_restraints_for: Vec::new(),
             opt: OptParams::default(),
         }
     }
@@ -95,6 +99,15 @@ fn select_model(st: &mut Structure, model_id: usize, compat: bool) -> Result<(),
 
 /// Run the whole program on a structure.
 pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String> {
+    let allowed_missing: Vec<String> = p.allow_missing_restraints_for.iter()
+        .map(|name| name.trim().to_ascii_uppercase()).collect();
+    if allowed_missing.iter().any(|name| name.is_empty() || name.chars().any(char::is_whitespace)
+        || matches!(name.as_str(), "." | "?")) {
+        return Err("Allowed missing restraints require component identifiers".into());
+    }
+    if p.compat && !allowed_missing.is_empty() {
+        return Err("Component-specific missing restraints require fixed mode".into());
+    }
     // `compat` governs the optimizer too
     let p = &{
         let mut p = p.clone();
@@ -160,13 +173,23 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                 if !placed.no_h_placed.is_empty() {
                     let mut bad: Vec<String> = placed.no_h_placed.clone();
                     bad.dedup();
+                    let (allowed, missing): (Vec<_>, Vec<_>) = bad.iter().partition(|name| {
+                        allowed_missing.contains(&name.trim().to_ascii_uppercase())
+                    });
                     // fixed mode places what it can unless asked to stop
                     let stop = if p.compat { !p.ignore_missing_restraints } else { p.stop_on_any_missing_hydrogen };
-                    if stop {
-                        return Err(format!("Restraints were not found for the following residues: {}", bad.join(" ")));
+                    if stop && !missing.is_empty() {
+                        return Err(format!("Restraints were not found for the following residues: {}",
+                            missing.into_iter().map(String::as_str).collect::<Vec<_>>().join(" ")));
                     }
                     if !p.compat {
                         let note = format!("No restraints were found for residues {}: they get no new hydrogens\n", bad.join(" "));
+                        log += &note;
+                        desc += &note;
+                    }
+                    if !allowed.is_empty() {
+                        let note = format!("Allowed missing restraints for components {}: retained heavy atoms for contact scoring; no new hydrogens\n",
+                            allowed.into_iter().map(String::as_str).collect::<Vec<_>>().join(" "));
                         log += &note;
                         desc += &note;
                     }
