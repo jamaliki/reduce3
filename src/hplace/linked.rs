@@ -1,13 +1,7 @@
 use super::*;
 
 fn matches(st: &Structure, flat: &FlatAtoms, i: u32, atom: &AtomLabel) -> bool {
-    let p = flat.path[i as usize];
-    flat.name[i as usize].trim() == atom.name.trim()
-        && st.atom_group(p).resname.trim() == atom.resname.trim()
-        && st.chain(p).id == atom.chain
-        && st.residue_group(p).resseq.trim() == atom.resseq.trim()
-        && st.residue_group(p).icode.trim() == atom.icode.trim()
-        && (atom.altloc.is_empty() || flat.altloc[i as usize] == atom.altloc)
+    atom.matches(st, flat.path[i as usize])
 }
 
 fn residue(flat: &FlatAtoms, i: u32) -> (u32, u32, u32) {
@@ -36,14 +30,20 @@ pub(super) fn tertiary_amide_h(it: &Interp, st: &Structure, flat: &FlatAtoms, h:
     }).count() >= 3
 }
 
-pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms) -> Vec<(u32, u32, String)> {
+pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms,
+    bond_order: &impl Fn(&Comp, &crate::monlib::CompBond) -> Option<u8>) -> Vec<(u32, u32, String)> {
     let mut pairs = Vec::new();
+    let mut annotated = FxHashSet::default();
     for link in &st.links {
         if link.kind != "covale" {
             continue;
         }
         let first: Vec<u32> = (0..flat.pos.len() as u32).filter(|&i| matches(st, flat, i, &link.atom1)).collect();
         let second: Vec<u32> = (0..flat.pos.len() as u32).filter(|&i| matches(st, flat, i, &link.atom2)).collect();
+        annotated.extend(first.iter().chain(&second).copied());
+        if link.order.as_deref().is_some_and(|v| !v.eq_ignore_ascii_case("sing") && !v.eq_ignore_ascii_case("single")) {
+            continue;
+        }
         let ([a], [b]) = (&first[..], &second[..]) else { continue };
         if flat.path[*a as usize].model == flat.path[*b as usize].model && it.has_bond(*a, *b) {
             pairs.extend([(*a, *b), (*b, *a)]);
@@ -54,14 +54,56 @@ pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &Fla
         if pairs.iter().filter(|&&(p, _)| p == parent).count() != 1 {
             continue;
         }
-        if let Some(leaving) = replacement_angles(it, flat, parent, partner) {
+        if let Some(leaving) = replacement_angles(it, flat, parent, partner, None) {
             replacements.push((parent, partner, leaving));
+        }
+    }
+    let templates: Vec<_> = replacements.iter().filter(|&&(p, q, _)| product_bond(it, flat, p, q, bond_order)).cloned().collect();
+    let bonds: Vec<_> = it.bonds.iter().filter(|b| b.origin == interp::ORIGIN_MISC).map(|b| (b.i, b.j)).collect();
+    for (a, b) in bonds {
+        for (parent, partner) in [(a, b), (b, a)] {
+            if annotated.contains(&parent) || !product_bond(it, flat, parent, partner, bond_order) { continue; }
+            let matches: Vec<_> = templates.iter().filter(|&&(p, q, _)| same_site(it, parent, p) && same_site(it, partner, q)).collect();
+            let Some(first) = matches.first() else { continue };
+            if matches.iter().any(|t| t.2 != first.2) { continue; }
+            if let Some(leaving) = replacement_angles(it, flat, parent, partner, Some(&first.2)) {
+                replacements.push((parent, partner, leaving));
+            }
         }
     }
     replacements
 }
 
-fn replacement_angles(it: &mut Interp, flat: &FlatAtoms, parent: u32, partner: u32) -> Option<String> {
+fn same_site(it: &Interp, a: u32, b: u32) -> bool {
+    let (a, b) = (&it.dict[a as usize], &it.dict[b as usize]);
+    let (Some(ac), Some(bc)) = (&a.comp, &b.comp) else { return false };
+    a.dict_id.is_some() && a.dict_id == b.dict_id && ac.id == bc.id && ac.source == bc.source
+        && ac.applied_mods == bc.applied_mods && ac.from_ccd == bc.from_ccd
+}
+
+fn product_bond(it: &Interp, flat: &FlatAtoms, parent: u32, partner: u32,
+    bond_order: &impl Fn(&Comp, &crate::monlib::CompBond) -> Option<u8>) -> bool {
+    let sulfur = &it.dict[partner as usize];
+    let Some(comp) = &sulfur.comp else { return false };
+    let heavy: Vec<_> = neighbors(it, partner).into_iter().filter(|&i| !flat.is_h[i as usize]).collect();
+    let local: Vec<_> = heavy.iter().copied().filter(|&i| residue(flat, i) == residue(flat, partner)).collect();
+    let [beta] = local[..] else { return false };
+    let single = comp.bonds.iter().filter(|b| (b.a1 == "SG" && b.a2 == "CB") || (b.a1 == "CB" && b.a2 == "SG")).collect::<Vec<_>>();
+    let [single] = single[..] else { return false };
+    let parent_path = flat.path[parent as usize];
+    let partner_path = flat.path[partner as usize];
+    flat.element[parent as usize] == "C" && flat.element[partner as usize] == "S"
+        && comp.id == "CYS" && sulfur.dict_id.as_deref() == Some("SG")
+        && it.dict[beta as usize].dict_id.as_deref() == Some("CB")
+        && bond_order(comp, single) == Some(2)
+        && parent_path.model == partner_path.model && residue(flat, parent) != residue(flat, partner)
+        && (flat.altloc[parent as usize].is_empty() || flat.altloc[partner as usize].is_empty()
+            || flat.altloc[parent as usize] == flat.altloc[partner as usize])
+        && (1.5..=2.3).contains(&flat.pos[parent as usize].dist(flat.pos[partner as usize]))
+        && heavy.len() == 2 && heavy.contains(&parent)
+}
+
+fn replacement_angles(it: &mut Interp, flat: &FlatAtoms, parent: u32, partner: u32, required_leaving: Option<&str>) -> Option<String> {
     let info = &it.dict[parent as usize];
     let (Some(comp), Some(id)) = (&info.comp, &info.dict_id) else { return None };
     let Some(atom) = comp.atom(id) else { return None };
@@ -87,7 +129,9 @@ fn replacement_angles(it: &mut Interp, flat: &FlatAtoms, parent: u32, partner: u
     let terminal = comp.bonds.iter().filter(|b| {
         (b.a1 == leaving && !comp.is_h(&b.a2)) || (b.a2 == leaving && !comp.is_h(&b.a1))
     }).count() == 1;
-    if !terminal || residue(flat, parent) == residue(flat, partner) {
+    if !terminal || residue(flat, parent) == residue(flat, partner)
+        || required_leaving.is_some_and(|name| name != leaving)
+        || !(1.2..=2.3).contains(&flat.pos[parent as usize].dist(flat.pos[partner as usize])) {
         return None;
     }
     let resolve = |name: &str| if name == leaving { Some(partner) } else { local.get(name).copied() };

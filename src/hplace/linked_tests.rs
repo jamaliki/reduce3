@@ -1,5 +1,9 @@
-use super::linked::*;
 use super::*;
+
+fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms) -> Vec<(u32, u32, String)> {
+    super::linked::add_replacement_angles(it, st, flat, &|_, bond|
+        (bond.type_.eq_ignore_ascii_case("single") || bond.type_.eq_ignore_ascii_case("sing")).then_some(2))
+}
 
 fn fixture() -> (Structure, FlatAtoms, Interp) {
     let mut st = crate::mmcif::read_mmcif(concat!(
@@ -8,12 +12,12 @@ fn fixture() -> (Structure, FlatAtoms, Interp) {
         "_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n_atom_site.occupancy\n_atom_site.B_iso_or_equiv\n",
         "C C35 . Z41 G 602 0 0 0 1 10\nC C18 . Z41 G 602 1.5 0 0 1 10\n",
         "H H351 . Z41 G 602 0 0 1 1 10\nH H352 . Z41 G 602 0 0 -1 1 10\n",
-        "C EXTRA . Z41 G 602 1 1 1 1 10\nS SG . CYS G 18 0 1.8 0 1 10\n",
+        "C EXTRA . Z41 G 602 1 1 1 1 10\nS SG . CYS G 18 0 1.8 0 1 10\nC CB . CYS G 18 0 3.6 0 1 10\n",
     )).unwrap();
     let atom = |name: &str, resname: &str, resseq: &str| AtomLabel {
         name: name.into(), resname: resname.into(), resseq: resseq.into(), chain: "G".into(), altloc: "".into(), icode: "".into(),
     };
-    st.links.push(LinkRecord { atom1: atom("C35", "Z41", "602"), atom2: atom("SG", "CYS", "18"), distance: Some(1.8), kind: "covale".into() });
+    st.links.push(LinkRecord { atom1: atom("C35", "Z41", "602"), atom2: atom("SG", "CYS", "18"), distance: Some(1.8), order: None, kind: "covale".into() });
     let flat = FlatAtoms::from_structure(&st);
     let mut it = Interp::empty(flat.pos.len());
     let mut comp = Comp { id: "Z41".into(), ..Comp::default() };
@@ -30,6 +34,13 @@ fn fixture() -> (Structure, FlatAtoms, Interp) {
     for (i, id) in ["C35", "C18", "H351", "H352"].iter().enumerate() {
         it.dict[i] = interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*id).into()) };
     }
+    let sulfur = Arc::new(Comp { id: "CYS".into(), bonds: vec![crate::monlib::CompBond {
+        a1: "SG".into(), a2: "CB".into(), type_: "single".into(), ..Default::default()
+    }], ..Default::default() });
+    for (i, id) in [(5, "SG"), (6, "CB")] {
+        it.dict[i] = interp::AtomDictInfo { comp: Some(sulfur.clone()), dict_id: Some(id.into()) };
+    }
+    it.add_bond(5, 6, 1.8, 0);
     for (i, ideal, origin) in [(1, 1.5, 0), (2, 0.97, 0), (3, 0.97, 0), (5, 1.766, 10)] {
         it.add_bond(0, i, ideal, origin);
     }
@@ -46,6 +57,80 @@ fn unparameterized(it: &Interp, flat: &FlatAtoms) -> Vec<u32> {
         use_plane_restraints: true,
     };
     riding::riding(it, &mut flat.pos.clone(), &input, true).unparameterized
+}
+
+fn paired_fixture() -> (Structure, FlatAtoms, Interp) {
+    let (mut st, flat, old) = fixture();
+    let mut copy = st.models[0].chains[0].clone();
+    copy.id = "J".into();
+    for residue in &mut copy.residue_groups {
+        for group in &mut residue.atom_groups {
+            for atom in &mut group.atoms { atom.xyz.x += 20.0; }
+        }
+    }
+    st.models[0].chains.push(copy);
+    st.reset_i_seq();
+    let mut it = Interp::empty(flat.pos.len() * 2);
+    it.dict = [old.dict.clone(), old.dict].concat();
+    for bond in old.bonds {
+        for offset in [0, flat.pos.len() as u32] {
+            it.add_bond(bond.i + offset, bond.j + offset, bond.ideal, bond.origin);
+        }
+    }
+    let flat = FlatAtoms::from_structure(&st);
+    (st, flat, it)
+}
+
+#[test]
+fn matching_unannotated_product_uses_declared_source_angles() {
+    let (st, flat, mut it) = paired_fixture();
+    let positions = flat.pos.clone();
+    assert_eq!(add_replacement_angles(&mut it, &st, &flat), [(0, 5, "O5".into()), (7, 12, "O5".into())]);
+    assert_eq!(it.angles.iter().map(|a| a.ideal).collect::<Vec<_>>(), [108.21, 112.03, 112.07, 108.21, 112.03, 112.07]);
+    assert_eq!(flat.pos, positions);
+}
+
+#[test]
+fn product_precedent_requires_matching_source_site_and_unique_valid_bonds() {
+    for invalid in 0..10 {
+        let (mut st, mut flat, mut it) = paired_fixture();
+        match invalid {
+            0 => Arc::make_mut(it.dict[7].comp.as_mut().unwrap()).id = "OTHER".into(),
+            1 => it.dict[7].dict_id = Some("OTHER".into()),
+            2 => Arc::make_mut(it.dict[12].comp.as_mut().unwrap()).id = "OTHER".into(),
+            3 => it.dict[12].dict_id = Some("OTHER".into()),
+            4 => { it.add_bond(7, 6, 1.8, interp::ORIGIN_MISC); }
+            5 => flat.pos[12].y = 8.0,
+            6 => { Arc::make_mut(it.dict[7].comp.as_mut().unwrap()).bonds.push(crate::monlib::CompBond {
+                a1: "O5".into(), a2: "C18".into(), type_: "single".into(), ..Default::default()
+            }); },
+            7 => { let mut bad = st.links[0].clone(); bad.atom1.chain = "J".into(); bad.atom2.chain = "J".into();
+                bad.atom2.resseq = "999".into(); st.links.push(bad); },
+            8 => { let mut bad = st.links[0].clone(); bad.atom1.chain = "J".into(); bad.atom2.chain = "J".into();
+                bad.order = Some("unknown".into()); st.links.push(bad); },
+            9 => { it.add_bond(12, 4, 1.8, interp::ORIGIN_MISC); }
+            _ => unreachable!(),
+        };
+        assert_eq!(add_replacement_angles(&mut it, &st, &flat), [(0, 5, "O5".into())], "case {invalid}");
+        assert_eq!(it.angles.len(), 3);
+    }
+}
+
+#[test]
+fn absent_ambiguous_or_distant_source_product_gives_no_precedent() {
+    for invalid in 0..5 {
+        let (mut st, mut flat, mut it) = paired_fixture();
+        match invalid {
+            0 => st.links.clear(),
+            1 => st.links.push(st.links[0].clone()),
+            2 => flat.pos[5].y = 8.0,
+            3 => st.links[0].order = Some("doub".into()),
+            4 => st.links[0].atom1.chain = "OTHER".into(),
+            _ => unreachable!(),
+        }
+        assert!(add_replacement_angles(&mut it, &st, &flat).is_empty(), "case {invalid}");
+        assert!(it.angles.is_empty());
+    }
 }
 
 #[test]

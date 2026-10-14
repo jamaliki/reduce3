@@ -712,7 +712,8 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let mut w = Work { flat, removed: vec![false; n] };
 
     add_link_h_restraints(&mut it, ml, &w.flat, p.compat);
-    let replacements = if !p.compat { linked::add_replacement_angles(&mut it, st, &w.flat) } else { Vec::new() };
+    let replacements = if !p.compat { linked::add_replacement_angles(&mut it, st, &w.flat,
+        &|comp, bond| interp::source_bond_order(ml, comp, bond)) } else { Vec::new() };
 
     // ---------------- riding
     let occ: Vec<f64> = w.flat.path.iter().map(|&pp| st.atom(pp).occ).collect();

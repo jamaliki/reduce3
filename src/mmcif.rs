@@ -304,6 +304,7 @@ fn covalent_links<S: CifSource + ?Sized>(source: &S) -> Vec<LinkRecord> {
         }
         Some(LinkRecord {
             atom1, atom2, distance: table.column("pdbx_dist_value").and_then(|col| table.number(row, col)), kind,
+            order: Some(value(row, "pdbx_value_order")).filter(|v| !v.is_empty()),
         })
     }).collect()
 }

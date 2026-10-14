@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 pub mod validation;
 mod disulfides;
+mod covalent;
+pub(crate) use covalent::source_order as source_bond_order;
 
 pub const ORIGIN_COVALENT: u16 = 0;
 pub const ORIGIN_SS: u16 = 1;
@@ -1061,6 +1063,7 @@ fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParam
     }
     it.log = log;
     add_disulfides(&mut it, st, flat, &cys_sg, p.compat);
+    if !p.compat { covalent::add_thioethers(&mut it, st, flat, &|comp, bond| covalent::source_order(ml, comp, bond)); }
     let mut link_log = String::new();
     crate::autolink::auto_link(
         &mut it,

@@ -1,13 +1,7 @@
 use super::*;
 
 fn matches(st: &Structure, flat: &FlatAtoms, i: u32, label: &AtomLabel) -> bool {
-    let p = flat.path[i as usize];
-    flat.name[i as usize].trim() == label.name.trim()
-        && st.atom_group(p).resname.trim() == label.resname.trim()
-        && st.chain(p).id == label.chain
-        && st.residue_group(p).resseq.trim() == label.resseq.trim()
-        && st.residue_group(p).icode.trim() == label.icode.trim()
-        && (label.altloc.is_empty() || flat.altloc[i as usize] == label.altloc)
+    label.matches(st, flat.path[i as usize])
 }
 
 /// Keep validated deposited disulfides even when one sulfur is near a metal.
@@ -51,7 +45,7 @@ mod tests {
             "S SG . CYS A 188 0 0 0 1 10\nS SG . CYS A 192 2.076 0 0 1 10\nFE FE4 . SF4 A 1007 2.076 2.31 0 1 10\n",
         )).unwrap();
         let atom = |seq: &str| AtomLabel { name: "SG".into(), resname: "CYS".into(), chain: "A".into(), resseq: seq.into(), altloc: String::new(), icode: String::new() };
-        st.links.push(LinkRecord { atom1: atom("188"), atom2: atom("192"), kind: "disulf".into(), distance: Some(2.076) });
+        st.links.push(LinkRecord { atom1: atom("188"), atom2: atom("192"), kind: "disulf".into(), order: None, distance: Some(2.076) });
         let flat = FlatAtoms::from_structure(&st);
         (st, flat, Interp::empty(3))
     }

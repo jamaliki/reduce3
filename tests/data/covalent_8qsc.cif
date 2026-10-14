@@ -1,0 +1,115 @@
+data_reduce3_8qsc
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 307 N N . CYS A 1 43 ? 38.440 24.457 19.096 1.00 21.12 ? 38 CYS A N 1
+ATOM 308 C CA . CYS A 1 43 ? 37.357 23.487 19.093 1.00 22.12 ? 38 CYS A CA 1
+ATOM 309 C C . CYS A 1 43 ? 36.081 23.949 19.808 1.00 22.11 ? 38 CYS A C 1
+ATOM 310 O O . CYS A 1 43 ? 34.980 23.782 19.275 1.00 20.58 ? 38 CYS A O 1
+ATOM 311 C CB . CYS A 1 43 ? 37.848 22.169 19.670 1.00 23.12 ? 38 CYS A CB 1
+ATOM 312 S SG . CYS A 1 43 ? 38.849 21.214 18.455 1.00 26.75 ? 38 CYS A SG 1
+ATOM 2187 N N . CYS C 1 43 ? -12.995 37.120 17.461 1.00 18.40 ? 38 CYS J N 1
+ATOM 2188 C CA . CYS C 1 43 ? -12.461 36.250 18.498 1.00 19.31 ? 38 CYS J CA 1
+ATOM 2189 C C . CYS C 1 43 ? -11.185 35.557 18.055 1.00 21.32 ? 38 CYS J C 1
+ATOM 2190 O O . CYS C 1 43 ? -10.187 35.533 18.783 1.00 19.58 ? 38 CYS J O 1
+ATOM 2191 C CB . CYS C 1 43 ? -13.502 35.218 18.948 1.00 23.10 ? 38 CYS J CB 1
+ATOM 2192 S SG . CYS C 1 43 ? -14.845 35.948 19.911 1.00 27.48 ? 38 CYS J SG 1
+HETATM 3819 C C1 . WPN E 3 . ? 36.584 20.623 16.956 1.00 20.98 ? 301 WPN A C1 1
+HETATM 3820 C C2 . WPN E 3 . ? 37.631 19.864 17.759 1.00 25.14 ? 301 WPN A C2 1
+HETATM 3821 C C3 . WPN E 3 . ? 34.228 21.414 17.014 1.00 22.75 ? 301 WPN A C3 1
+HETATM 3822 C C4 . WPN E 3 . ? 33.331 20.767 15.967 1.00 25.97 ? 301 WPN A C4 1
+HETATM 3823 C C5 . WPN E 3 . ? 33.713 19.379 15.499 1.00 22.34 ? 301 WPN A C5 1
+HETATM 3824 C C6 . WPN E 3 . ? 32.590 18.589 14.865 1.00 22.18 ? 301 WPN A C6 1
+HETATM 3825 C C10 . WPN E 3 . ? 28.835 15.638 16.522 1.00 28.77 ? 301 WPN A C10 1
+HETATM 3826 C C11 . WPN E 3 . ? 29.849 15.235 15.670 1.00 23.81 ? 301 WPN A C11 1
+HETATM 3827 C C14 . WPN E 3 . ? 31.898 21.273 15.930 1.00 22.67 ? 301 WPN A C14 1
+HETATM 3828 C C12 . WPN E 3 . ? 30.309 16.126 14.719 1.00 23.97 ? 301 WPN A C12 1
+HETATM 3829 C C13 . WPN E 3 . ? 30.909 20.253 15.409 1.00 22.07 ? 301 WPN A C13 1
+HETATM 3830 C C7 . WPN E 3 . ? 29.762 17.386 14.622 1.00 22.63 ? 301 WPN A C7 1
+HETATM 3831 C C8 . WPN E 3 . ? 28.754 17.767 15.490 1.00 23.04 ? 301 WPN A C8 1
+HETATM 3832 C C9 . WPN E 3 . ? 28.271 16.885 16.439 1.00 23.70 ? 301 WPN A C9 1
+HETATM 3833 N N1 . WPN E 3 . ? 35.387 20.683 17.533 1.00 23.28 ? 301 WPN A N1 1
+HETATM 3834 N N2 . WPN E 3 . ? 31.489 19.418 14.350 1.00 22.94 ? 301 WPN A N2 1
+HETATM 3835 O O1 . WPN E 3 . ? 36.863 21.139 15.843 1.00 20.63 ? 301 WPN A O1 1
+HETATM 3836 O O2 . WPN E 3 . ? 29.334 19.434 13.113 1.00 24.69 ? 301 WPN A O2 1
+HETATM 3837 O O3 . WPN E 3 . ? 31.111 17.846 12.478 1.00 27.32 ? 301 WPN A O3 1
+HETATM 3838 S S1 . WPN E 3 . ? 30.382 18.552 13.485 1.00 25.26 ? 301 WPN A S1 1
+HETATM 3839 BR BR1 . WPN E 3 . ? 28.192 14.461 17.876 1.00 44.92 ? 301 WPN A BR1 1
+HETATM 3844 C C1 . WPN J 3 . ? -12.912 36.271 22.078 1.00 25.69 ? 301 WPN J C1 1
+HETATM 3845 C C2 . WPN J 3 . ? -14.314 35.610 21.962 1.00 27.25 ? 301 WPN J C2 1
+HETATM 3846 C C3 . WPN J 3 . ? -10.492 35.812 22.175 1.00 24.08 ? 301 WPN J C3 1
+HETATM 3847 C C4 . WPN J 3 . ? -9.834 35.086 23.344 1.00 23.38 ? 301 WPN J C4 1
+HETATM 3848 C C5 . WPN J 3 . ? -8.347 35.456 23.388 1.00 25.59 ? 301 WPN J C5 1
+HETATM 3849 C C6 . WPN J 3 . ? -7.648 34.919 24.629 1.00 24.98 ? 301 WPN J C6 1
+HETATM 3850 C C10 . WPN J 3 . ? -7.005 31.013 28.150 1.00 39.48 ? 301 WPN J C10 1
+HETATM 3851 C C11 . WPN J 3 . ? -6.165 31.606 27.225 1.00 30.66 ? 301 WPN J C11 1
+HETATM 3852 C C14 . WPN J 3 . ? -10.516 35.414 24.656 1.00 26.44 ? 301 WPN J C14 1
+HETATM 3853 C C12 . WPN J 3 . ? -6.326 32.948 26.950 1.00 28.46 ? 301 WPN J C12 1
+HETATM 3854 C C13 . WPN J 3 . ? -9.759 34.893 25.866 1.00 27.40 ? 301 WPN J C13 1
+HETATM 3855 C C7 . WPN J 3 . ? -7.291 33.671 27.610 1.00 29.27 ? 301 WPN J C7 1
+HETATM 3856 C C8 . WPN J 3 . ? -8.132 33.071 28.512 1.00 28.15 ? 301 WPN J C8 1
+HETATM 3857 C C9 . WPN J 3 . ? -7.980 31.729 28.798 1.00 29.92 ? 301 WPN J C9 1
+HETATM 3858 N N1 . WPN J 3 . ? -11.888 35.430 21.978 1.00 23.08 ? 301 WPN J N1 1
+HETATM 3859 N N2 . WPN J 3 . ? -8.361 35.381 25.838 1.00 28.37 ? 301 WPN J N2 1
+HETATM 3860 O O1 . WPN J 3 . ? -12.778 37.497 22.214 1.00 27.53 ? 301 WPN J O1 1
+HETATM 3861 O O2 . WPN J 3 . ? -6.291 35.999 27.015 1.00 27.52 ? 301 WPN J O2 1
+HETATM 3862 O O3 . WPN J 3 . ? -8.387 35.912 28.260 1.00 30.83 ? 301 WPN J O3 1
+HETATM 3863 S S1 . WPN J 3 . ? -7.534 35.352 27.256 1.00 29.23 ? 301 WPN J S1 1
+HETATM 3864 BR BR1 . WPN J 3 . ? -6.829 29.158 28.542 1.00 88.37 ? 301 WPN J BR1 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale1 covale one ? A CYS 43 SG ? ? ? 1_555 E WPN . C2 ? ? A CYS 38 A WPN 301 1_555 ? ? ? ? ? ? ? 1.947 ? ?
