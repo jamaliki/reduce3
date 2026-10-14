@@ -70,15 +70,46 @@ fn absent_bonds_or_changed_geometry_cannot_supply_a_frame() {
 
 #[test]
 fn other_types_removed_heavy_refs_and_invalid_indices_keep_the_guard() {
-    for fault in 0..4 {
-        let (st, mut coef, map, mut old_h, bonds) = fixture(false);
+    for fault in 0..7 {
+        let (mut st, mut coef, map, mut old_h, bonds) = fixture(false);
         match fault {
-            0 => coef.htype = HType::Prop,
+            0 => coef.htype = HType::Alg1a,
             1 => old_h[4] = false,
             2 => coef.a2 = 99,
-            _ => coef.a0 = 4,
+            3 => coef.a0 = 4,
+            _ => {
+                coef.htype = HType::Prop;
+                st.atom_mut(st.atom_paths()[0]).element = ["N", "O", "S"][fault - 4].into();
+            }
         }
         assert!(project(&st, coef, &map, &old_h, &bonds).is_err(), "fault {fault}");
+    }
+}
+
+#[test]
+fn carbon_prop_keeps_each_methyl_index_and_shared_torsion_phase() {
+    let mut phases = Vec::new();
+    for n in 0..3 {
+        let (mut st, mut coef, map, old_h, bonds) = fixture(true);
+        st.atom_mut(st.atom_paths()[0]).element = "C".into();
+        coef.htype = HType::Prop;
+        coef.n = n;
+        let paths = st.atom_paths();
+        let mut original_sites = paths.iter().map(|&p| st.atom(p).xyz).collect::<Vec<_>>();
+        original_sites.push(v3(-1., 0., 1.));
+        st.atom_mut(paths[3]).xyz = compute_h_position(&coef, &original_sites).unwrap();
+        let before = format!("{st:?}");
+        let rebased = project(&st, coef, &map, &old_h, &bonds).unwrap();
+        assert_eq!(rebased.htype, HType::Prop);
+        assert_eq!(rebased.n, n);
+        let sites = paths.iter().map(|&p| st.atom(p).xyz).collect::<Vec<_>>();
+        assert!(compute_h_position(&rebased, &sites).unwrap().dist(sites[3]) < 1e-12);
+        assert_eq!(format!("{st:?}"), before);
+        phases.push(rebased.b);
+    }
+    for phase in &phases {
+        let delta = (phase - phases[0]).rem_euclid(2. * std::f64::consts::PI);
+        assert!(delta < 1e-12 || (delta - 2. * std::f64::consts::PI).abs() < 1e-12);
     }
 }
 
@@ -152,5 +183,43 @@ fn exact_bjm_imine_and_hse_hydroxyl_keep_placed_sites_and_dictionary_restraints(
         assert_eq!(format!("{:?}", placed.dict[hi].comp.as_ref().unwrap()), dictionary);
         let sites = paths.iter().map(|&p| st.atom(p).xyz).collect::<Vec<_>>();
         assert!(compute_h_position(&rebased, &sites).unwrap().dist(atom.xyz) < 1e-9);
+    }
+}
+
+#[test]
+fn exact_5j2u_n_methyl_keeps_three_h_sites_and_joint_phase() {
+    let ml = MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap();
+    let mut st = crate::mmcif::read_mmcif(include_str!("../../../../tests/data/frame_5j2u.cif")).unwrap();
+    let policy = Policy::read(&st, &ml, &crate::Params { stop_on_any_missing_hydrogen: true,
+        allow_unresolved_bond_targets: true, ..crate::Params::default() }).unwrap();
+    let mut placed = crate::hplace::place_hydrogens(&mut st, &ml, &crate::hplace::HPlaceParams {
+        neutron: false, n_terminal_charge: crate::hplace::NTermCharge::ResidueOne,
+        exclude_water: true, keep_existing_h: false, adp_scale: 1.0, compat: false, cell: None,
+    });
+    let paths = st.atom_paths();
+    let indices = ["H49", "H50", "H51"].map(|name| paths.iter().position(|&p|
+        st.atom_group(p).resname == "3WT" && st.atom(p).name.trim() == name).unwrap());
+    let original = indices.map(|i| placed.riding[i].unwrap());
+    assert_eq!(original.map(|c| c.n), [2, 0, 1]);
+    assert!(original.iter().all(|c| c.htype == HType::Prop && c.a2 == u32::MAX as i64));
+    let dictionary = std::sync::Arc::clone(placed.dict[indices[0]].comp.as_ref().unwrap());
+    assert!(dictionary.bonds.iter().any(|bond| [bond.a1.as_str(), bond.a2.as_str()] == ["N", "C25"]
+        && ["single", "SING", "sing"].contains(&bond.type_.as_str())));
+    let before = format!("{st:?}");
+    let bonds = placed.bonds.clone();
+    let reports = interp::target_uncertainty::inspect(&st, &placed.bonds);
+    assert!(!reports.is_empty() && reports.iter().all(|r| !r.hydrogens_unknown));
+    assert!(prepare(&policy, &mut st, &mut placed, &reports, &ml).unwrap().is_empty());
+    assert_eq!(format!("{st:?}"), before);
+    assert_eq!(placed.bonds, bonds);
+    let sites = paths.iter().map(|&p| st.atom(p).xyz).collect::<Vec<_>>();
+    let actual = indices.map(|i| placed.riding[i].unwrap());
+    for ((index, old), coef) in indices.into_iter().zip(original).zip(actual) {
+        assert_eq!(st.atom(paths[coef.a2 as usize]).name.trim(), "CA");
+        assert_eq!((coef.htype, coef.n, coef.a, coef.h, coef.disth), (old.htype, old.n, old.a, old.h, old.disth));
+        assert!(compute_h_position(&coef, &sites).unwrap().dist(sites[index]) < 1e-9);
+        assert!(std::sync::Arc::ptr_eq(&dictionary, placed.dict[index].comp.as_ref().unwrap()));
+        let phase = (coef.b - actual[0].b).rem_euclid(2. * std::f64::consts::PI);
+        assert!(phase < 1e-12 || (phase - 2. * std::f64::consts::PI).abs() < 1e-12);
     }
 }

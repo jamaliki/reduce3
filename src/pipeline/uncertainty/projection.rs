@@ -35,12 +35,17 @@ fn projected_riding(coef: RidingCoef, st: &Structure, paths: &[AtomPath], sites:
     let removed_h = coef.a2 == u32::MAX as i64 || (coef.a2 >= 0
         && old_hydrogens.get(coef.a2 as usize) == Some(&true)
         && map.get(coef.a2 as usize) == Some(&u32::MAX));
-    if !removed_h || coef.htype != HType::Alg1b || coef.a3 >= 0 { return riding(coef, map); }
+    if !removed_h || !matches!(coef.htype, HType::Alg1b | HType::Prop) || coef.a3 >= 0 { return riding(coef, map); }
     let (hydrogen, parent, axis) = (mapped(map, coef.ih)?, mapped(map, coef.a0)?, mapped(map, coef.a1)?);
     let (h, p, a) = (st.atom(paths[hydrogen as usize]), st.atom(paths[parent as usize]), st.atom(paths[axis as usize]));
     let alt = |index: u32| &st.atom_group(paths[index as usize]).altloc;
     let compatible = |first, second| alt(first).is_empty() || alt(second).is_empty() || alt(first) == alt(second);
-    if !h.is_hydrogen() || !matches!(p.elem(), "N" | "O" | "S") || p.src == Atom::NEW || a.src == Atom::NEW
+    let supported_parent = match coef.htype {
+        HType::Alg1b => matches!(p.elem(), "N" | "O" | "S"),
+        HType::Prop => p.elem() == "C",
+        _ => false,
+    };
+    if !h.is_hydrogen() || !supported_parent || p.src == Atom::NEW || a.src == Atom::NEW
         || paths[hydrogen as usize].model != paths[parent as usize].model
         || paths[axis as usize].model != paths[parent as usize].model || !compatible(parent, axis)
         || a.is_hydrogen() || !bonds.iter().any(|&(x, y, _)| (x, y) == (coef.a0, coef.a1) || (y, x) == (coef.a0, coef.a1)) {
