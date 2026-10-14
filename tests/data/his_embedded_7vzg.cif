@@ -1,0 +1,66 @@
+data_default
+loop_
+  _struct_asym.id
+   A
+   B
+   C
+   D
+
+loop_
+  _chem_comp.id
+   ASN
+   BCL
+   CLA
+   HIS
+   LEU
+   VAL
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   ATOM 1 C . ASN A 361 ? 120.92500 118.07300 94.62300 1.000 4.00000 C ? A ? 1 C 1
+   ATOM 2 N . HIS A 362 ? 121.82800 118.46200 93.76600 1.000 4.00000 N ? A ? 2 N 1
+   ATOM 3 CA . HIS A 362 ? 122.74400 117.72900 92.99700 1.000 4.00000 C ? A ? 2 CA 1
+   ATOM 4 C . HIS A 362 ? 123.79400 117.09700 93.81900 1.000 4.00000 C ? A ? 2 C 1
+   ATOM 5 O . HIS A 362 ? 124.11400 116.09700 93.55200 1.000 4.00000 O ? A ? 2 O 1
+   ATOM 6 CB . HIS A 362 ? 123.28900 118.38500 91.75200 1.000 4.00000 C ? A ? 2 CB 1
+   ATOM 7 CG . HIS A 362 ? 122.30000 118.44700 90.66000 1.000 4.00000 C ? A ? 2 CG 1
+   ATOM 8 ND1 . HIS A 362 ? 122.02500 119.57300 89.97900 1.000 4.00000 N ? A ? 2 ND1 1
+   ATOM 9 CD2 . HIS A 362 ? 121.49700 117.51400 90.14500 1.000 4.00000 C ? A ? 2 CD2 1
+   ATOM 10 CE1 . HIS A 362 ? 121.10500 119.35000 89.10500 1.000 4.00000 C ? A ? 2 CE1 1
+   ATOM 11 NE2 . HIS A 362 ? 120.72900 118.11600 89.22200 1.000 4.00000 N ? A ? 2 NE2 1
+   ATOM 12 N . VAL A 363 ? 124.27100 117.73400 94.84100 1.000 4.00000 N ? A ? 3 N 1
+   ATOM 13 C . ASN a 774 ? 131.31300 130.65000 128.79100 1.000 4.00000 C ? B ? 1 C 1
+   ATOM 14 N . HIS a 775 ? 130.89100 130.50500 130.00500 1.000 4.00000 N ? B ? 2 N 1
+   ATOM 15 CA . HIS a 775 ? 131.13100 129.29400 130.68800 1.000 4.00000 C ? B ? 2 CA 1
+   ATOM 16 C . HIS a 775 ? 129.98200 128.43900 130.38000 1.000 4.00000 C ? B ? 2 C 1
+   ATOM 17 O . HIS a 775 ? 130.15700 127.32400 130.15800 1.000 4.00000 O ? B ? 2 O 1
+   ATOM 18 CB . HIS a 775 ? 131.28900 129.53900 132.13300 1.000 4.00000 C ? B ? 2 CB 1
+   ATOM 19 CG . HIS a 775 ? 131.04400 128.36000 132.97800 1.000 4.00000 C ? B ? 2 CG 1
+   ATOM 20 ND1 . HIS a 775 ? 130.20300 128.39300 134.05300 1.000 4.00000 N ? B ? 2 ND1 1
+   ATOM 21 CD2 . HIS a 775 ? 131.56200 127.12900 132.94800 1.000 4.00000 C ? B ? 2 CD2 1
+   ATOM 22 CE1 . HIS a 775 ? 130.16700 127.21100 134.60800 1.000 4.00000 C ? B ? 2 CE1 1
+   ATOM 23 NE2 . HIS a 775 ? 131.00900 126.43400 133.97700 1.000 4.00000 N ? B ? 2 NE2 1
+   ATOM 24 N . LEU a 776 ? 128.78900 128.95800 130.25600 1.000 4.00000 N ? B ? 3 N 1
+   HETATM 25 MG . BCL A 909 ? 119.13400 117.16300 87.60500 1.000 32.43000 MG ? C ? . MG 1
+   HETATM 26 NA . BCL A 909 ? 117.68800 118.73000 87.96700 1.000 32.43000 N ? C ? . NA 1
+   HETATM 27 MG . CLA a 915 ? 132.14600 124.34200 134.70300 1.000 20.00000 MG ? D ? . MG 1
+   HETATM 28 NA . CLA a 915 ? 133.28200 125.63500 135.88600 1.000 20.00000 N ? D ? . NA 1
