@@ -7,6 +7,9 @@ use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 use crate::resclass::{self, ResClass};
 
+mod endpoints;
+pub(crate) use endpoints::EndpointResolver;
+
 #[derive(Clone, Debug)]
 pub struct Atom {
     /// Atom name as stored by iotbx: the 4-column PDB field for PDB input

@@ -1,9 +1,5 @@
 use super::*;
 
-fn matches(st: &Structure, flat: &FlatAtoms, i: u32, atom: &AtomLabel) -> bool {
-    atom.matches(st, flat.path[i as usize])
-}
-
 fn residue(flat: &FlatAtoms, i: u32) -> (u32, u32, u32) {
     let p = flat.path[i as usize];
     (p.model, p.chain, p.rg)
@@ -32,14 +28,16 @@ pub(super) fn tertiary_amide_h(it: &Interp, st: &Structure, flat: &FlatAtoms, h:
 
 pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms,
     bond_order: &impl Fn(&Comp, &crate::monlib::CompBond, &str) -> Option<u8>) -> Vec<(u32, u32, String)> {
+    if !st.links.iter().any(|link| link.kind == "covale") { return Vec::new(); }
+    let resolver = EndpointResolver::new(st, &flat.path);
     let mut pairs = Vec::new();
     let mut annotated = FxHashSet::default();
     for link in &st.links {
         if link.kind != "covale" {
             continue;
         }
-        let first: Vec<u32> = (0..flat.pos.len() as u32).filter(|&i| matches(st, flat, i, &link.atom1)).collect();
-        let second: Vec<u32> = (0..flat.pos.len() as u32).filter(|&i| matches(st, flat, i, &link.atom2)).collect();
+        let first: Vec<u32> = resolver.matching_indices(&link.atom1).collect();
+        let second: Vec<u32> = resolver.matching_indices(&link.atom2).collect();
         annotated.extend(first.iter().chain(&second).copied());
         if link.order.as_deref().is_some_and(|v| !v.eq_ignore_ascii_case("sing") && !v.eq_ignore_ascii_case("single")) {
             continue;

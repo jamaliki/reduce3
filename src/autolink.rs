@@ -1108,11 +1108,12 @@ fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
 
 /// Keep unique records for custom-link guards and resolved records for peptide links.
 fn declared_covalent_pairs(st: &Structure, flat: &FlatAtoms) -> (FxHashSet<(u32, u32)>, FxHashSet<(u32, u32)>) {
+    if !st.links.iter().any(|link| link.kind == "covale") { return (FxHashSet::default(), FxHashSet::default()); }
+    let resolver = EndpointResolver::new(st, &flat.path);
     let mut pairs = FxHashMap::default();
     for link in &st.links {
         if link.kind != "covale" { continue; }
-        let matches = |label: &AtomLabel| (0..flat.pos.len() as u32)
-            .filter(|&i| label.matches(st, flat.path[i as usize])).collect::<Vec<_>>();
+        let matches = |label: &AtomLabel| resolver.matching_indices(label).collect::<Vec<_>>();
         let (first, second) = (matches(&link.atom1), matches(&link.atom2));
         let ([i], [j]) = (&first[..], &second[..]) else { continue };
         let (a, b) = (flat.path[*i as usize], flat.path[*j as usize]);

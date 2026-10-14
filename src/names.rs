@@ -3,19 +3,21 @@
 //! mmtbx.monomer_library.pdb_interpretation.monomer_mapping).
 
 use crate::monlib::Comp;
-use crate::model::{AtomPath, Structure};
+use crate::model::{AtomPath, EndpointResolver, Structure};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::OnceLock;
 
 /// Resolve deposited covalent endpoints without deciding whether their bonds are valid.
 pub(crate) fn declared_covalent_anchors(st: &Structure) -> FxHashSet<AtomPath> {
+    if !st.links.iter().any(|link| link.kind == "covale") { return FxHashSet::default(); }
     let paths = st.atom_paths();
+    let resolver = EndpointResolver::new(st, &paths);
     let mut anchors = FxHashSet::default();
     for link in &st.links {
         if link.kind != "covale" { continue; }
         for model in 0..st.models.len() as u32 {
-            let matches = |label: &crate::model::AtomLabel| paths.iter().copied()
-                .filter(|&p| p.model == model && label.matches(st, p)).collect::<Vec<_>>();
+            let matches = |label: &crate::model::AtomLabel| resolver.matching_indices(label)
+                .map(|i| paths[i as usize]).filter(|p| p.model == model).collect::<Vec<_>>();
             let (first, second) = (matches(&link.atom1), matches(&link.atom2));
             let ([a], [b]) = (&first[..], &second[..]) else { continue };
             let (left, right) = (st.atom(*a), st.atom(*b));

@@ -1,7 +1,7 @@
 //! Report deposited bonds whose targets lack a supported chemical environment.
 
 use super::{FlatAtoms, ORIGIN_COVALENT};
-use crate::model::{Atom, AtomLabel, Structure};
+use crate::model::{Atom, AtomLabel, EndpointResolver, Structure};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Why a deposited bond cannot supply a full chemical-state target.
@@ -82,8 +82,9 @@ fn add(result: &mut FxHashMap<u32, BondUncertainty>, st: &Structure, flat: &Flat
 fn deposited_pairs(st: &Structure, flat: &FlatAtoms,
     result: &mut FxHashMap<u32, BondUncertainty>) -> FxHashSet<(u32, u32)> {
     let mut pairs = FxHashSet::default();
-    let matches = |label: &AtomLabel| flat.path.iter().enumerate()
-        .filter_map(|(index, &p)| label.matches(st, p).then_some(index as u32)).collect::<Vec<_>>();
+    if !st.links.iter().any(|link| matches!(link.kind.as_str(), "covale" | "disulf")) { return pairs; }
+    let resolver = EndpointResolver::new(st, &flat.path);
+    let matches = |label: &AtomLabel| resolver.matching_indices(label).collect::<Vec<_>>();
     for link in st.links.iter().filter(|link| matches!(link.kind.as_str(), "covale" | "disulf")) {
         let (first, second) = (matches(&link.atom1), matches(&link.atom2));
         let ([a], [b]) = (&first[..], &second[..]) else {
@@ -202,6 +203,33 @@ pub fn add_degenerate_heavy_bonds(st: &Structure, bonds: &[(u32, u32, u16)],
     }
     *reports = result.into_values().collect();
     reports.sort_by_key(|report| report.parent_source);
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use crate::model::LinkRecord;
+
+    #[test]
+    fn absent_or_unrelated_links_leave_existing_uncertainties_unchanged() {
+        let mut st = crate::mmcif::read_mmcif(concat!("data_no_links\nloop_\n",
+            "_atom_site.type_symbol\n_atom_site.label_atom_id\n_atom_site.label_alt_id\n_atom_site.auth_comp_id\n",
+            "_atom_site.auth_asym_id\n_atom_site.auth_seq_id\n",
+            "_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n",
+            "_atom_site.occupancy\n_atom_site.B_iso_or_equiv\nS SG . CYS A 1 0 0 0 1 10\n")).unwrap();
+        let flat = FlatAtoms::from_structure(&st);
+        let expected: FxHashMap<_, _> = [(7, BondUncertainty { parent_source: 7,
+            hydrogens_unknown: false, reason: BondUncertaintyReason::UninterpretedBond })].into_iter().collect();
+        let label = AtomLabel { name: "SG".into(), resname: "CYS".into(), chain: "A".into(),
+            resseq: "1".into(), icode: "".into(), altloc: "".into() };
+        for kind in [None, Some("metalc"), Some("hydrog")] {
+            st.links = kind.into_iter().map(|kind| LinkRecord { atom1: label.clone(), atom2: label.clone(),
+                distance: None, order: None, kind: kind.into() }).collect();
+            let mut result = expected.clone();
+            assert!(deposited_pairs(&st, &flat, &mut result).is_empty());
+            assert_eq!(result, expected);
+        }
+    }
 }
 
 /// Retain observed CYS HG on an exact accepted, deposited external SG bond.
