@@ -839,7 +839,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     // ---------------- prochiral naming, links, esterified O
     let mut name_done: FxHashSet<u32> = FxHashSet::default();
     name_prochiral_h(st, ml, &w, &[2], &mut name_done, &replacements);
-    removed_on_links.extend(exclude_h_on_links(st, ml, &mut w, &it));
+    removed_on_links.extend(exclude_h_on_links(st, ml, &mut w, &it, &mut coefs, p.compat));
     exclude_h_on_esterified_o(&mut w, &it);
     name_prochiral_h(st, ml, &w, &[3], &mut name_done, &replacements);
     // write back any positions changed by exclude_h_on_links
@@ -1268,7 +1268,8 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
 
 /// `exclude_H_on_links`: drop H on atoms that take part in a link (bond with
 /// origin != 0) when the parent's valence is exceeded.
-fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp) -> Vec<(String, String)> {
+fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp,
+    coefs: &mut [Option<riding::RidingCoef>], compat: bool) -> Vec<(String, String)> {
     let n = w.flat.pos.len();
     // live bond proxies in cctbx order (sorted by i, then j)
     let mut live: Vec<(u32, u32, f64, u16)> = it
@@ -1452,6 +1453,11 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
             let s = if siblings.iter().position(|&x| x == h) == Some(0) { 1.0 } else { -1.0 };
             let d = anti * beta.cos() + perp * (s * beta.sin());
             w.flat.pos[h as usize] = coordp + d.normalize() * bond_len.get(&h).copied().unwrap_or(1.0);
+            // The old three-H torsion no longer applies to this two-heavy placement.
+            if !compat && fn_filtered.iter().all(|&index| !w.flat.is_h[index as usize])
+                && coefs[h as usize].is_some_and(|coef| coef.htype == riding::HType::Prop && coef.a0 == parent) {
+                coefs[h as usize] = None;
+            }
             continue;
         }
         if n_kept > 1 {

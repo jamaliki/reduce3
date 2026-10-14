@@ -1,6 +1,8 @@
 use super::*;
 use crate::geom::{v3, Vec3};
 
+mod linked_products;
+
 fn fixture(observed: bool) -> (Structure, RidingCoef, Vec<u32>, Vec<bool>, Vec<(u32, u32, u16)>) {
     let mut st = crate::mmcif::read_mmcif(concat!(
         "data_frame\nloop_\n_atom_site.type_symbol\n_atom_site.label_atom_id\n_atom_site.label_alt_id\n",
