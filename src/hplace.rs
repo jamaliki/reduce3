@@ -11,6 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 mod linked;
+pub mod terminal;
 #[cfg(test)]
 mod linked_tests;
 
@@ -272,7 +273,8 @@ fn construct_xyz(n: Vec3, bv: f64, ca: Vec3, av: f64, c: Vec3, dv: f64) -> [Vec3
     out
 }
 
-fn place_n_terminal_propeller(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) {
+fn place_n_terminal_propeller(st: &mut Structure, ml: &MonLib, p: &HPlaceParams,
+    auto_comps: &mut FxHashMap<String, Arc<Comp>>) {
     if p.n_terminal_charge == NTermCharge::NoCharge {
         return;
     }
@@ -316,6 +318,9 @@ fn place_n_terminal_propeller(st: &mut Structure, ml: &MonLib, p: &HPlaceParams)
             for (_, members) in by_alt {
                 let find = |nm: &str| members.iter().copied().find(|&(g, k)| rg.atom_groups[g].atoms[k].name.trim() == nm);
                 let (Some(np), Some(cap), Some(cp)) = (find("N"), find("CA"), find("C")) else { continue };
+                if !p.compat && terminal::place(rg, &members, np, cap, cp, ml, auto_comps) {
+                    continue;
+                }
                 let gi = np.0;
                 let ag = &rg.atom_groups[gi];
                 let n_atom = ag.atoms[np.1].clone();
@@ -388,6 +393,7 @@ fn place_n_terminal_propeller(st: &mut Structure, ml: &MonLib, p: &HPlaceParams)
 /// group is tested on its own geometry (the original flips every atom group
 /// of a residue once any one of them needs it).
 fn flip_symmetric_amino_acids(st: &mut Structure, per_atom_group: bool) {
+    let anchors = if per_atom_group { names::declared_covalent_anchors(st) } else { FxHashSet::default() };
     struct FlipData {
         dihedral: Option<[&'static str; 4]>,
         chiral: Option<[&'static str; 4]>,
@@ -412,11 +418,11 @@ fn flip_symmetric_amino_acids(st: &mut Structure, per_atom_group: bool) {
             _ => return None,
         })
     };
-    for m in &mut st.models {
-        for c in &mut m.chains {
-            for rg in &mut c.residue_groups {
+    for (model, m) in st.models.iter_mut().enumerate() {
+        for (chain, c) in m.chains.iter_mut().enumerate() {
+            for (residue, rg) in c.residue_groups.iter_mut().enumerate() {
                 let mut flip_it = false;
-                for ag in &mut rg.atom_groups {
+                for (group, ag) in rg.atom_groups.iter_mut().enumerate() {
                     let Some(fd) = data(ag.resname.as_str()) else { continue };
                     if per_atom_group {
                         flip_it = false;
@@ -459,7 +465,11 @@ fn flip_symmetric_amino_acids(st: &mut Structure, per_atom_group: bool) {
                                 }
                             }
                         }
-                        if incomplete {
+                        let moves_anchor = swaps.iter().any(|&(x, y)| [x, y].iter().any(|&atom| anchors.contains(&AtomPath {
+                            model: model as u32, chain: chain as u32, rg: residue as u32,
+                            ag: group as u32, atom: atom as u32,
+                        })));
+                        if incomplete || moves_anchor {
                             swaps.clear();
                         }
                         for (x, y) in swaps {
@@ -692,7 +702,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let mut no_h_placed = Vec::new();
     let mut auto_comps: FxHashMap<String, Arc<Comp>> = FxHashMap::default();
     add_missing_h(st, ml, p, &mut no_h_placed, &mut auto_comps);
-    place_n_terminal_propeller(st, ml, p);
+    place_n_terminal_propeller(st, ml, p, &mut auto_comps);
     st.sort_atoms_in_place();
     st.reset_serial();
     st.reset_i_seq();
