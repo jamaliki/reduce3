@@ -8,6 +8,7 @@ use std::f64::consts::PI;
 
 #[cfg(test)]
 mod plane_tests;
+mod planar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HType {
@@ -469,7 +470,8 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             continue;
         }
         let r = if nb.nnonh == 2 {
-            process_2(&nb, &conn, sites, &mut coef, at.use_plane_restraints)
+            process_2(&nb, &conn, sites, &mut coef, at.use_plane_restraints,
+                &|| planar::dictionary_carbon(it, at, &fsc0, &nb))
         } else if nb.nnonh == 3 && nb.nh == 0 {
             process_3(&nb, sites, &mut coef)
         } else if nb.nnonh == 1 && (nb.nh == 0 || nb.nh == 2) {
@@ -701,7 +703,7 @@ fn process_1_arg(
     Ok(())
 }
 
-fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>], use_plane_restraints: bool) -> Result<(), ()> {
+fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>], use_plane_restraints: bool, dictionary_plane: &dyn Fn() -> bool) -> Result<(), ()> {
     let _ = conn;
     let ih = nb.ih;
     let (i_a0, disth) = nb.a0.ok_or(())?;
@@ -729,7 +731,8 @@ fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<Ri
     let root = 1.0 - c1 * c1 - c2 * c2 - c0 * c0 + 2.0 * c0 * c1 * c2;
     let mut h = 0.0;
     let htype;
-    if use_plane_restraints && nb.explicit_plane && nb.nh == 0 && sumang > 2.0 * PI + 0.05 && root < 0.0 {
+    if use_plane_restraints && nb.nh == 0 && sumang > 2.0 * PI + 0.05 && root < 0.0
+        && (nb.explicit_plane || dictionary_plane()) {
         htype = HType::Flat2;
     } else if sumang > 2.0 * PI + 0.05 && root < 0.0 {
         return Err(());

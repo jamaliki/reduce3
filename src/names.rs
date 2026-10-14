@@ -303,6 +303,10 @@ pub fn rna_dna_mon_lib_name(resname: &str, has_o2: bool) -> Option<&'static str>
 pub fn na_reference_name(name: &str) -> String {
     let n = name.trim().to_ascii_uppercase();
     let fixed = match n.as_str() {
+        "C5M" => "C7".to_string(),
+        "H5M1" => "H71".to_string(),
+        "H5M2" => "H72".to_string(),
+        "H5M3" => "H73".to_string(),
         "O1P" => "OP1".to_string(),
         "O2P" => "OP2".to_string(),
         "O3P" => "OP3".to_string(),
