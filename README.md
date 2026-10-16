@@ -485,11 +485,12 @@ The two in-plane orientations are always among the positions tried. Both terms a
 units and are scaled by `preference_magnitude`, like the flip preference, and the report's Mover
 scores include them. For scale, the middle half of hydrogen-bonded tyrosine hydroxyl Movers score
 4.4 to 13.9, and of those without a hydrogen bond 0.04 to 1.75. So the preferences settle
-orientations that only contacts would decide, and a hydrogen bond out of the plane still wins. On
-the same 600 entries the share of non-hydrogen-bonded tyrosine hydroxyls 60 degrees or more from
+orientations that only contacts would decide. Before the geometry guard below, a hydrogen bond
+out of the plane could still win. In the earlier soft-preference-only screen of 600 entries,
+the share of non-hydrogen-bonded tyrosine hydroxyls 60 degrees or more from
 the plane fell from 34% to 5.5%. The share of tyrosine hydroxyls with a hydrogen-bond partner went
 from 54.3% to 55.3%, since the in-plane positions are now tried even when no coarse step lands on
-them.
+them. These counts do not describe the new geometry guard.
 
 Carboxylic acids rarely carry a hydrogen: Asp, Glu and C-termini are placed as carboxylates, and
 fixed mode builds CCD-only residues at physiological protonation. In 20,000 random entries an acid
@@ -497,7 +498,23 @@ hydrogen appeared in 7 (mercuribenzoic acid and bicarbonate). With nothing aroun
 hydrogen of mercuribenzoic acid goes from 151 degrees (near anti, and out of the plane) to syn
 (`tests/hydroxyl_orientation.rs`). Thiols and
 hydroxyls on tetrahedral atoms (Ser, Thr) have no preference, as in Reduce2. Compat mode never
-applies these preferences, and setting both to 0 gives the same output as before they existed.
+applies these preferences. Setting both to 0 disables the score preferences but keeps fixed-mode
+geometry checks.
+
+Fixed mode also limits a conjugated O-H hydrogen to 0.12 A from each local plane defined by
+O, its planar three-coordinate partner, and either of that partner's other neighbors. Contact
+scoring chooses among poses that meet this limit. Both coarse and fine poses obey it, and an
+independent check rejects an output that exceeds it. The report states how many sites it checked.
+Ordinary alcohols and thiols remain freely rotatable. Compatibility mode has no such limit.
+
+This guard follows Mechazyme's topology-derived proton-plane restraint and separate validation,
+with a wider limit than its 0.08 A gate. It is a conservative geometry policy, not an energy model
+or a universal experimental bound. The checked Tyr164 deuterium in the related neutron structure
+[8E1W](https://doi.org/10.1107/S2053230X22011335) lies 0.089-0.100 A from its local planes.
+In 6TBR, the old score instead put TYR224 HH 0.53 A out of its local plane to improve its
+Gln222 contact. Removing the active zinc left that position unchanged. The O-H mover keeps its
+heavy atoms fixed and does not assign protonation states. The normal Asn/Gln/His flip search
+still applies when enabled.
 
 ## Known limitations
 

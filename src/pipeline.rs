@@ -501,6 +501,15 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
     let out = optimizer::optimize(&mut w, &models, &rotatable, &p.opt, n_models);
     crate::model::mem_checkpoint("optimizer: done");
     info += &out.info;
+    if !p.compat {
+        let selected: rustc_hash::FxHashSet<u32> = models.iter().flat_map(|model|
+            model.alts.iter().flat_map(|(_, atoms)| atoms.iter().copied())).collect();
+        let deleted: rustc_hash::FxHashSet<u32> = out.hydrogens_to_delete.iter().copied().collect();
+        let checked = crate::movers::hydroxyl::validate(&w, rotatable.iter().copied()
+            .filter(|h| selected.contains(h) && !deleted.contains(h)))?;
+        info += &format!("Validated {checked} conjugated O-H sites against the {:.2} A local-plane limit\n",
+            crate::movers::hydroxyl::MAX_HEIGHT);
+    }
     // write the coordinates back
     for (k, pth) in paths.iter().enumerate() {
         st.atom_mut(*pth).xyz = w.pos[k];

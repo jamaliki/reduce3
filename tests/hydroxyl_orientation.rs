@@ -101,3 +101,41 @@ fn without_the_preferences_the_acid_is_not_syn() {
     let acid = dihedral(&atoms, ["MBO OZ1", "MBO CZ", "MBO OZ2", "MBO HZ2"]).abs();
     assert!(acid > 90.0, "MBO HZ2 {acid} degrees from syn");
 }
+
+#[test]
+fn crowded_6tbr_tyr224_keeps_its_gln_contact_without_large_hydrogen_tilt() {
+    let Some(root) = MonLib::locate(None) else {
+        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
+        return;
+    };
+    let ml = MonLib::load(&root).unwrap();
+    let input = mmcif::read_mmcif(include_str!("data/6tbr_tyr224.cif")).unwrap();
+    let original = reduce3::world::World::from_structure(&input);
+    // Even an excessive contact reward cannot override the geometry guard.
+    for hydrogen_bond_weight in [4.0, 1000.0] {
+        let mut params = Params::default();
+        params.opt.add_flip_movers = false;
+        params.opt.planar_hydroxyl_preference = 0.;
+        params.opt.preference_magnitude = 0.;
+        params.opt.probe.hydrogen_bond_weight = hydrogen_bond_weight;
+        let out = pipeline::run(input.clone(), &ml, &params).unwrap();
+        assert!(out.description.contains("Validated 1 conjugated O-H sites"));
+        let w = reduce3::world::World::from_structure(&out.structure);
+        let position = |residue: &str, name: &str| {
+            let i = (0..w.len() as u32).find(|&i| w.resname(i) == residue && w.name(i) == name).unwrap();
+            w.pos[i as usize]
+        };
+        let (o, c, h, acceptor) = (position("TYR", "OH"), position("TYR", "CZ"),
+            position("TYR", "HH"), position("GLN", "OE1"));
+        for reference in ["CE1", "CE2"] {
+            let normal = (c - o).cross(position("TYR", reference) - o).normalize();
+            assert!((h - o).dot(normal).abs() <= 0.12 + 1e-8);
+        }
+        assert!((1.5..2.6).contains(&h.dist(acceptor)));
+        assert!((o - h).angle(acceptor - h).to_degrees() >= 120.0);
+        for i in 0..original.len() as u32 {
+            let after = position(original.resname(i), original.name(i));
+            assert!(after.dist(original.pos[i as usize]) < 1e-12);
+        }
+    }
+}

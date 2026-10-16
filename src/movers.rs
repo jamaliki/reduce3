@@ -9,7 +9,8 @@
 use crate::geom::*;
 use crate::probe::AtomInfo;
 use crate::world::World;
-use smallvec::SmallVec;
+pub(crate) mod hydroxyl;
+use hydroxyl::{PlanarHydroxyl, planar_hydroxyl};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MoverKind {
@@ -313,6 +314,8 @@ pub struct SingleHOptions {
     /// Rotate a hydrogen whose partner has any number of other bonds
     /// (S-OH, P-OH, a metal oxo-hydroxide); Reduce2 needs two or three.
     pub any_partner_valence: bool,
+    /// Keep conjugated O-H poses within the fixed-mode local-plane limit.
+    pub constrain_planar_hydroxyls: bool,
     /// Preference for a hydroxyl hydrogen on a planar, three-coordinate atom
     /// (a phenol, an enol, a carboxylic acid) to lie in that atom's plane;
     /// Reduce2 has none (0).
@@ -322,40 +325,13 @@ pub struct SingleHOptions {
     pub syn_preference: f64,
 }
 
-/// What defines a hydroxyl's preferred orientations: the oxygen's partner is
-/// three-coordinate and planar, so the hydrogen prefers the plane of `plane`
-/// (one of the partner's other neighbors), and syn to a `carbonyl` oxygen (a
-/// neighbor of the partner bonded to nothing else) when there is one.
-struct PlanarHydroxyl {
-    plane: u32,
-    carbonyl: SmallVec<[u32; 2]>,
-}
-
-/// Partners further than this from the plane of their three neighbors are not
-/// planar (an sp3 atom with three neighbors sits about 0.5 A out of it).
-const PLANAR_PARTNER_TOLERANCE: f64 = 0.2;
-
-fn planar_hydroxyl(w: &World, neighbor: u32, partner: u32, friends: &[u32]) -> Option<PlanarHydroxyl> {
-    if w.elem(neighbor) != "O" || friends.len() != 2 {
-        return None;
-    }
-    let (o, a, b) = (w.pos[neighbor as usize], w.pos[friends[0] as usize], w.pos[friends[1] as usize]);
-    let normal = (a - o).cross(b - o);
-    let len = normal.length();
-    if len < 1e-6 || ((w.pos[partner as usize] - o).dot(normal) / len).abs() > PLANAR_PARTNER_TOLERANCE {
-        return None;
-    }
-    let carbonyl = friends.iter().copied().filter(|&f| w.elem(f) == "O" && w.bonded[f as usize].len() == 1).collect();
-    Some(PlanarHydroxyl { plane: friends[0], carbonyl })
-}
-
 /// The preference of a hydroxyl hydrogen at `h`: `planar` times cos^2 of its
 /// dihedral to the plane (1 in the plane, 0 perpendicular), plus `syn` times
 /// (1 + cos)/2 of its dihedral to the nearest carbonyl oxygen (1 syn, 0 anti).
 fn planar_hydroxyl_preference(w: &World, r: &PlanarHydroxyl, h: Vec3, neighbor: u32, partner: u32, planar: f64, syn: f64) -> f64 {
     let (o, c) = (w.pos[neighbor as usize], w.pos[partner as usize]);
     let cos_to = |x: u32| dihedral_rad(h, o, c, w.pos[x as usize]).map(f64::cos).unwrap_or(0.0);
-    let mut pref = planar * cos_to(r.plane).powi(2);
+    let mut pref = planar * cos_to(r.planes[0]).powi(2);
     if let Some(best) = r.carbonyl.iter().map(|&x| cos_to(x)).reduce(f64::max) {
         pref += syn * (1.0 + best) / 2.0;
     }
@@ -450,11 +426,11 @@ pub fn single_hydrogen_rotator(
     sofar.extend(acceptor_angles);
     // A hydroxyl with a preferred plane also tries the two in-plane
     // orientations (syn to the carbonyl first, for an acid).
-    let planar = (opts.planar_preference != 0.0 || opts.syn_preference != 0.0)
+    let planar = (opts.constrain_planar_hydroxyls || opts.planar_preference != 0.0 || opts.syn_preference != 0.0)
         .then(|| planar_hydroxyl(w, neighbor, partner, &friends))
         .flatten();
     if let Some(r) = &planar {
-        let x = r.carbonyl.first().copied().unwrap_or(r.plane);
+        let x = r.carbonyl.first().copied().unwrap_or(r.planes[0]);
         if let Some(eclipsed) = dihedral_deg(w.pos[atom as usize], w.pos[partner as usize], w.pos[neighbor as usize], w.pos[x as usize]) {
             sofar.push(eclipsed);
             sofar.push(if eclipsed > 0.0 { eclipsed - 180.0 } else { eclipsed + 180.0 });
@@ -477,6 +453,11 @@ pub fn single_hydrogen_rotator(
         }
     }
     m.rot.as_mut().unwrap().coarse_angles = sofar;
+    if opts.constrain_planar_hydroxyls {
+        if let Some(r) = &planar {
+            hydroxyl::constrain_rotator(w, atom, r, m.rot.as_mut().unwrap())?;
+        }
+    }
     recompute_rotator_positions(w, &mut m, None, 1.0, true);
     if let Some(r) = &planar {
         let (pl, syn) = (opts.planar_preference, opts.syn_preference);

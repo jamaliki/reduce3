@@ -2974,6 +2974,7 @@ fn place_movers(
     let opts = SingleHOptions {
         circular_angle_spacing: !p.compat,
         any_partner_valence: !p.compat,
+        constrain_planar_hydroxyls: !p.compat,
         planar_preference: if p.compat { 0.0 } else { p.planar_hydroxyl_preference },
         syn_preference: if p.compat { 0.0 } else { p.acid_syn_preference },
     };
