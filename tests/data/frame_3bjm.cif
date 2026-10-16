@@ -1,0 +1,77 @@
+data_default
+loop_
+  _struct_asym.id
+   A
+   B
+
+loop_
+  _chem_comp.id
+   BJM
+   SER
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   ATOM 1 N . SER B 630 ? 69.23200 65.01400 65.16500 1.000 29.27000 N ? A ? 1 N 1
+   ATOM 2 CA . SER B 630 ? 68.91900 66.44600 65.05700 1.000 30.12000 C ? A ? 1 CA 1
+   ATOM 3 C . SER B 630 ? 70.14700 67.29000 64.71700 1.000 30.19000 C ? A ? 1 C 1
+   ATOM 4 O . SER B 630 ? 70.69300 67.17600 63.61800 1.000 29.22000 O ? A ? 1 O 1
+   ATOM 5 CB . SER B 630 ? 68.29100 66.96100 66.35900 1.000 33.38000 C ? A ? 1 CB 1
+   ATOM 6 OG . SER B 630 ? 67.90800 68.31900 66.11200 1.000 35.74000 O ? A ? 1 OG 1
+   HETATM 7 C1 . BJM B 2 ? 66.44300 72.41500 71.09900 1.000 27.44000 C ? B ? . C1 1
+   HETATM 8 C2 . BJM B 2 ? 65.88700 72.69600 69.64900 1.000 27.86000 C ? B ? . C2 1
+   HETATM 9 C3 . BJM B 2 ? 67.94700 72.13900 71.02100 1.000 27.99000 C ? B ? . C3 1
+   HETATM 10 C8 . BJM B 2 ? 68.55900 71.96000 72.41900 1.000 30.38000 C ? B ? . C8 1
+   HETATM 11 C9 . BJM B 2 ? 66.81600 73.46300 73.40400 1.000 27.46000 C ? B ? . C9 1
+   HETATM 12 C10 . BJM B 2 ? 66.38700 70.94000 73.23300 1.000 29.55000 C ? B ? . C10 1
+   HETATM 13 C13 . BJM B 2 ? 68.30500 73.24900 73.24600 1.000 29.69000 C ? B ? . C13 1
+   HETATM 14 C14 . BJM B 2 ? 67.91200 70.69400 73.08100 1.000 29.01000 C ? B ? . C14 1
+   HETATM 15 C16 . BJM B 2 ? 66.22900 72.22300 74.13500 1.000 28.52000 C ? B ? . C16 1
+   HETATM 16 C19 . BJM B 2 ? 68.63800 72.01300 66.15400 1.000 33.45000 C ? B ? . C19 1
+   HETATM 17 C20 . BJM B 2 ? 68.99900 71.97000 67.61100 1.000 33.10000 C ? B ? . C20 1
+   HETATM 18 C21 . BJM B 2 ? 67.72400 71.04100 65.44600 1.000 32.71000 C ? B ? . C21 1
+   HETATM 19 C22 . BJM B 2 ? 67.51800 69.19100 67.09000 1.000 34.62000 C ? B ? . C22 1
+   HETATM 20 N23 . BJM B 2 ? 67.02100 68.72700 68.24600 1.000 36.70000 N ? B ? . N23 1
+   HETATM 21 C4 . BJM B 2 ? 66.22900 73.69100 71.97600 1.000 28.26000 C ? B ? . C4 1
+   HETATM 22 C5 . BJM B 2 ? 65.78000 71.21800 71.81500 1.000 27.77000 C ? B ? . C5 1
+   HETATM 23 C6 . BJM B 2 ? 65.92800 71.55300 68.61300 1.000 28.16000 C ? B ? . C6 1
+   HETATM 24 N7 . BJM B 2 ? 64.51500 73.10100 69.66900 1.000 21.64000 N ? B ? . N7 1
+   HETATM 25 N11 . BJM B 2 ? 66.88800 71.51200 67.69400 1.000 31.17000 N ? B ? . N11 1
+   HETATM 26 O12 . BJM B 2 ? 65.05400 70.69800 68.63700 1.000 28.00000 O ? B ? . O12 1
+   HETATM 27 O15 . BJM B 2 ? 69.95800 71.86400 72.29200 1.000 33.65000 O ? B ? . O15 1
+   HETATM 28 C17 . BJM B 2 ? 67.75200 72.62000 67.14800 1.000 32.91000 C ? B ? . C17 1
+   HETATM 29 C18 . BJM B 2 ? 66.86400 70.52400 66.57000 1.000 33.12000 C ? B ? . C18 1
+
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_symmetry
+covale B BJM 2 C22 B SER 630 OG 1.367 ? 1_555 1_555

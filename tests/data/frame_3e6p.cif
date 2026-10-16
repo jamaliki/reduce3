@@ -1,0 +1,96 @@
+data_default
+loop_
+  _struct_asym.id
+   A
+   B
+
+loop_
+  _chem_comp.id
+   DFK
+   HIS
+   SER
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   ATOM 1 N . HIS H 57 ? -44.90800 -14.38000 -25.25400 1.000 33.40000 N ? A ? 1 N 1
+   ATOM 2 CA . HIS H 57 ? -46.16500 -13.59100 -25.43200 1.000 33.36000 C ? A ? 1 CA 1
+   ATOM 3 C . HIS H 57 ? -46.09500 -12.22600 -24.76600 1.000 33.15000 C ? A ? 1 C 1
+   ATOM 4 O . HIS H 57 ? -46.89800 -11.34500 -25.09900 1.000 32.82000 O ? A ? 1 O 1
+   ATOM 5 CB . HIS H 57 ? -47.41900 -14.34300 -24.96300 1.000 33.00000 C ? A ? 1 CB 1
+   ATOM 6 CG . HIS H 57 ? -47.63800 -14.28500 -23.49900 1.000 31.74000 C ? A ? 1 CG 1
+   ATOM 7 ND1 . HIS H 57 ? -47.18200 -15.27200 -22.64500 1.000 32.01000 N ? A ? 1 ND1 1
+   ATOM 8 CD2 . HIS H 57 ? -48.28300 -13.36900 -22.72800 1.000 26.50000 C ? A ? 1 CD2 1
+   ATOM 9 CE1 . HIS H 57 ? -47.53500 -14.95800 -21.40300 1.000 29.30000 C ? A ? 1 CE1 1
+   ATOM 10 NE2 . HIS H 57 ? -48.21700 -13.81600 -21.42500 1.000 32.42000 N ? A ? 1 NE2 1
+   ATOM 11 N . SER H 195 ? -46.59900 -13.26700 -16.15300 1.000 29.14000 N ? A ? 2 N 1
+   ATOM 12 CA . SER H 195 ? -45.96900 -14.00300 -17.26500 1.000 29.86000 C ? A ? 2 CA 1
+   ATOM 13 C . SER H 195 ? -44.54300 -13.60400 -17.38300 1.000 29.29000 C ? A ? 2 C 1
+   ATOM 14 O . SER H 195 ? -44.23700 -12.44200 -17.17900 1.000 29.22000 O ? A ? 2 O 1
+   ATOM 15 CB . SER H 195 ? -46.63800 -13.63300 -18.56300 1.000 28.83000 C ? A ? 2 CB 1
+   ATOM 16 OG . SER H 195 ? -47.86000 -14.39200 -18.64300 1.000 32.29000 O ? A ? 2 OG 1
+   HETATM 17 N1 . DFK H 301 ? -56.21500 -17.11400 -20.66800 1.000 36.28000 N ? B ? . N1 1
+   HETATM 18 CA1 . DFK H 301 ? -55.29900 -17.34400 -21.76400 1.000 32.64000 C ? B ? . CA1 1
+   HETATM 19 C1 . DFK H 301 ? -53.87900 -17.01100 -21.38700 1.000 30.63000 C ? B ? . C1 1
+   HETATM 20 O1 . DFK H 301 ? -53.38400 -17.47100 -20.36200 1.000 33.47000 O ? B ? . O1 1
+   HETATM 21 CB1 . DFK H 301 ? -55.37300 -18.80900 -22.14100 1.000 34.01000 C ? B ? . CB1 1
+   HETATM 22 CG1 . DFK H 301 ? -54.74200 -19.05300 -23.48400 1.000 32.56000 C ? B ? . CG1 1
+   HETATM 23 CD1 . DFK H 301 ? -55.19000 -18.35700 -24.60600 1.000 33.79000 C ? B ? . CD1 1
+   HETATM 24 CD2 . DFK H 301 ? -53.70700 -19.98300 -23.59400 1.000 28.93000 C ? B ? . CD2 1
+   HETATM 25 CE1 . DFK H 301 ? -54.61600 -18.58000 -25.86200 1.000 30.38000 C ? B ? . CE1 1
+   HETATM 26 CE2 . DFK H 301 ? -53.13800 -20.20300 -24.82300 1.000 27.84000 C ? B ? . CE2 1
+   HETATM 27 CZ1 . DFK H 301 ? -53.58100 -19.50300 -25.95200 1.000 32.93000 C ? B ? . CZ1 1
+   HETATM 28 N2 . DFK H 301 ? -53.19300 -16.19700 -22.20600 1.000 31.18000 N ? B ? . N2 1
+   HETATM 29 CA2 . DFK H 301 ? -51.80600 -15.90200 -21.89100 1.000 31.53000 C ? B ? . CA2 1
+   HETATM 30 C2 . DFK H 301 ? -51.64400 -15.05500 -20.67800 1.000 33.06000 C ? B ? . C2 1
+   HETATM 31 O2 . DFK H 301 ? -52.45300 -14.16600 -20.45400 1.000 35.61000 O ? B ? . O2 1
+   HETATM 32 CB2 . DFK H 301 ? -51.33100 -15.09300 -23.07700 1.000 31.67000 C ? B ? . CB2 1
+   HETATM 33 CG2 . DFK H 301 ? -52.36300 -15.09800 -24.15900 1.000 29.19000 C ? B ? . CG2 1
+   HETATM 34 CD3 . DFK H 301 ? -53.63300 -15.57400 -23.46100 1.000 32.39000 C ? B ? . CD3 1
+   HETATM 35 N3 . DFK H 301 ? -50.56700 -15.28300 -19.91100 1.000 31.26000 N ? B ? . N3 1
+   HETATM 36 CA3 . DFK H 301 ? -50.29000 -14.48300 -18.72600 1.000 32.46000 C ? B ? . CA3 1
+   HETATM 37 C3 . DFK H 301 ? -48.98000 -13.69200 -18.99800 1.000 32.23000 C ? B ? . C3 1
+   HETATM 38 O3 . DFK H 301 ? -49.04100 -12.63700 -18.02400 1.000 28.73000 O ? B ? . O3 1
+   HETATM 39 CB3 . DFK H 301 ? -50.11500 -15.46300 -17.56700 1.000 29.65000 C ? B ? . CB3 1
+   HETATM 40 CG3 . DFK H 301 ? -51.41700 -15.98900 -17.03700 1.000 32.40000 C ? B ? . CG3 1
+   HETATM 41 CD4 . DFK H 301 ? -51.03500 -17.05700 -16.02400 1.000 32.24000 C ? B ? . CD4 1
+   HETATM 42 NE . DFK H 301 ? -52.27400 -17.48300 -15.38900 1.000 31.80000 N ? B ? . NE 1
+   HETATM 43 CZ3 . DFK H 301 ? -52.40500 -18.43100 -14.44900 1.000 35.30000 C ? B ? . CZ3 1
+   HETATM 44 NH1 . DFK H 301 ? -51.36200 -19.14000 -13.98100 1.000 28.58000 N ? B ? . NH1 1
+   HETATM 45 NH2 . DFK H 301 ? -53.61500 -18.69200 -13.94300 1.000 38.13000 N ? B ? . NH2 1
+   HETATM 46 CH2 . DFK H 301 ? -48.75300 -13.11500 -20.43300 1.000 27.95000 C ? B ? . CH2 1
+
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_symmetry
+covale H HIS 57 NE2 H DFK 301 CH2 1.328 ? 1_555 1_555
+covale H SER 195 OG H DFK 301 C3 1.368 ? 1_555 1_555

@@ -1,0 +1,103 @@
+data_default
+loop_
+  _struct_asym.id
+   A
+
+loop_
+  _chem_comp.id
+   0AR
+   DPR
+   HIS
+   HSE
+   UN1
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   HETATM 1 C . 0AR B 1392 ? 6.20100 -10.19800 18.40100 1.000 12.52000 C ? A ? 1 C 1
+   HETATM 2 N . 0AR B 1392 ? 7.94600 -8.51700 18.19700 1.000 10.15000 N ? A ? 1 N 1
+   HETATM 3 O . 0AR B 1392 ? 6.08200 -10.11000 19.62200 1.000 12.16000 O ? A ? 1 O 1
+   HETATM 4 CA . 0AR B 1392 ? 7.54800 -9.86300 17.75400 1.000 10.36000 C ? A ? 1 CA 1
+   HETATM 5 CB . 0AR B 1392 ? 8.56500 -10.89500 18.24800 1.000 11.31000 C ? A ? 1 CB 1
+   HETATM 6 CD . 0AR B 1392 ? 10.85600 -11.89300 17.99400 1.000 11.07000 C ? A ? 1 CD 1
+   HETATM 7 NE . 0AR B 1392 ? 11.34000 -11.26800 19.23300 1.000 14.00000 N ? A ? 1 NE 1
+   HETATM 8 CG . 0AR B 1392 ? 9.81000 -10.97200 17.36100 1.000 11.74000 C ? A ? 1 CG 1
+   HETATM 9 CZ . 0AR B 1392 ? 12.32500 -11.79600 19.95400 1.000 16.10000 C ? A ? 1 CZ 1
+   HETATM 10 C0B . 0AR B 1392 ? 13.70000 -11.56300 21.85700 1.000 18.95000 C ? A ? 1 C0B 1
+   HETATM 11 O0C . 0AR B 1392 ? 14.33300 -12.58900 21.60800 1.000 20.44000 O ? A ? 1 O0C 1
+   HETATM 12 C1B . 0AR B 1392 ? 14.04400 -10.71800 23.08500 1.000 18.56000 C ? A ? 1 C1B 1
+   HETATM 13 NH1 . 0AR B 1392 ? 12.87800 -12.95500 19.60100 1.000 17.70000 N ? A ? 1 NH1 1
+   HETATM 14 NH2 . 0AR B 1392 ? 12.71200 -11.15000 21.05100 1.000 15.67000 N ? A ? 1 NH2 1
+   HETATM 15 N . DPR B 1393 ? 5.16000 -10.56400 17.65400 1.000 11.31000 N ? A ? 2 N 1
+   HETATM 16 CA . DPR B 1393 ? 3.88000 -10.91600 18.29600 1.000 11.81000 C ? A ? 2 CA 1
+   HETATM 17 CB . DPR B 1393 ? 3.19300 -11.74900 17.21100 1.000 13.32000 C ? A ? 2 CB 1
+   HETATM 18 CG . DPR B 1393 ? 3.52000 -10.90400 15.98000 1.000 13.77000 C ? A ? 2 CG 1
+   HETATM 19 CD . DPR B 1393 ? 5.02500 -10.74300 16.19800 1.000 12.74000 C ? A ? 2 CD 1
+   HETATM 20 C . DPR B 1393 ? 2.99000 -9.71200 18.62800 1.000 12.96000 C ? A ? 2 C 1
+   HETATM 21 O . DPR B 1393 ? 1.81100 -9.90000 18.92600 1.000 12.80000 O ? A ? 2 O 1
+   HETATM 22 N . HSE B 1394 ? 3.53900 -8.50000 18.62800 1.000 9.03000 N ? A ? 3 N 1
+   HETATM 23 CA . HSE B 1394 ? 2.70300 -7.32700 18.93300 1.000 5.20000 C ? A ? 3 CA 1
+   HETATM 24 C . HSE B 1394 ? 3.33300 -6.05300 18.37200 1.000 7.27000 C ? A ? 3 C 1
+   HETATM 25 C3 . HSE B 1394 ? 2.61200 -7.00300 20.42500 1.000 5.54000 C ? A ? 3 C3 1
+   HETATM 26 O . HSE B 1394 ? 3.38100 -5.79700 17.17000 1.000 6.99000 O ? A ? 3 O 1
+   HETATM 27 C4 . HSE B 1394 ? 3.70600 -5.95200 20.62700 1.000 6.68000 C ? A ? 3 C4 1
+   HETATM 28 O3 . HSE B 1394 ? 4.93800 -6.54600 21.04500 1.000 7.28000 O ? A ? 3 O3 1
+   ATOM 29 N . HIS B 1395 ? 3.87700 -5.29300 19.32300 1.000 8.06000 N ? A ? 4 N 1
+   ATOM 30 CA . HIS B 1395 ? 4.51000 -4.02100 18.94200 1.000 7.43000 C ? A ? 4 CA 1
+   ATOM 31 C . HIS B 1395 ? 5.86800 -4.39200 18.34000 1.000 8.13000 C ? A ? 4 C 1
+   ATOM 32 O . HIS B 1395 ? 6.37800 -3.71500 17.44700 1.000 9.03000 O ? A ? 4 O 1
+   ATOM 33 CB . HIS B 1395 ? 4.67400 -3.11000 20.16200 1.000 8.33000 C ? A ? 4 CB 1
+   ATOM 34 CG . HIS B 1395 ? 4.75800 -1.62600 19.78800 1.000 6.61000 C ? A ? 4 CG 1
+   ATOM 35 ND1 . HIS B 1395 ? 4.39300 -0.62000 20.57800 1.000 7.11000 N ? A ? 4 ND1 1
+   ATOM 36 CD2 . HIS B 1395 ? 5.17800 -1.10700 18.63800 1.000 5.67000 C ? A ? 4 CD2 1
+   ATOM 37 CE1 . HIS B 1395 ? 4.58300 0.51800 19.91600 1.000 3.88000 C ? A ? 4 CE1 1
+   ATOM 38 NE2 . HIS B 1395 ? 5.07000 0.21800 18.71600 1.000 5.24000 N ? A ? 4 NE2 1
+   HETATM 39 C1' . UN1 B 1396 ? 10.44300 -8.27800 21.07300 1.000 13.49000 C ? A ? 5 C1' 1
+   HETATM 40 O1' . UN1 B 1396 ? 10.09200 -8.91100 20.07700 1.000 13.37000 O ? A ? 5 O1' 1
+   HETATM 41 O2' . UN1 B 1396 ? 11.48900 -8.59200 21.63800 1.000 12.08000 O ? A ? 5 O2' 1
+   HETATM 42 O . UN1 B 1396 ? 6.20300 -7.54000 17.17000 1.000 8.29000 O ? A ? 5 O 1
+   HETATM 43 C1 . UN1 B 1396 ? 9.58400 -7.12900 21.60800 1.000 12.53000 C ? A ? 5 C1 1
+   HETATM 44 C . UN1 B 1396 ? 7.22300 -7.45400 17.85100 1.000 8.73000 C ? A ? 5 C 1
+   HETATM 45 CA . UN1 B 1396 ? 7.66400 -6.08100 18.36600 1.000 7.81000 C ? A ? 5 CA 1
+   HETATM 46 C5 . UN1 B 1396 ? 8.78100 -6.15500 19.41200 1.000 8.62000 C ? A ? 5 C5 1
+   HETATM 47 C6 . UN1 B 1396 ? 8.37100 -6.84200 20.71800 1.000 8.62000 C ? A ? 5 C6 1
+   HETATM 48 N . UN1 B 1396 ? 6.41700 -5.48300 18.86900 1.000 9.14000 N ? A ? 5 N 1
+
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_symmetry
+covale B 0AR 1392 C B DPR 1393 N 1.333 ? 1_555 1_555
+covale B 0AR 1392 N B UN1 1396 C 1.331 ? 1_555 1_555
+covale B DPR 1393 C B HSE 1394 N 1.331 ? 1_555 1_555
+covale B HSE 1394 C4 B HIS 1395 N 1.471 ? 1_555 1_555
+covale B HSE 1394 C B HIS 1395 N 1.333 ? 1_555 1_555
+covale B HIS 1395 C B UN1 1396 N 1.331 ? 1_555 1_555

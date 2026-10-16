@@ -6,6 +6,8 @@ mod charges;
 mod chirality;
 mod nomenclature;
 
+pub use nomenclature::{SiteSwap, normalized_copy};
+
 use super::*;
 
 /// Parameters that affect chemical targets.
@@ -15,6 +17,14 @@ pub struct ValidationOptions {
     pub use_cdl: bool,
     pub link_distance_cutoff: f64,
     pub chirality_sigma: f64,
+    pub dictionary_links: Vec<DictionaryLink>,
+}
+
+/// Apply a declared link to the residues containing these flat atom indices.
+#[derive(Clone, Debug)]
+pub struct DictionaryLink {
+    pub id: String,
+    pub atom_indices: [u32; 2],
 }
 
 impl Default for ValidationOptions {
@@ -24,6 +34,7 @@ impl Default for ValidationOptions {
             use_cdl: true,
             link_distance_cutoff: 3.0,
             chirality_sigma: 0.2,
+            dictionary_links: Vec::new(),
         }
     }
 }
@@ -37,10 +48,20 @@ pub struct WeightedBond {
 }
 
 #[derive(Clone, Debug)]
+pub struct WeightedSymmetryBond {
+    pub indices: [u32; 2],
+    pub image: crate::cell::SymOp,
+    pub ideal: f64,
+    pub weight: f64,
+    pub origin: u16,
+}
+
+#[derive(Clone, Debug)]
 pub struct WeightedAngle {
     pub indices: [u32; 3],
     pub ideal: f64,
     pub weight: f64,
+    pub origin: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +71,7 @@ pub struct WeightedChirality {
     pub weight: f64,
     pub both_signs: bool,
     pub pseudochiral: bool,
+    pub origin: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +108,7 @@ pub struct ValidationGraph {
     /// Per-atom formal charges after reference scattering-label normalization.
     pub typed_charges: Vec<i32>,
     pub bonds: Vec<WeightedBond>,
+    pub symmetry_bonds: Vec<WeightedSymmetryBond>,
     pub angles: Vec<WeightedAngle>,
     pub chiralities: Vec<WeightedChirality>,
     pub planes: Vec<WeightedPlane>,
@@ -98,9 +121,31 @@ pub struct ValidationGraph {
     plane_keys: FxHashMap<Vec<u32>, usize>,
 }
 
+fn bond_weight(ideal: f64, sigma: f64) -> Option<f64> {
+    let weight = 1. / sigma.powi(2);
+    (ideal.is_finite() && ideal > 0. && sigma.is_finite() && sigma > 0.
+        && weight.is_finite() && weight > 0.).then_some(weight)
+}
+
 impl ValidationGraph {
     pub fn complete(&self) -> bool {
         self.coverage.iter().all(Coverage::complete)
+    }
+
+    fn image_bond(&mut self, mut indices: [u32;2], mut image: crate::cell::SymOp, ideal: f64, sigma: f64, origin: u16) {
+        let Some(weight) = bond_weight(ideal,sigma) else {
+            self.unsupported(&["bonds", "hydrogens"], "Missing or invalid symmetry bond target uncertainty");
+            return;
+        };
+        let Some(reverse) = image.inverse() else {
+            self.unsupported(builder::ALL, "Symmetry bond operator is singular");
+            return;
+        };
+        if indices[0] > indices[1] { indices.swap(0,1); image = reverse; }
+        self.symmetry_bonds.push(WeightedSymmetryBond { indices, image, ideal, weight, origin });
+        // MCL inserts one directed ASU proxy. Disulfide discovery supplies its
+        // two directed images separately.
+        self.topology.sym_bonds.push(BondProxy { i:indices[0], j:indices[1], ideal, origin });
     }
 
     fn unsupported(&mut self, checks: &[&str], reason: impl Into<String>) {
@@ -122,14 +167,13 @@ impl ValidationGraph {
 
     fn bond(&mut self, mut indices: [u32; 2], ideal: f64, sigma: f64, origin: u16) {
         indices.sort_unstable();
-        if !ideal.is_finite() || ideal <= 0. || !sigma.is_finite() || sigma <= 0. {
+        let Some(weight) = bond_weight(ideal,sigma) else {
             self.unsupported(
                 &["bonds", "hydrogens"],
                 "Missing or invalid bond target uncertainty",
             );
             return;
-        }
-        let weight = 1. / sigma.powi(2);
+        };
         if let Some(&k) = self.bond_keys.get(&indices) {
             if self.bonds[k].ideal != ideal || self.bonds[k].weight != weight {
                 self.unsupported(
@@ -173,7 +217,16 @@ impl ValidationGraph {
             indices,
             ideal,
             weight,
+            origin: ORIGIN_COVALENT,
         });
+    }
+
+    fn angle_with_origin(&mut self, indices: [u32; 3], ideal: f64, sigma: f64, origin: u16) {
+        let before = self.angles.len();
+        self.angle(indices, ideal, sigma);
+        for angle in &mut self.angles[before..] {
+            angle.origin = origin;
+        }
     }
 
     fn plane(&mut self, mut atoms: Vec<(u32, f64)>) {
@@ -195,6 +248,51 @@ impl ValidationGraph {
         self.plane_keys.insert(indices.clone(), self.planes.len());
         self.planes.push(WeightedPlane { indices, weights });
     }
+
+    fn chirality(
+        &mut self,
+        mut indices: [u32; 4],
+        mut ideal: f64,
+        weight: f64,
+        both_signs: bool,
+        pseudochiral: bool,
+    ) {
+        for i in 1..4 {
+            for j in i + 1..4 {
+                if indices[i] > indices[j] {
+                    indices.swap(i, j);
+                    ideal = -ideal;
+                }
+            }
+        }
+        if !ideal.is_finite() || !weight.is_finite() || weight <= 0. {
+            self.unsupported(&["chiralities"], "Invalid chiral target or uncertainty");
+            return;
+        }
+        if let Some(&index) = self.chiral_keys.get(&indices) {
+            let previous = &self.chiralities[index];
+            if previous.ideal != ideal
+                || previous.weight != weight
+                || previous.both_signs != both_signs
+                || previous.pseudochiral != pseudochiral
+            {
+                self.unsupported(
+                    &["chiralities"],
+                    "Conflicting chiral proxies need reference registry resolution",
+                );
+            }
+            return;
+        }
+        self.chiral_keys.insert(indices, self.chiralities.len());
+        self.chiralities.push(WeightedChirality {
+            indices,
+            ideal,
+            weight,
+            both_signs,
+            pseudochiral,
+            origin: ORIGIN_COVALENT,
+        });
+    }
 }
 
 /// Interpret fresh input sites and retain explicit coverage for every check.
@@ -205,4 +303,17 @@ pub fn build(
     options: &ValidationOptions,
 ) -> Result<ValidationGraph, String> {
     builder::build(st, flat, ml, options)
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::bond_weight;
+
+    #[test]
+    fn bond_targets_need_finite_positive_weights() {
+        assert_eq!(bond_weight(2.,0.5),Some(4.));
+        for sigma in [0.,-0.1, f64::NAN, f64::INFINITY, 1e-250, 1e250] {
+            assert!(bond_weight(2.,sigma).is_none());
+        }
+    }
 }

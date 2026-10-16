@@ -18,8 +18,12 @@ use crate::linkdata;
 use crate::model::*;
 use crate::monlib::{ChemLink, MonLib};
 use crate::resclass::{self, ONE_LETTER_GIVEN_THREE_LETTER};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
+use std::sync::Arc;
+
+#[cfg(test)]
+mod tests;
 
 const METALS: &[&str] = &[
     "ZN", "CA", "MG", "NA", "MN", "K", "FE", "CU", "CD", "HG", "NI", "CO", "SR", "CS", "PT", "BA", "TL", "PB", "SM",
@@ -476,6 +480,57 @@ impl<'a> Ctx<'a> {
         self.get_bonded(a, 1.8).len() != 2
     }
 
+    /// Sum the present, compatible dictionary bonds of a carbon in half units.
+    fn carbon_valence(&self, it: &Interp, initial: &[Vec<u32>], a: u32, partner: u32) -> Option<u8> {
+        if self.elem(a) != "C" { return None; }
+        let info = &it.dict[a as usize];
+        let (Some(comp), Some(id)) = (&info.comp, &info.dict_id) else { return None };
+        if comp.atom(id).is_none_or(|atom| atom.type_symbol != "C") { return None; }
+        let alt = if self.ag(a).altloc.is_empty() { &self.ag(partner).altloc } else { &self.ag(a).altloc };
+        let mut seen = FxHashSet::default();
+        let mut names = FxHashSet::default();
+        let mut value = 0u8;
+        for &other in &initial[a as usize] {
+            let group = self.ag(other);
+            let parent = self.ag(a);
+            if (group.model, group.chain, group.rg) != (parent.model, parent.chain, parent.rg)
+                || (!alt.is_empty() && !group.altloc.is_empty() && alt != &group.altloc) { continue; }
+            let info = &it.dict[other as usize];
+            let (Some(source), Some(other_id)) = (&info.comp, &info.dict_id) else { return None };
+            if !Arc::ptr_eq(source, comp) { return None; }
+            if !seen.insert((other_id.as_str(), group.altloc.as_str())) { return None; }
+            if !names.insert(other_id.as_str()) { continue; }
+            let bonds: Vec<_> = comp.bonds.iter().filter(|b|
+                (&b.a1 == id && &b.a2 == other_id) || (&b.a2 == id && &b.a1 == other_id)).collect();
+            let [bond] = bonds[..] else { return None };
+            value = value.checked_add(crate::interp::source_bond_order(self.ml, comp, bond, &parent.resname)?)?;
+        }
+        Some(value)
+    }
+
+    fn named_link(&self, i: u32, j: u32, c1: &Classes, c2: &Classes) -> Option<(&'a ChemLink, String, u32, u32)> {
+        let (gi, gj) = (self.ag(i), self.ag(j));
+        let (g1, g2) = (self.ag_of[i as usize], self.ag_of[j as usize]);
+        let keys = [format!("{}-{}", gi.resname, gj.resname), format!("{}-{}", gj.resname, gi.resname)];
+        for (key, a, b) in [(&keys[0], g1, g2), (&keys[1], g2, g1)] {
+            if let Some(link) = self.ml.link(key) { return Some((link, key.clone(), a, b)); }
+        }
+        let peptides = ["common_amino_acid", "d_amino_acid", "uncommon_amino_acid"];
+        if peptides.contains(&c1.important) && peptides.contains(&c2.important)
+            && ((self.name(i) == " N  " && self.name(j) == " C  ") || (self.name(i) == " C  " && self.name(j) == " N  ")) {
+            return self.ml.link("TRANS").map(|link| {
+                let (a, b) = if self.name(i) == " C  " { (g2, g1) } else { (g1, g2) };
+                (link, "TRANS".into(), a, b)
+            });
+        }
+        let keys = [format!("{}_{}-ANY_{}", gi.resname, self.name(i).trim(), self.name(j).trim()),
+            format!("{}_{}-ANY_{}", gj.resname, self.name(j).trim(), self.name(i).trim())];
+        for (key, a, b) in [(&keys[0], g1, g2), (&keys[1], g2, g1)] {
+            if let Some(link) = self.ml.link(key) { return Some((link, key.clone(), a, b)); }
+        }
+        None
+    }
+
     /// `linking_utils.is_atom_pair_linked`.
     fn is_atom_pair_linked(&self, a1: u32, a2: u32, imp1: &'static str, imp2: &'static str, distance: f64, only_cutoff: bool) -> bool {
         let (e1, e2) = (self.elem(a1), self.elem(a2));
@@ -599,6 +654,29 @@ impl<'a> Ctx<'a> {
         self.ags[g as usize].atoms.iter().copied().find(|&x| self.name(x).trim() == n)
     }
 
+    fn peptide_pair(&self, it: &Interp, a: u32, b: u32) -> bool {
+        let (ga, gb) = (self.ag(a), self.ag(b));
+        ga.model == gb.model && (ga.chain, ga.rg) != (gb.chain, gb.rg)
+            && matches!((self.name(a).trim(), self.elem(a), self.name(b).trim(), self.elem(b)),
+                ("C", "C", "N", "N") | ("N", "N", "C", "C"))
+            && [a, b].iter().all(|&index|
+                resclass::get_class(self.ag(index).resname.trim()).is_amino_acid()
+                    || it.dict[index as usize].comp.as_ref().is_some_and(|comp| comp.test_for_peptide()))
+    }
+
+    fn has_peptide_partner(&self, it: &Interp, initial: &[Vec<u32>], initial_bonds: usize,
+                           atom: u32, candidate: u32) -> bool {
+        let compatible = |other: u32| {
+            let (a, b) = (&self.ag(other).altloc, &self.ag(candidate).altloc);
+            a.is_empty() || b.is_empty() || a == b
+        };
+        initial[atom as usize].iter().any(|&other| compatible(other))
+            || it.bonds[initial_bonds..].iter().any(|bond| {
+                let other = if bond.i == atom { bond.j } else if bond.j == atom { bond.i } else { return false };
+                peptide_origin(bond.origin) && self.peptide_pair(it, atom, other) && compatible(other)
+            })
+    }
+
     /// `_apply_link_using_proxies`; returns the bonds made.
     fn apply_link(&self, it: &mut Interp, link: &ChemLink, g1: u32, g2: u32, origin: u16) -> Vec<(u32, u32)> {
         let (mut g1, mut g2) = (g1, g2);
@@ -646,6 +724,12 @@ impl<'a> Ctx<'a> {
         }
         for (_, atoms) in planes {
             it.add_plane(atoms);
+        }
+        if !bonds.is_empty() {
+            let anchors = [self.ags[g1 as usize].atoms[0], self.ags[g2 as usize].atoms[0]];
+            it.automatic_links.push(crate::interp::AutomaticLink::Dictionary {
+                id: link.id.clone(), anchors, origin,
+            });
         }
         bonds
     }
@@ -769,6 +853,7 @@ impl<'a> Ctx<'a> {
         let origin = link_origin(&isomer).unwrap_or(ORIGIN_GLYCO_CUSTOM);
         it.upsert_bond(g.anomeric_carbon, g.link_oxygen, 1.439, origin);
         let lc = g.link_carbon;
+        let mut angles = Vec::new();
         for (atoms, v) in [
             ([lc, Some(g.link_oxygen), Some(g.anomeric_carbon)], 108.7),
             ([Some(g.link_oxygen), Some(g.anomeric_carbon), g.ring_oxygen], 112.3),
@@ -777,8 +862,17 @@ impl<'a> Ctx<'a> {
         ] {
             if let [Some(a), Some(b), Some(c)] = atoms {
                 it.add_angle(a, b, c, v, 3.0);
+                angles.push(crate::interp::AngleProxy { i: [a, b, c], ideal: v, esd: 3.0 });
             }
         }
+        let chirality = g.ring_oxygen.zip(g.ring_carbon).and_then(|(oxygen, carbon)| {
+            let rn = self.ag(g.anomeric_carbon).resname.trim();
+            linkdata::GLYCO_VOLUMES.iter().find(|(name, _)| *name == rn)
+                .map(|(_, value)| ([g.anomeric_carbon, g.link_oxygen, oxygen, carbon], *value))
+        });
+        it.automatic_links.push(crate::interp::AutomaticLink::Glycosidic {
+            id: isomer, bond: [g.anomeric_carbon, g.link_oxygen], angles, chirality, origin,
+        });
         Some((g.anomeric_carbon, g.link_oxygen))
     }
 
@@ -1012,15 +1106,56 @@ fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
     out
 }
 
+/// Keep unique records for custom-link guards and resolved records for peptide links.
+fn declared_covalent_pairs(st: &Structure, flat: &FlatAtoms) -> (FxHashSet<(u32, u32)>, FxHashSet<(u32, u32)>) {
+    if !st.links.iter().any(|link| link.kind == "covale") { return (FxHashSet::default(), FxHashSet::default()); }
+    let resolver = EndpointResolver::new(st, &flat.path);
+    let mut pairs = FxHashMap::default();
+    for link in &st.links {
+        if link.kind != "covale" { continue; }
+        let matches = |label: &AtomLabel| resolver.matching_indices(label).collect::<Vec<_>>();
+        let (first, second) = (matches(&link.atom1), matches(&link.atom2));
+        let ([i], [j]) = (&first[..], &second[..]) else { continue };
+        let (a, b) = (flat.path[*i as usize], flat.path[*j as usize]);
+        if a.model != b.model || (a.chain == b.chain && a.rg == b.rg)
+            || (!flat.altloc[*i as usize].is_empty() && !flat.altloc[*j as usize].is_empty()
+                && flat.altloc[*i as usize] != flat.altloc[*j as usize]) { continue; }
+        let entry = pairs.entry(((*i).min(*j), (*i).max(*j))).or_insert((0usize, true));
+        entry.0 += 1;
+        entry.1 &= link.order.as_deref().is_none_or(|order|
+            order.eq_ignore_ascii_case("sing") || order.eq_ignore_ascii_case("single"));
+    }
+    let mut unique = FxHashSet::default();
+    let mut resolved = FxHashSet::default();
+    for (pair, (count, valid)) in pairs {
+        if valid {
+            resolved.insert(pair);
+            if count == 1 { unique.insert(pair); }
+        }
+    }
+    (unique, resolved)
+}
+
+fn peptide_origin(origin: u16) -> bool {
+    // Polymer bonds and the CIS, NMCIS, NMTRANS, PCIS, PTRANS and TRANS dictionaries.
+    matches!(origin, crate::interp::ORIGIN_COVALENT | 35 | 63 | 65 | 66 | 70 | 79)
+}
+
 /// Make the automatic links. Bonds (with their angles, dihedrals and planes)
 /// go into `it`; a line per link goes to `log`.
 pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &AutoLinkParams, log: &mut String) {
     let cx = Ctx::new(st, flat, ml, p);
     let n = flat.pos.len();
     let mut initial: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut initial_peptides: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let initial_bonds = it.bonds.len();
     for b in &it.bonds {
         initial[b.i as usize].push(b.j);
         initial[b.j as usize].push(b.i);
+        if !p.compat && peptide_origin(b.origin) && cx.peptide_pair(it, b.i, b.j) {
+            initial_peptides[b.i as usize].push(b.j);
+            initial_peptides[b.j as usize].push(b.i);
+        }
     }
     // `done`: atoms that took their link, and per residue pair the atom-name
     // pairs considered
@@ -1029,6 +1164,7 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
     let mut n_links: Vec<u32> = vec![0; n];
     let mut custom: Vec<(u32, u32, u16)> = Vec::new();
     let mut custom_partners: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    let (declared, declared_peptides) = if p.compat { Default::default() } else { declared_covalent_pairs(st, flat) };
 
     for (dist, i, j) in candidate_pairs(&cx, &initial) {
         if it.has_bond(i, j) {
@@ -1091,8 +1227,36 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
         }
         let (c1, c2) = (cl1.important, cl2.important);
         let class_key = if c1 <= c2 { (c1, c2) } else { (c2, c1) };
+        let found = cx.named_link(i, j, &cl1, &cl2);
+        let lkey = if found.is_none() { cx.single_link_key(i, j) } else { None };
+        let is_glyco = lkey.as_ref().is_some_and(|key|
+            ["ALPHA1", "BETA1", "ALPHA2", "BETA2"].iter().any(|s| key.contains(s)));
+        let peptide = if found.is_none() && !is_glyco && lkey.as_ref().is_some_and(|key| ml.link(key).is_none()) {
+            cx.peptide_link(i, j, &cl1, &cl2)
+        } else { None };
+        let annotated = declared.contains(&(i.min(j), i.max(j)));
+        let selected_key = found.as_ref().map(|(_, key, _, _)| key.as_str())
+            .or(peptide.map(|(key, _)| key)).or(lkey.as_deref());
+        if !p.compat && selected_key.is_some_and(|key| matches!(key, "CIS" | "NMCIS" | "NMTRANS" | "PCIS" | "PTRANS" | "TRANS"))
+            && cx.peptide_pair(it, i, j) && !declared_peptides.contains(&(i.min(j), i.max(j)))
+            && (cx.has_peptide_partner(it, &initial_peptides, initial_bonds, i, j)
+                || cx.has_peptide_partner(it, &initial_peptides, initial_bonds, j, i)) {
+            continue;
+        }
+        let custom_fallback = found.is_none() && !is_glyco && peptide.is_none()
+            && lkey.as_ref().is_some_and(|key| ml.link(key).is_none());
+        let his_coordination = !p.compat && custom_fallback && !annotated && [(i, j), (j, i)].iter().any(|&(donor, metal)|
+            cx.ag(donor).resname.trim() == "HIS" && cx.elem(donor) == "N"
+                && matches!(cx.name(donor).trim(), "ND1" | "NE2")
+                && METALS.contains(&cx.elem(metal)) && cx.ag(metal).rg_atoms.len() > 1);
+        if !p.compat && custom_fallback && !annotated && !his_coordination
+            && (METALS.contains(&cx.elem(i)) || METALS.contains(&cx.elem(j))
+                || cx.carbon_valence(it, &initial, i, j).is_some_and(|value| value >= 8)
+                || cx.carbon_valence(it, &initial, j, i).is_some_and(|value| value >= 8)) {
+            continue;
+        }
         // link_metals = Auto
-        if class_key.0 == "metal" || class_key.1 == "metal" {
+        if (class_key.0 == "metal" || class_key.1 == "metal") && (p.compat || (found.is_none() && !annotated)) {
             continue;
         }
         if class_key.0 == "common_amino_acid" && class_key.1 == "common_rna_dna" {
@@ -1142,34 +1306,7 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
         if link_found {
             continue;
         }
-        let (mut g1, mut g2) = (agi, agj);
-        // predefined residue-pair link, e.g. NAG-ASN
-        let mut found: Option<(&ChemLink, String)> = None;
-        let k1 = format!("{}-{}", gi.resname, gj.resname);
-        let k2 = format!("{}-{}", gj.resname, gi.resname);
-        if let Some(l) = ml.link(&k1) {
-            found = Some((l, k1));
-        } else if let Some(l) = ml.link(&k2) {
-            found = Some((l, k2));
-            std::mem::swap(&mut g1, &mut g2);
-        } else if peptides.contains(&c1) && peptides.contains(&c2) && ((cx.name(i) == " N  " && cx.name(j) == " C  ") || (cx.name(i) == " C  " && cx.name(j) == " N  ")) {
-            if let Some(l) = ml.link("TRANS") {
-                if cx.name(i) == " C  " {
-                    std::mem::swap(&mut g1, &mut g2);
-                }
-                found = Some((l, "TRANS".to_string()));
-            }
-        } else {
-            let k1 = format!("{}_{}-ANY_{}", gi.resname, cx.name(i).trim(), cx.name(j).trim());
-            let k2 = format!("{}_{}-ANY_{}", gj.resname, cx.name(j).trim(), cx.name(i).trim());
-            if let Some(l) = ml.link(&k1) {
-                found = Some((l, k1));
-            } else if let Some(l) = ml.link(&k2) {
-                found = Some((l, k2));
-                std::mem::swap(&mut g1, &mut g2);
-            }
-        }
-        if let Some((link, lkey)) = found {
+        if let Some((link, lkey, g1, g2)) = found {
             let Some(origin) = link_origin(&lkey) else { continue };
             let made = cx.apply_link(it, link, g1, g2, origin);
             if !made.is_empty() {
@@ -1177,7 +1314,7 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
             }
             continue;
         }
-        let Some(lkey) = cx.single_link_key(i, j) else {
+        let Some(lkey) = lkey else {
             if let Some(v) = res_done.get_mut(&key) {
                 if let Some(pos) = v.iter().position(|x| *x == names) {
                     v.remove(pos);
@@ -1185,7 +1322,6 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
             }
             continue;
         };
-        let is_glyco = ["ALPHA1", "BETA1", "ALPHA2", "BETA2"].iter().any(|s| lkey.contains(s));
         if is_glyco {
             if let Some((a, b)) = cx.apply_glyco_link(it, agj, agi) {
                 log.push_str(&format!("  Glycosidic link: {} - {}\n", cx.id_str(a), cx.id_str(b)));
@@ -1198,14 +1334,14 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
             }
             continue;
         }
-        if let Some((pkey, swap)) = cx.peptide_link(i, j, &cl1, &cl2) {
+        if let Some((pkey, swap)) = peptide {
             if let Some(link) = ml.link(pkey) {
                 let (g1, g2) = if swap { (agj, agi) } else { (agi, agj) };
                 cx.apply_link(it, link, g1, g2, link_origin(pkey).unwrap_or(ORIGIN_MISC));
             }
             continue;
         }
-        let origin = if c1 == "metal" || c2 == "metal" { ORIGIN_METAL } else { ORIGIN_MISC };
+        let origin = if his_coordination || c1 == "metal" || c2 == "metal" { ORIGIN_METAL } else { ORIGIN_MISC };
         custom.push((i, j, origin));
         custom_partners.entry(i).or_default().push(j);
         custom_partners.entry(j).or_default().push(i);
@@ -1215,6 +1351,7 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
     for (i, j, origin) in custom {
         let ideal = default_bond_length(cx.elem(i), cx.elem(j));
         if it.add_bond(i, j, ideal, origin) {
+            it.automatic_links.push(crate::interp::AutomaticLink::Custom { indices: [i, j], origin });
             log.push_str(&format!("  Custom bond: {} - {}\n", cx.id_str(i), cx.id_str(j)));
         }
     }

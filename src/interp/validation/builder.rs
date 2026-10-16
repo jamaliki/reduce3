@@ -1,10 +1,14 @@
 use super::*;
 
+mod automatic;
 mod chains;
 mod connections;
+mod enol;
+mod link;
+mod metals;
 mod restraints;
 
-const ALL: &[&str] = &[
+pub(super) const ALL: &[&str] = &[
     "bonds",
     "angles",
     "chiralities",
@@ -46,7 +50,7 @@ pub(super) fn build(
         compat: false,
         auto_comps: FxHashMap::default(),
     };
-    let topology = interpret(st, flat, ml, &params);
+    let topology = interpret_validation(st, flat, ml, &params);
     let mut graph = ValidationGraph {
         sites: flat.pos.clone(),
         atom_paths: flat.path.clone(),
@@ -57,6 +61,7 @@ pub(super) fn build(
             .map(|&p| charges::normalized(st.atom(p).elem(), st.atom(p).charge_value()))
             .collect(),
         bonds: Vec::new(),
+        symmetry_bonds: Vec::new(),
         angles: Vec::new(),
         chiralities: Vec::new(),
         planes: Vec::new(),
@@ -78,15 +83,7 @@ pub(super) fn build(
     if st.models.len() != 1 {
         graph.unsupported(ALL, "Multiple models require separate validation views");
     }
-    if !graph.topology.sym_bonds.is_empty() {
-        graph.unsupported(ALL, "ASU symmetry bonds need reference interpretation");
-    }
-    if nomenclature::needs_reference_swaps(st) {
-        graph.unsupported(
-            ALL,
-            "Symmetric residue labels require reference coordinate swaps",
-        );
-    }
+    symmetry_bonds(&mut graph, ml);
     let index: FxHashMap<AtomPath, u32> = flat
         .path
         .iter()
@@ -95,11 +92,30 @@ pub(super) fn build(
         .collect();
     let chains = conformer_residues(st, &index);
     let mut all_residues = Vec::new();
-    for model in chains {
+    let mut prepared_chains = Vec::new();
+    for model in &chains {
         for chain in model {
-            all_residues.extend(chains::build_chain(&mut graph, &chain, flat, ml, options));
+            let prepared = chains::prepare(&mut graph, chain, flat, ml, options);
+            let start = all_residues.len();
+            all_residues.extend(prepared);
+            prepared_chains.push((start..all_residues.len(), chain));
         }
     }
+    let links = connections::prepare_declared(&mut graph, &mut all_residues, ml, options)?;
+    connections::emit_declared(&mut graph, &all_residues, &links, ml, options);
+    automatic::prepare(&mut graph, &mut all_residues, ml);
+    metals::emit(&mut graph, st, flat, ml, options);
+    for (range, sources) in prepared_chains {
+        chains::emit(
+            &mut graph,
+            &mut all_residues[range],
+            sources,
+            flat,
+            ml,
+            options,
+        );
+    }
+    automatic::emit(&mut graph, &all_residues, ml, st, flat, options);
     connections::disulfides(&mut graph, &all_residues, ml, options);
     connections::explicit_links(&mut graph, st, flat);
     let missing = graph.topology.bonds.iter().any(|bond| {
@@ -114,4 +130,53 @@ pub(super) fn build(
         );
     }
     Ok(graph)
+}
+
+fn symmetry_bonds(graph: &mut ValidationGraph, ml: &MonLib) {
+    let images = graph.topology.symmetry_images.clone();
+    for image in images {
+        let Some(definition) = ml.link("SS").and_then(|link| link.bonds.first()) else {
+            graph.unsupported(ALL, "Missing symmetry disulfide dictionary target");
+            continue;
+        };
+        let Some((ideal, sigma)) = definition.value_dist.zip(definition.esd) else {
+            graph.unsupported(ALL, "Undefined symmetry disulfide target uncertainty");
+            continue;
+        };
+        let Some(weight) = bond_weight(ideal,sigma) else {
+            graph.unsupported(&["bonds", "hydrogens"], "Invalid symmetry disulfide target uncertainty");
+            continue;
+        };
+        if image.bond.i != image.bond.j {
+            let Some(reverse) = image.image.inverse() else {
+                graph.unsupported(ALL, "Symmetry bond operator is singular");
+                continue;
+            };
+            graph.symmetry_bonds.push(WeightedSymmetryBond {
+                indices: [image.bond.j, image.bond.i],
+                image: reverse,
+                ideal,
+                weight,
+                origin: ORIGIN_SS,
+            });
+        }
+        graph.symmetry_bonds.push(WeightedSymmetryBond {
+            indices: [image.bond.i, image.bond.j],
+            image: image.image,
+            ideal,
+            weight,
+            origin: ORIGIN_SS,
+        });
+    }
+    if graph
+        .topology
+        .sym_bonds
+        .iter()
+        .any(|bond| bond.origin != ORIGIN_SS)
+    {
+        graph.unsupported(
+            ALL,
+            "Symmetry metal links need weighted image interpretation",
+        );
+    }
 }

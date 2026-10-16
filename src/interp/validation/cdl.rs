@@ -39,6 +39,9 @@ pub(super) fn apply(graph: &mut ValidationGraph, residues: &[ResInterp], chain: 
             || !previous.is_peptide
             || !current.is_peptide
             || !next.is_peptide
+            || chain[centre - 1..=centre + 1]
+                .iter()
+                .any(|r| resclass::get_class(&r.resname) != resclass::ResClass::CommonAminoAcid)
         {
             continue;
         }
@@ -74,10 +77,6 @@ pub(super) fn apply(graph: &mut ValidationGraph, residues: &[ResInterp], chain: 
             continue;
         }
         if lookup(current, "HNO").is_some() {
-            graph.unsupported(
-                &["bonds", "angles", "planarities"],
-                "Enol peptide targets need reference interpretation",
-            );
             continue;
         }
         let (Some(phi), Some(psi)) = (

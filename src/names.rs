@@ -3,8 +3,33 @@
 //! mmtbx.monomer_library.pdb_interpretation.monomer_mapping).
 
 use crate::monlib::Comp;
-use rustc_hash::FxHashMap;
+use crate::model::{AtomPath, EndpointResolver, Structure};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::OnceLock;
+
+/// Resolve deposited covalent endpoints without deciding whether their bonds are valid.
+pub(crate) fn declared_covalent_anchors(st: &Structure) -> FxHashSet<AtomPath> {
+    if !st.links.iter().any(|link| link.kind == "covale") { return FxHashSet::default(); }
+    let paths = st.atom_paths();
+    let resolver = EndpointResolver::new(st, &paths);
+    let mut anchors = FxHashSet::default();
+    for link in &st.links {
+        if link.kind != "covale" { continue; }
+        for model in 0..st.models.len() as u32 {
+            let matches = |label: &crate::model::AtomLabel| resolver.matching_indices(label)
+                .map(|i| paths[i as usize]).filter(|p| p.model == model).collect::<Vec<_>>();
+            let (first, second) = (matches(&link.atom1), matches(&link.atom2));
+            let ([a], [b]) = (&first[..], &second[..]) else { continue };
+            let (left, right) = (st.atom(*a), st.atom(*b));
+            let (alt1, alt2) = (&st.atom_group(*a).altloc, &st.atom_group(*b).altloc);
+            if a == b || left.is_hydrogen() || right.is_hydrogen()
+                || left.xyz.as_array().iter().chain(right.xyz.as_array().iter()).any(|x| !x.is_finite())
+                || (!alt1.is_empty() && !alt2.is_empty() && alt1 != alt2) { continue; }
+            anchors.extend([*a, *b]);
+        }
+    }
+    anchors
+}
 
 struct Interpreter {
     /// name (H/D expanded) -> expected pattern
@@ -303,6 +328,10 @@ pub fn rna_dna_mon_lib_name(resname: &str, has_o2: bool) -> Option<&'static str>
 pub fn na_reference_name(name: &str) -> String {
     let n = name.trim().to_ascii_uppercase();
     let fixed = match n.as_str() {
+        "C5M" => "C7".to_string(),
+        "H5M1" => "H71".to_string(),
+        "H5M2" => "H72".to_string(),
+        "H5M3" => "H73".to_string(),
         "O1P" => "OP1".to_string(),
         "O2P" => "OP2".to_string(),
         "O3P" => "OP3".to_string(),
@@ -441,6 +470,14 @@ pub struct Mapping {
 }
 
 pub fn map_atoms(comp: &Comp, model_names: &[String], ani: Option<&[Option<String>]>, is_na: bool, atom_synonyms: Option<&FxHashMap<String, String>>) -> Mapping {
+    map_atoms_mode(comp, model_names, ani, is_na, atom_synonyms, false)
+}
+
+pub(crate) fn map_validation_atoms(comp: &Comp, model_names: &[String], ani: Option<&[Option<String>]>, is_na: bool, atom_synonyms: Option<&FxHashMap<String, String>>) -> Mapping {
+    map_atoms_mode(comp, model_names, ani, is_na, atom_synonyms, true)
+}
+
+fn map_atoms_mode(comp: &Comp, model_names: &[String], ani: Option<&[Option<String>]>, is_na: bool, atom_synonyms: Option<&FxHashMap<String, String>>, terminal_names: bool) -> Mapping {
     let mut ids = vec![None; model_names.len()];
     let mut unexpected = Vec::new();
     let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
@@ -457,6 +494,10 @@ pub fn map_atoms(comp: &Comp, model_names: &[String], ani: Option<&[Option<Strin
             given = given.to_ascii_uppercase();
         }
         let mut name = ani.and_then(|a| a[i].clone()).unwrap_or_else(|| given.clone());
+        if terminal_names && comp.test_for_peptide() && matches!(name.as_str(), "H1" | "H2" | "H3") && !comp.has_atom(&name) {
+            if seen.insert(name.clone()) { unexpected.push(name); }
+            continue;
+        }
         if !comp.has_atom(&name) {
             let mut cands: Vec<String> = Vec::new();
             let rot = |s: &str| -> Option<String> {

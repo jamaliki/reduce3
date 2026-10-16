@@ -376,7 +376,7 @@ pub fn read_pdb(text: &str) -> Structure {
                     icode: col(line, 57, 57).trim().to_string(),
                 };
                 let d = col(line, 74, 78).trim().parse::<f64>().ok();
-                st.links.push(LinkRecord { atom1: l1, atom2: l2, distance: d, kind: "LINK".into() });
+                st.links.push(LinkRecord { atom1: l1, atom2: l2, distance: d, order: None, kind: "LINK".into() });
                 st.pdb_records.links.push(line.to_string());
             }
             "SSBOND" => {
@@ -397,7 +397,7 @@ pub fn read_pdb(text: &str) -> Structure {
                     icode: col(line, 36, 36).trim().to_string(),
                 };
                 let d = col(line, 74, 78).trim().parse::<f64>().ok();
-                st.links.push(LinkRecord { atom1: l1, atom2: l2, distance: d, kind: "SSBOND".into() });
+                st.links.push(LinkRecord { atom1: l1, atom2: l2, distance: d, order: None, kind: "SSBOND".into() });
                 st.pdb_records.links.push(line.to_string());
             }
             "REMARK" | "END   " | "END" | "MASTER" | "ATOM 1" => {}

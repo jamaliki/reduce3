@@ -1,0 +1,84 @@
+# Exact PTR A319 and DT B1 heavy atoms from the saved 3PX7 view.
+# Frame SHA256: e8d9cf6aeffe8a031a79054d9e009fbae99a76ff2cc2aee9ec1f2214498ee712
+# Decoded CIF SHA256: 67b048bf44e3b6d1ad5b3cc86f62be77d1e023384556ffa1a73265c2d0dfd90e
+# The declared covale record connects PTR O3P to DT C5'; DT O5' is absent.
+data_default
+loop_
+  _struct_asym.id
+   A
+   B
+
+loop_
+  _chem_comp.id
+   DT
+   PTR
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   HETATM 1 N . PTR A 319 ? -33.52800 10.72000 41.87700 1.000 42.80000 N ? A ? 1 N 1
+   HETATM 2 CA . PTR A 319 ? -34.90900 11.19200 41.94300 1.000 45.83000 C ? A ? 1 CA 1
+   HETATM 3 C . PTR A 319 ? -35.61500 11.08300 40.59200 1.000 46.68000 C ? A ? 1 C 1
+   HETATM 4 O . PTR A 319 ? -35.03300 11.39500 39.55300 1.000 46.23000 O ? A ? 1 O 1
+   HETATM 5 CB . PTR A 319 ? -34.95700 12.63600 42.44600 1.000 48.18000 C ? A ? 1 CB 1
+   HETATM 6 CG . PTR A 319 ? -36.03700 12.89100 43.47300 1.000 49.89000 C ? A ? 1 CG 1
+   HETATM 7 CD1 . PTR A 319 ? -36.11800 12.12500 44.62800 1.000 51.05000 C ? A ? 1 CD1 1
+   HETATM 8 CD2 . PTR A 319 ? -36.97600 13.89700 43.28800 1.000 48.83000 C ? A ? 1 CD2 1
+   HETATM 9 CE1 . PTR A 319 ? -37.10300 12.35400 45.57000 1.000 50.51000 C ? A ? 1 CE1 1
+   HETATM 10 CE2 . PTR A 319 ? -37.96400 14.13400 44.22400 1.000 50.44000 C ? A ? 1 CE2 1
+   HETATM 11 CZ . PTR A 319 ? -38.02300 13.35900 45.36300 1.000 50.79000 C ? A ? 1 CZ 1
+   HETATM 12 OH . PTR A 319 ? -38.90100 13.56500 46.20000 1.000 51.13000 O ? A ? 1 OH 1
+   HETATM 13 P . PTR A 319 ? -40.14000 14.53200 45.84600 1.000 52.00000 P ? A ? 1 P 1
+   HETATM 14 O1P . PTR A 319 ? -40.75700 14.05800 44.58700 1.000 49.80000 O ? A ? 1 O1P 1
+   HETATM 15 O2P . PTR A 319 ? -39.63600 15.97600 45.66500 1.000 52.59000 O ? A ? 1 O2P 1
+   HETATM 16 O3P . PTR A 319 ? -41.17700 14.48300 46.98300 1.000 52.96000 O ? A ? 1 O3P 1
+   ATOM 17 C5' . DT B 1 ? -40.72200 14.02000 48.52900 1.000 77.92000 C ? B ? 1 C5' 1
+   ATOM 18 C4' . DT B 1 ? -40.77500 12.56400 48.95000 1.000 77.78000 C ? B ? 1 C4' 1
+   ATOM 19 O4' . DT B 1 ? -42.15900 12.15900 49.11100 1.000 76.81000 O ? B ? 1 O4' 1
+   ATOM 20 C3' . DT B 1 ? -40.17800 11.58400 47.94800 1.000 77.45000 C ? B ? 1 C3' 1
+   ATOM 21 O3' . DT B 1 ? -39.65300 10.45200 48.62800 1.000 76.17000 O ? B ? 1 O3' 1
+   ATOM 22 C2' . DT B 1 ? -41.38600 11.21400 47.09400 1.000 78.70000 C ? B ? 1 C2' 1
+   ATOM 23 C1' . DT B 1 ? -42.49700 11.18800 48.13900 1.000 78.91000 C ? B ? 1 C1' 1
+   ATOM 24 N1 . DT B 1 ? -43.83900 11.52400 47.58600 1.000 79.95000 N ? B ? 1 N1 1
+   ATOM 25 C2 . DT B 1 ? -44.73900 12.21400 48.36900 1.000 79.33000 C ? B ? 1 C2 1
+   ATOM 26 O2 . DT B 1 ? -44.49600 12.57300 49.50700 1.000 79.00000 O ? B ? 1 O2 1
+   ATOM 27 N3 . DT B 1 ? -45.94600 12.47400 47.76800 1.000 79.75000 N ? B ? 1 N3 1
+   ATOM 28 C4 . DT B 1 ? -46.33400 12.11800 46.48900 1.000 79.67000 C ? B ? 1 C4 1
+   ATOM 29 O4 . DT B 1 ? -47.43900 12.39400 46.03200 1.000 78.36000 O ? B ? 1 O4 1
+   ATOM 30 C5 . DT B 1 ? -45.34000 11.40000 45.73400 1.000 80.16000 C ? B ? 1 C5 1
+   ATOM 31 C7 . DT B 1 ? -45.64100 11.05200 44.29000 1.000 77.69000 C ? B ? 1 C7 1
+   ATOM 32 C6 . DT B 1 ? -44.15700 11.13500 46.29900 1.000 80.78000 C ? B ? 1 C6 1
+
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+covale O3P PTR A 319 1_555 "C5'" DT B 1 1_555 1.677 .

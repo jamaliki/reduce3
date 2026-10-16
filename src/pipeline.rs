@@ -13,6 +13,9 @@ use crate::riding::HType;
 use crate::world::World;
 use std::time::Instant;
 
+pub mod uncertainty;
+pub use uncertainty::{HydrogenUncertainty, HydrogenUncertaintyReason};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Approach {
     Add,
@@ -32,6 +35,19 @@ pub struct Params {
     pub model_id: Option<usize>,
     pub ignore_missing_restraints: bool,
     pub stop_on_any_missing_hydrogen: bool,
+    /// Keep these components as contact context if their dictionary is absent.
+    /// This does not allow unparameterized hydrogens or affect known dictionaries.
+    pub allow_missing_restraints_for: Vec<String>,
+    /// Original heavy atom rows whose unplaced hydrogens must still fail.
+    /// Other unique parents remain contact context; their unplaced H are audited.
+    pub required_hydrogen_parent_sources: Option<Vec<u32>>,
+    /// Original heavy rows explicitly allowed to retain undefined H targets.
+    /// The caller sets target eligibility. Empty keeps the existing strict policy.
+    pub allowed_unplaced_hydrogen_parent_sources: Vec<u32>,
+    /// Explicit H names and both original parent rows of validated metal hydrides.
+    pub allowed_unplaced_bridge_hydrogens: Vec<(String, [u32; 2])>,
+    /// Mask only targets that the accepted graph marks as unresolved.
+    pub allow_unresolved_bond_targets: bool,
     pub opt: OptParams,
 }
 
@@ -46,6 +62,11 @@ impl Default for Params {
             model_id: None,
             ignore_missing_restraints: false,
             stop_on_any_missing_hydrogen: false,
+            allow_missing_restraints_for: Vec::new(),
+            required_hydrogen_parent_sources: None,
+            allowed_unplaced_hydrogen_parent_sources: Vec::new(),
+            allowed_unplaced_bridge_hydrogens: Vec::new(),
+            allow_unresolved_bond_targets: false,
             opt: OptParams::default(),
         }
     }
@@ -57,6 +78,10 @@ pub struct Output {
     pub description: String,
     /// Messages for the terminal.
     pub log: String,
+    /// Undefined H targets on explicitly allowed original parents.
+    pub hydrogen_uncertainties: Vec<HydrogenUncertainty>,
+    /// Heavy-atom targets with unresolved source geometry or chemistry.
+    pub bond_uncertainties: Vec<interp::target_uncertainty::BondUncertainty>,
 }
 
 fn res_name_and_id(st: &Structure, p: crate::model::AtomPath) -> String {
@@ -95,6 +120,15 @@ fn select_model(st: &mut Structure, model_id: usize, compat: bool) -> Result<(),
 
 /// Run the whole program on a structure.
 pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String> {
+    let allowed_missing: Vec<String> = p.allow_missing_restraints_for.iter()
+        .map(|name| name.trim().to_ascii_uppercase()).collect();
+    if allowed_missing.iter().any(|name| name.is_empty() || name.chars().any(char::is_whitespace)
+        || matches!(name.as_str(), "." | "?")) {
+        return Err("Allowed missing restraints require component identifiers".into());
+    }
+    if p.compat && !allowed_missing.is_empty() {
+        return Err("Component-specific missing restraints require fixed mode".into());
+    }
     // `compat` governs the optimizer too
     let p = &{
         let mut p = p.clone();
@@ -111,6 +145,10 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
     if let Some(mid) = p.model_id {
         select_model(&mut st, mid, p.compat)?;
     }
+    let required_sources = required_parent_sources(&st, p)?;
+    let mut uncertainty = uncertainty::Policy::read(&st, ml, p)?;
+    let mut hydrogen_uncertainties = Vec::new();
+    let mut bond_uncertainties = Vec::new();
     let mut held = if p.compat { HeldAtoms::default() } else { st.take_atoms(|_, a| a.elem() == "X") };
     if !held.is_empty() {
         let note = format!("Kept {} atoms of unknown element (X) unchanged; they get no hydrogens and are not scored\n", held.len());
@@ -152,7 +190,14 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                     compat: p.compat,
                     cell: cell.clone(),
                 };
-                let placed = hplace::place_hydrogens(&mut st, ml, &hp);
+                let mut placed = hplace::place_hydrogens(&mut st, ml, &hp);
+                bond_uncertainties = interp::target_uncertainty::inspect(&st, &placed.bonds);
+                if p.allow_unresolved_bond_targets && !placed.unplaced_hydrogens.is_empty() {
+                    interp::target_uncertainty::add_degenerate_heavy_bonds(&st, &placed.bonds, &mut bond_uncertainties);
+                }
+                uncertainty.annotate_observed_bond_targets(&st, &placed, &mut bond_uncertainties);
+                uncertainty.authorize_bond_targets(&bond_uncertainties);
+                hydrogen_uncertainties.extend(uncertainty.prepare_targets(&mut st, &mut placed, &bond_uncertainties, ml)?);
                 log += &placed.log;
                 if let Some(h) = placed.axial_reference.first() {
                     return Err(axial_reference_error(h));
@@ -160,21 +205,57 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
                 if !placed.no_h_placed.is_empty() {
                     let mut bad: Vec<String> = placed.no_h_placed.clone();
                     bad.dedup();
+                    let (allowed, missing): (Vec<_>, Vec<_>) = bad.iter().partition(|name| {
+                        allowed_missing.contains(&name.trim().to_ascii_uppercase())
+                    });
                     // fixed mode places what it can unless asked to stop
                     let stop = if p.compat { !p.ignore_missing_restraints } else { p.stop_on_any_missing_hydrogen };
-                    if stop {
-                        return Err(format!("Restraints were not found for the following residues: {}", bad.join(" ")));
+                    if stop && !missing.is_empty() {
+                        return Err(format!("Restraints were not found for the following residues: {}",
+                            missing.into_iter().map(String::as_str).collect::<Vec<_>>().join(" ")));
                     }
                     if !p.compat {
                         let note = format!("No restraints were found for residues {}: they get no new hydrogens\n", bad.join(" "));
                         log += &note;
                         desc += &note;
                     }
+                    if !allowed.is_empty() {
+                        let note = format!("Allowed missing restraints for components {}: retained heavy atoms for contact scoring; no new hydrogens\n",
+                            allowed.into_iter().map(String::as_str).collect::<Vec<_>>().join(" "));
+                        log += &note;
+                        desc += &note;
+                    }
                 }
-                if p.stop_on_any_missing_hydrogen && !placed.site_labels_no_para.is_empty() {
+                let mut required_unplaced = Vec::new();
+                let mut context_unplaced = Vec::new();
+                for site in &placed.unplaced_hydrogens {
+                    let parent = match site.parent_sources.as_slice() { [row] => Some(*row), _ => None };
+                    if uncertainty.allows_bridge(&site.hydrogen_name, &site.parent_sources) {
+                        continue;
+                    } else if parent.is_some_and(|row| uncertainty.allows(row)) {
+                        hydrogen_uncertainties.push(HydrogenUncertainty {
+                            parent_sources: site.parent_sources.clone(),
+                            hydrogen_name: site.hydrogen_name.clone(),
+                            reason: site.reason,
+                        });
+                    } else if site.strict_restraints {
+                        if required_sources.as_ref().is_some_and(|required| parent.is_some_and(|row| !required.contains(&row))) {
+                            context_unplaced.push(site.label.as_str());
+                        } else { required_unplaced.push(site.label.as_str()); }
+                    } else if uncertainty.enabled() && parent.is_some_and(|row|
+                        required_sources.as_ref().is_none_or(|required| required.contains(&row))) {
+                        required_unplaced.push(site.label.as_str());
+                    }
+                }
+                if !context_unplaced.is_empty() {
+                    let note = format!("Removed unplaced context hydrogens outside required target parents: {}\n", context_unplaced.join(","));
+                    log += &note;
+                    desc += &note;
+                }
+                if p.stop_on_any_missing_hydrogen && !required_unplaced.is_empty() {
                     return Err(format!(
                         "Insufficient restraints were found for the following atoms:{}",
-                        placed.site_labels_no_para.join(",")
+                        required_unplaced.join(",")
                     ));
                 }
                 if !st.has_hydrogens() {
@@ -228,11 +309,28 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
             st.retain_atoms(|a| a.elem() != "H");
         }
     }
+    uncertainty.restore_observed(&mut st, &hydrogen_uncertainties, &bond_uncertainties, ml)?;
     st.restore_atoms(held);
     st.sort_atoms_in_place();
     st.reset_serial();
     st.reset_i_seq();
-    Ok(Output { structure: st, description: desc, log })
+    Ok(Output { structure: st, description: desc, log, hydrogen_uncertainties, bond_uncertainties })
+}
+
+fn required_parent_sources(st: &Structure, p: &Params) -> Result<Option<rustc_hash::FxHashSet<u32>>, String> {
+    let Some(rows) = &p.required_hydrogen_parent_sources else { return Ok(None) };
+    if p.compat || p.approach != Approach::Add || !p.stop_on_any_missing_hydrogen {
+        return Err("Required hydrogen parents need strict fixed-mode hydrogen addition".into());
+    }
+    let required: rustc_hash::FxHashSet<u32> = rows.iter().copied().collect();
+    let heavy: rustc_hash::FxHashSet<u32> = st.atom_paths().into_iter().filter_map(|p| {
+        let atom = st.atom(p);
+        (!atom.is_hydrogen() && atom.src != crate::model::Atom::NEW).then_some(atom.src)
+    }).collect();
+    if required.is_empty() || required.len() != rows.len() || !required.is_subset(&heavy) {
+        return Err("Required hydrogen parents must be unique heavy source rows in the selected model".into());
+    }
+    Ok(Some(required))
 }
 
 /// Restraint data that hydrogen placement leaves on the model. Reduce2 keeps
@@ -313,6 +411,7 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
                 expected_heavy: &expected_heavy,
                 dictionary_nh2_torsion: !p.compat,
                 reroute_axial_reference: !p.compat,
+                use_plane_restraints: !p.compat,
             };
             let rr = crate::riding::riding(&it, &mut sites, &ra, false);
             if let Some(&h) = rr.axial_reference.first() {

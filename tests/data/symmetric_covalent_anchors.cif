@@ -1,0 +1,323 @@
+# {"fields":[{"name":"cif","dtype":"|u1","shape":[-1]},{"name":"crop_center","dtype":"<i8","shape":[-1]},{"name":"crop_chain_bits","dtype":"<u8","shape":[-1]},{"name":"crop_chain_words","dtype":"<i8","shape":[-1]},{"name":"crop_offsets","dtype":"<i8","shape":[-1]},{"name":"crop_probability","dtype":"<f8","shape":[-1]},{"name":"crop_radius","dtype":"<f4","shape":[-1]},{"name":"crop_tie","dtype":"<i8","shape":[-1]},{"name":"layout_sha256","dtype":"|u1","shape":[-1]},{"name":"model","dtype":"<i8","shape":[-1]},{"name":"token_keys","dtype":"|u1","shape":[-1]}],"record_index":{"offset":28061536,"size":51913,"raw_size":186669,"sha256":"6e3b0db8c92afa4b6085a66fbd7fcda8ec8125ff8dab932eaff897cfbbd77e48"},"frame":{"file":"train-000104-0147.zstd","bytes":51913,"sha256":"6e3b0db8c92afa4b6085a66fbd7fcda8ec8125ff8dab932eaff897cfbbd77e48"},"provenance":{"entry_id":"4KWK","assembly_id":"1","model_id":1,"source_sha256":"f801295c765f27fdcb6f57db99dcc8ece4d603f2bded52bbedc5e5ce0670b56d","protein_residues":187,"max_assembly_residues":5000,"assembly_merged_atom_sources":[],"conformer_policy":"clash-aware-altloc.v1; seed=0; no parent substitution","status":"ok","crop_acceptance":1.0,"draw_probability":2.8433938293804473e-07,"probability":2.8433938293804473e-07,"split_cluster":"b20b9c40a503dc8b28440c0d4c261bd31e6eec623f94bb196989dcb11b8bf025"},"descriptor":"/Users/kiarash.jamali/.codex/worktrees/superatom-afdb/kaveh-novo/runs/production-planning-20261014/full-pdb-audit-v1-failures/owner-08/train-000104-0147.json","source_rows":[720,721,722,723,724,725,1241,1242,1243,1244,1245,1246,1247,1248,1249,1250,1251,1252]}
+data_train_000104_0147
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 721 N N . CYS A 1 93 ? -1.898 -21.214 -12.617 1.00 14.77 ? 93 CYS A N 1
+ATOM 722 C CA . CYS A 1 93 ? -2.214 -20.455 -13.816 1.00 14.72 ? 93 CYS A CA 1
+ATOM 723 C C . CYS A 1 93 ? -3.372 -21.111 -14.566 1.00 13.73 ? 93 CYS A C 1
+ATOM 724 O O . CYS A 1 93 ? -3.251 -22.270 -14.998 1.00 13.56 ? 93 CYS A O 1
+ATOM 725 C CB . CYS A 1 93 ? -0.972 -20.379 -14.704 1.00 15.62 ? 93 CYS A CB 1
+ATOM 726 S SG . CYS A 1 93 ? -1.217 -19.415 -16.211 1.00 19.90 ? 93 CYS A SG 1
+ATOM 1242 N N . TYR A 1 157 ? -3.998 -15.907 -12.381 1.00 13.92 ? 157 TYR A N 1
+ATOM 1243 C CA . TYR A 1 157 ? -2.763 -16.342 -11.724 1.00 15.34 ? 157 TYR A CA 1
+ATOM 1244 C C . TYR A 1 157 ? -2.866 -16.085 -10.239 1.00 15.48 ? 157 TYR A C 1
+ATOM 1245 O O . TYR A 1 157 ? -3.195 -14.973 -9.849 1.00 14.59 ? 157 TYR A O 1
+ATOM 1246 C CB . TYR A 1 157 ? -1.555 -15.577 -12.289 1.00 16.79 ? 157 TYR A CB 1
+ATOM 1247 C CG . TYR A 1 157 ? -1.369 -15.870 -13.758 1.00 18.06 ? 157 TYR A CG 1
+ATOM 1248 C CD1 . TYR A 1 157 ? -1.451 -14.855 -14.717 1.00 19.75 ? 157 TYR A CD1 1
+ATOM 1249 C CD2 . TYR A 1 157 ? -1.183 -17.160 -14.184 1.00 17.91 ? 157 TYR A CD2 1
+ATOM 1250 C CE1 . TYR A 1 157 ? -1.318 -15.129 -16.076 1.00 19.48 ? 157 TYR A CE1 1
+ATOM 1251 C CE2 . TYR A 1 157 ? -1.057 -17.441 -15.538 1.00 19.91 ? 157 TYR A CE2 1
+ATOM 1252 C CZ . TYR A 1 157 ? -1.125 -16.417 -16.474 1.00 20.12 ? 157 TYR A CZ 1
+ATOM 1253 O OH . TYR A 1 157 ? -1.006 -16.737 -17.814 1.00 21.90 ? 157 TYR A OH 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale1 covale none ? A CYS 93 SG ? ? ? 1_555 A TYR 157 CE2 ? ? A CYS 93 A TYR 157 1_555 ? ? ? ? ? ? ? 2.092 ? ?
+
+# {"fields":[{"name":"cif","dtype":"|u1","shape":[-1]},{"name":"crop_center","dtype":"<i8","shape":[-1]},{"name":"crop_chain_bits","dtype":"<u8","shape":[-1]},{"name":"crop_chain_words","dtype":"<i8","shape":[-1]},{"name":"crop_offsets","dtype":"<i8","shape":[-1]},{"name":"crop_probability","dtype":"<f8","shape":[-1]},{"name":"crop_radius","dtype":"<f4","shape":[-1]},{"name":"crop_tie","dtype":"<i8","shape":[-1]},{"name":"layout_sha256","dtype":"|u1","shape":[-1]},{"name":"model","dtype":"<i8","shape":[-1]},{"name":"token_keys","dtype":"|u1","shape":[-1]}],"record_index":{"offset":13555146,"size":116646,"raw_size":428930,"sha256":"0879441034ae3dd7f80a18cc8bb9ded69bae44d295e4d4425473ff7e4f457d23"},"frame":{"file":"train-000082-0107.zstd","bytes":116646,"sha256":"0879441034ae3dd7f80a18cc8bb9ded69bae44d295e4d4425473ff7e4f457d23"},"provenance":{"entry_id":"1ZJ8","assembly_id":"1","model_id":1,"source_sha256":"e3d7698b04ec3514209f421e8479b27301bd8f3c1bbc8ec3be21560a26c973fe","protein_residues":546,"max_assembly_residues":5000,"assembly_merged_atom_sources":[],"conformer_policy":"clash-aware-altloc.v1; seed=0; no parent substitution","status":"ok","crop_acceptance":0.2686084142394823,"draw_probability":5.260278584353827e-06,"probability":1.4129550890011904e-06,"split_cluster":"2e68982edaf8c2d073f5db5fcf83a11abefe7da94013a19edd187c479a7f974e"},"descriptor":"/Users/kiarash.jamali/.codex/worktrees/superatom-afdb/kaveh-novo/runs/production-planning-20261014/full-pdb-audit-v1-failures/owner-18/train-000082-0107.json","source_rows":[493,494,495,496,497,498,499,500,501,502,503,504,1236,1237,1238,1239,1240,1241]}
+data_train_000082_0107
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 494 N N . TYR A 1 80 ? 25.065 29.040 51.895 1.00 49.35 ? 69 TYR A N 1
+ATOM 495 C CA . TYR A 1 80 ? 23.735 28.851 52.421 1.00 49.41 ? 69 TYR A CA 1
+ATOM 496 C C . TYR A 1 80 ? 23.911 27.722 53.478 1.00 49.51 ? 69 TYR A C 1
+ATOM 497 O O . TYR A 1 80 ? 24.638 26.745 53.272 1.00 49.41 ? 69 TYR A O 1
+ATOM 498 C CB . TYR A 1 80 ? 22.796 28.472 51.247 1.00 49.26 ? 69 TYR A CB 1
+ATOM 499 C CG . TYR A 1 80 ? 21.833 29.529 50.645 1.00 48.81 ? 69 TYR A CG 1
+ATOM 500 C CD1 . TYR A 1 80 ? 20.610 29.772 51.277 1.00 48.83 ? 69 TYR A CD1 1
+ATOM 501 C CD2 . TYR A 1 80 ? 22.075 30.192 49.381 1.00 49.62 ? 69 TYR A CD2 1
+ATOM 502 C CE1 . TYR A 1 80 ? 19.674 30.665 50.756 1.00 49.04 ? 69 TYR A CE1 1
+ATOM 503 C CE2 . TYR A 1 80 ? 21.103 31.087 48.849 1.00 49.64 ? 69 TYR A CE2 1
+ATOM 504 C CZ . TYR A 1 80 ? 19.923 31.314 49.557 1.00 49.48 ? 69 TYR A CZ 1
+ATOM 505 O OH . TYR A 1 80 ? 18.978 32.181 49.074 1.00 49.49 ? 69 TYR A OH 1
+ATOM 1237 N N . CYS A 1 172 ? 24.258 33.483 45.695 1.00 46.07 ? 161 CYS A N 1
+ATOM 1238 C CA . CYS A 1 172 ? 23.025 33.572 46.499 1.00 45.91 ? 161 CYS A CA 1
+ATOM 1239 C C . CYS A 1 172 ? 22.787 35.071 46.809 1.00 45.50 ? 161 CYS A C 1
+ATOM 1240 O O . CYS A 1 172 ? 23.618 35.916 46.484 1.00 44.75 ? 161 CYS A O 1
+ATOM 1241 C CB . CYS A 1 172 ? 23.169 32.743 47.813 1.00 46.30 ? 161 CYS A CB 1
+ATOM 1242 S SG . CYS A 1 172 ? 22.450 31.001 47.962 1.00 48.67 ? 161 CYS A SG 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale1 covale none ? A TYR 80 CE2 ? ? ? 1_555 A CYS 172 SG ? ? A TYR 69 A CYS 161 1_555 ? ? ? ? ? ? ? 1.615 ? ?
+
+# {"fields":[{"name":"cif","dtype":"|u1","shape":[-1]},{"name":"crop_center","dtype":"<i8","shape":[-1]},{"name":"crop_chain_bits","dtype":"<u8","shape":[-1]},{"name":"crop_chain_words","dtype":"<i8","shape":[-1]},{"name":"crop_offsets","dtype":"<i8","shape":[-1]},{"name":"crop_probability","dtype":"<f8","shape":[-1]},{"name":"crop_radius","dtype":"<f4","shape":[-1]},{"name":"crop_tie","dtype":"<i8","shape":[-1]},{"name":"layout_sha256","dtype":"|u1","shape":[-1]},{"name":"model","dtype":"<i8","shape":[-1]},{"name":"token_keys","dtype":"|u1","shape":[-1]}],"record_index":{"offset":13671792,"size":116480,"raw_size":428738,"sha256":"7783b203ff6318e384d9d62a7d724d49ebf394c6b825b50b73563193010a0bd6"},"frame":{"file":"train-000082-0108.zstd","bytes":116480,"sha256":"7783b203ff6318e384d9d62a7d724d49ebf394c6b825b50b73563193010a0bd6"},"provenance":{"entry_id":"1ZJ8","assembly_id":"2","model_id":1,"source_sha256":"e3d7698b04ec3514209f421e8479b27301bd8f3c1bbc8ec3be21560a26c973fe","protein_residues":546,"max_assembly_residues":5000,"assembly_merged_atom_sources":[],"conformer_policy":"clash-aware-altloc.v1; seed=0; no parent substitution","status":"ok","crop_acceptance":0.27022653721682854,"draw_probability":5.260278584353827e-06,"probability":1.4214668666457757e-06,"split_cluster":"2e68982edaf8c2d073f5db5fcf83a11abefe7da94013a19edd187c479a7f974e"},"descriptor":"/Users/kiarash.jamali/.codex/worktrees/superatom-afdb/kaveh-novo/runs/production-planning-20261014/full-pdb-audit-v1-failures/owner-18/train-000082-0108.json","source_rows":[493,494,495,496,497,498,499,500,501,502,503,504,1236,1237,1238,1239,1240,1241]}
+data_train_000082_0108
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 494 N N . TYR B 1 80 ? 66.771 38.727 23.868 1.00 49.13 ? 69 TYR B N 1
+ATOM 495 C CA . TYR B 1 80 ? 67.866 38.905 22.936 1.00 49.15 ? 69 TYR B CA 1
+ATOM 496 C C . TYR B 1 80 ? 68.759 39.970 23.523 1.00 49.24 ? 69 TYR B C 1
+ATOM 497 O O . TYR B 1 80 ? 68.283 40.944 24.087 1.00 49.35 ? 69 TYR B O 1
+ATOM 498 C CB . TYR B 1 80 ? 67.382 39.413 21.587 1.00 48.63 ? 69 TYR B CB 1
+ATOM 499 C CG . TYR B 1 80 ? 66.893 38.373 20.642 1.00 48.10 ? 69 TYR B CG 1
+ATOM 500 C CD1 . TYR B 1 80 ? 67.737 37.801 19.718 1.00 47.96 ? 69 TYR B CD1 1
+ATOM 501 C CD2 . TYR B 1 80 ? 65.554 37.989 20.643 1.00 49.29 ? 69 TYR B CD2 1
+ATOM 502 C CE1 . TYR B 1 80 ? 67.266 36.848 18.821 1.00 48.60 ? 69 TYR B CE1 1
+ATOM 503 C CE2 . TYR B 1 80 ? 65.059 37.035 19.746 1.00 47.86 ? 69 TYR B CE2 1
+ATOM 504 C CZ . TYR B 1 80 ? 65.932 36.482 18.841 1.00 47.93 ? 69 TYR B CZ 1
+ATOM 505 O OH . TYR B 1 80 ? 65.487 35.550 17.969 1.00 48.57 ? 69 TYR B OH 1
+ATOM 1237 N N . CYS B 1 172 ? 61.331 34.180 20.900 1.00 45.55 ? 161 CYS B N 1
+ATOM 1238 C CA . CYS B 1 172 ? 62.501 34.033 20.028 1.00 45.34 ? 161 CYS B CA 1
+ATOM 1239 C C . CYS B 1 172 ? 62.895 32.554 20.005 1.00 45.26 ? 161 CYS B C 1
+ATOM 1240 O O . CYS B 1 172 ? 62.290 31.748 20.707 1.00 44.79 ? 161 CYS B O 1
+ATOM 1241 C CB . CYS B 1 172 ? 63.669 34.859 20.564 1.00 45.55 ? 161 CYS B CB 1
+ATOM 1242 S SG . CYS B 1 172 ? 63.591 36.636 20.329 1.00 44.24 ? 161 CYS B SG 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale2 covale none ? B TYR 80 CE2 ? ? ? 1_555 B CYS 172 SG ? ? B TYR 69 B CYS 161 1_555 ? ? ? ? ? ? ? 1.629 ? ?
+
+# {"fields":[{"name":"cif","dtype":"|u1","shape":[-1]},{"name":"crop_center","dtype":"<i8","shape":[-1]},{"name":"crop_chain_bits","dtype":"<u8","shape":[-1]},{"name":"crop_chain_words","dtype":"<i8","shape":[-1]},{"name":"crop_offsets","dtype":"<i8","shape":[-1]},{"name":"crop_probability","dtype":"<f8","shape":[-1]},{"name":"crop_radius","dtype":"<f4","shape":[-1]},{"name":"crop_tie","dtype":"<i8","shape":[-1]},{"name":"layout_sha256","dtype":"|u1","shape":[-1]},{"name":"model","dtype":"<i8","shape":[-1]},{"name":"token_keys","dtype":"|u1","shape":[-1]}],"record_index":{"offset":7076963,"size":51683,"raw_size":184299,"sha256":"5f6cff0f53118e7f055cdeb36a06ad8f06dd4ff5e8eb9c097a71ae3b5d0d2e00"},"frame":{"file":"train-000179-0038.zstd","bytes":51683,"sha256":"5f6cff0f53118e7f055cdeb36a06ad8f06dd4ff5e8eb9c097a71ae3b5d0d2e00"},"provenance":{"entry_id":"4KWL","assembly_id":"1","model_id":1,"source_sha256":"808bb85adb19b8b5fb36210e4bf9ae7be724551cbf1d929e868765e2555628df","protein_residues":187,"max_assembly_residues":5000,"assembly_merged_atom_sources":[],"conformer_policy":"clash-aware-altloc.v1; seed=0; no parent substitution","status":"ok","crop_acceptance":1.0,"draw_probability":2.8433938293804473e-07,"probability":2.8433938293804473e-07,"split_cluster":"b20b9c40a503dc8b28440c0d4c261bd31e6eec623f94bb196989dcb11b8bf025"},"descriptor":"/Users/kiarash.jamali/.codex/worktrees/superatom-afdb/kaveh-novo/runs/production-planning-20261014/full-pdb-audit-v1-failures/owner-19/train-000179-0038.json","source_rows":[720,721,722,723,724,725,1241,1242,1243,1244,1245,1246,1247,1248,1249,1250,1251,1252]}
+data_train_000179_0038
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 721 N N . CYS A 1 93 ? -1.795 20.992 -17.775 1.00 15.28 ? 93 CYS A N 1
+ATOM 722 C CA . CYS A 1 93 ? -2.150 20.268 -16.557 1.00 15.34 ? 93 CYS A CA 1
+ATOM 723 C C . CYS A 1 93 ? -3.328 20.960 -15.866 1.00 13.95 ? 93 CYS A C 1
+ATOM 724 O O . CYS A 1 93 ? -3.216 22.118 -15.449 1.00 14.59 ? 93 CYS A O 1
+ATOM 725 C CB . CYS A 1 93 ? -0.949 20.235 -15.609 1.00 16.27 ? 93 CYS A CB 1
+ATOM 726 S SG . CYS A 1 93 ? -1.200 19.177 -14.176 1.00 21.27 ? 93 CYS A SG 1
+ATOM 1242 N N . TYR A 1 157 ? -3.984 15.778 -18.109 1.00 13.07 ? 157 TYR A N 1
+ATOM 1243 C CA . TYR A 1 157 ? -2.756 16.244 -18.745 1.00 14.39 ? 157 TYR A CA 1
+ATOM 1244 C C . TYR A 1 157 ? -2.826 15.988 -20.226 1.00 14.95 ? 157 TYR A C 1
+ATOM 1245 O O . TYR A 1 157 ? -3.163 14.886 -20.643 1.00 14.84 ? 157 TYR A O 1
+ATOM 1246 C CB . TYR A 1 157 ? -1.545 15.506 -18.181 1.00 15.36 ? 157 TYR A CB 1
+ATOM 1247 C CG . TYR A 1 157 ? -1.412 15.677 -16.698 1.00 16.64 ? 157 TYR A CG 1
+ATOM 1248 C CD1 . TYR A 1 157 ? -1.472 14.586 -15.846 1.00 17.62 ? 157 TYR A CD1 1
+ATOM 1249 C CD2 . TYR A 1 157 ? -1.242 16.931 -16.157 1.00 16.81 ? 157 TYR A CD2 1
+ATOM 1250 C CE1 . TYR A 1 157 ? -1.370 14.742 -14.461 1.00 19.00 ? 157 TYR A CE1 1
+ATOM 1251 C CE2 . TYR A 1 157 ? -1.139 17.099 -14.788 1.00 18.60 ? 157 TYR A CE2 1
+ATOM 1252 C CZ . TYR A 1 157 ? -1.195 16.004 -13.950 1.00 18.39 ? 157 TYR A CZ 1
+ATOM 1253 O OH . TYR A 1 157 ? -1.077 16.210 -12.587 1.00 20.37 ? 157 TYR A OH 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale1 covale none ? A CYS 93 SG ? ? ? 1_555 A TYR 157 CE2 ? ? A CYS 93 A TYR 157 1_555 ? ? ? ? ? ? ? 2.167 ? ?

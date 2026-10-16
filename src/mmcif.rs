@@ -104,23 +104,19 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
     }
 
     let mut models: Vec<Model> = Vec::new();
-    let (mut cur_model, mut cur_label_asym, mut cur_auth_asym, mut cur_res, mut cur_ins): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = (None, None, None, None, None);
+    // Rows may return to a chain or residue earlier in the same model block.
+    let mut chain_index = rustc_hash::FxHashMap::default();
+    let mut residue_index = rustc_hash::FxHashMap::default();
+    let (mut cur_model, mut cur_label_asym, mut cur_auth_asym): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut cur_chain = 0;
     let mut prev_comp: Option<String> = None;
-    let mut first_in_chain = true;
-    // (altloc, resname) -> atom group index, for the current residue group
-    let mut ag_index: Vec<(String, String, usize)> = Vec::new();
     for r in 0..cat.row_count() {
         let model_id = c_model.map(|c| get(r, c).into_owned()).unwrap_or_else(|| "1".into());
         let new_model = cur_model.as_deref() != Some(model_id.as_str());
         if new_model {
             models.push(Model { id: model_id.clone(), chains: Vec::new() });
         }
+        let mi = models.len() - 1;
         let label_asym = get(r, c_label_asym).into_owned();
         let auth_asym = get(r, c_auth_asym).into_owned();
         if matches!(auth_asym.as_str(), "." | "?" | " " | "") {
@@ -128,25 +124,20 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         }
         let label_changed = cur_label_asym.as_deref() != Some(label_asym.as_str());
         let auth_changed = cur_auth_asym.as_deref() != Some(auth_asym.as_str());
-        let model = models.last_mut().unwrap();
-        let mut new_chain = false;
-        if auth_changed || new_model || (label_changed && r > 0 && prev_comp.as_deref().map_or(false, is_aa_or_rna_dna)) {
-            model.chains.push(Chain { id: auth_asym.clone(), residue_groups: Vec::new() });
-            first_in_chain = true;
-            new_chain = true;
-        }
+        let model = &mut models[mi];
+        let ci = *chain_index.entry((mi, auth_asym.clone(), label_asym.clone())).or_insert_with(|| {
+            if auth_changed || new_model || (label_changed && r > 0 && prev_comp.as_deref().map_or(false, is_aa_or_rna_dna)) {
+                model.chains.push(Chain { id: auth_asym.clone(), residue_groups: Vec::new() });
+                model.chains.len() - 1
+            } else { cur_chain }
+        });
         let res = get(r, c_seq).into_owned();
         let mut ins = c_ins.map(|c| get(r, c).into_owned()).unwrap_or_else(|| " ".into());
         if matches!(ins.as_str(), "?" | ".") {
             ins = " ".into();
         }
-        let chain = model.chains.last_mut().unwrap();
-        if new_chain
-            || cur_res.as_deref() != Some(res.as_str())
-            || cur_ins.as_deref() != Some(ins.as_str())
-            || auth_changed
-            || new_model
-        {
+        let chain = &mut model.chains[ci];
+        let ri = if let Some(&index) = residue_index.get(&(mi, ci, res.clone(), ins.clone())) { index } else {
             let resseq = match res.trim().parse::<i64>() {
                 Ok(v) => hy36_encode(4, v).unwrap_or_else(|| res.clone()),
                 Err(_) => {
@@ -158,7 +149,7 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
             };
             let mut link = true;
             if let Some(cb) = c_break {
-                if !first_in_chain && get(r, cb) == "1" {
+                if !chain.residue_groups.is_empty() && get(r, cb) == "1" {
                     link = false;
                 }
             }
@@ -168,29 +159,26 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
                 link_to_previous: link,
                 atom_groups: Vec::new(),
             });
-            first_in_chain = false;
-            ag_index.clear();
-        }
-        let rg = chain.residue_groups.last_mut().unwrap();
+            let index = chain.residue_groups.len() - 1;
+            residue_index.insert((mi, ci, res.clone(), ins.clone()), index);
+            index
+        };
+        let rg = &mut chain.residue_groups[ri];
         let mut alt = get(r, c_alt).into_owned();
         if alt == "." || alt == "?" {
             alt.clear();
         }
         let comp = get(r, c_comp).into_owned();
-        let gi = match ag_index.iter().find(|(a, c, _)| *a == alt && *c == comp) {
-            Some(&(_, _, i)) => i,
+        let resname = format!("{:>3}", comp);
+        let gi = match rg.atom_groups.iter().position(|group| group.altloc == alt && group.resname == resname) {
+            Some(i) => i,
             None => {
-                let ag = AtomGroup { altloc: alt.clone(), resname: format!("{:>3}", comp), atoms: Vec::new() };
+                let ag = AtomGroup { altloc: alt.clone(), resname, atoms: Vec::new() };
                 if alt.is_empty() {
                     rg.atom_groups.insert(0, ag);
-                    for e in ag_index.iter_mut() {
-                        e.2 += 1;
-                    }
-                    ag_index.push((alt.clone(), comp.clone(), 0));
                     0
                 } else {
                     rg.atom_groups.push(ag);
-                    ag_index.push((alt.clone(), comp.clone(), rg.atom_groups.len() - 1));
                     rg.atom_groups.len() - 1
                 }
             }
@@ -230,8 +218,7 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         cur_model = Some(model_id);
         cur_label_asym = Some(label_asym);
         cur_auth_asym = Some(auth_asym);
-        cur_res = Some(res);
-        cur_ins = Some(ins);
+        cur_chain = ci;
         prev_comp = Some(comp);
     }
     if models.len() == 1 {
@@ -265,9 +252,48 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         crystal = Some(CrystalSymmetry { cell: [a, b, c, al, be, ga], space_group: sg });
     }
     let had = crystal.is_some();
-    let mut st = Structure { models, crystal, had_cell_record: had, links: Vec::new(), pdb_records: PdbRecords::default() };
+    let mut st = Structure { models, crystal, had_cell_record: had, links: covalent_links(block), pdb_records: PdbRecords::default() };
     st.reset_i_seq();
     Ok(st)
+}
+
+fn covalent_links<S: CifSource + ?Sized>(source: &S) -> Vec<LinkRecord> {
+    let Some(table) = source.table("struct_conn") else { return Vec::new() };
+    let value = |row, name: &str| {
+        table.column(name).map(|col| table.cell(row, col).into_owned())
+            .filter(|s| !cif::is_null(s)).unwrap_or_default()
+    };
+    let partner = |row, side| {
+        let field = |stem: &str| value(row, &format!("ptnr{side}_{stem}"));
+        let fallback = |auth, label| {
+            let result = field(auth);
+            if result.is_empty() { field(label) } else { result }
+        };
+        AtomLabel {
+            name: field("label_atom_id"),
+            altloc: value(row, &format!("pdbx_ptnr{side}_label_alt_id")),
+            resname: fallback("auth_comp_id", "label_comp_id"),
+            chain: fallback("auth_asym_id", "label_asym_id"),
+            resseq: fallback("auth_seq_id", "label_seq_id"),
+            icode: value(row, &format!("pdbx_ptnr{side}_PDB_ins_code")),
+        }
+    };
+    (0..table.row_count()).filter_map(|row| {
+        let kind = value(row, "conn_type_id");
+        if !matches!(kind.as_str(), "covale" | "disulf")
+            || value(row, "ptnr1_symmetry") != "1_555"
+            || value(row, "ptnr2_symmetry") != "1_555" {
+            return None;
+        }
+        let (atom1, atom2) = (partner(row, 1), partner(row, 2));
+        if [&atom1, &atom2].iter().any(|a| a.name.is_empty() || a.resname.is_empty() || a.chain.is_empty() || a.resseq.is_empty()) {
+            return None;
+        }
+        Some(LinkRecord {
+            atom1, atom2, distance: table.column("pdbx_dist_value").and_then(|col| table.number(row, col)), kind,
+            order: Some(value(row, "pdbx_value_order")).filter(|v| !v.is_empty()),
+        })
+    }).collect()
 }
 
 /// `all_label_asym_ids()[n]`: A..Z, then AA, AB, ... (letters with repeats).

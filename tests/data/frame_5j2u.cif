@@ -1,0 +1,95 @@
+data_default
+loop_
+  _struct_asym.id
+   A
+
+loop_
+  _chem_comp.id
+   3WT
+   3WU
+   PHE
+   VAL
+
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.auth_atom_id
+  _atom_site.pdbx_PDB_model_num
+   ATOM 1 N . VAL G 2 ? 1.32900 42.13200 15.97100 1.000 40.40000 N ? A ? 1 N 1
+   ATOM 2 CA . VAL G 2 ? 1.61800 43.13600 15.01200 1.000 40.49000 C ? A ? 1 CA 1
+   ATOM 3 C . VAL G 2 ? 1.61400 44.44200 15.83900 1.000 49.37000 C ? A ? 1 C 1
+   ATOM 4 O . VAL G 2 ? 0.58400 44.71600 16.37700 1.000 45.10000 O ? A ? 1 O 1
+   ATOM 5 CB . VAL G 2 ? 0.54400 43.20800 13.94600 1.000 45.42000 C ? A ? 1 CB 1
+   ATOM 6 CG1 . VAL G 2 ? 0.89700 44.33500 12.97000 1.000 45.47000 C ? A ? 1 CG1 1
+   ATOM 7 CG2 . VAL G 2 ? 0.53900 41.88700 13.19600 1.000 43.78000 C ? A ? 1 CG2 1
+   HETATM 8 N . 3WT G 3 ? 2.79400 45.36200 16.03100 1.000 58.07000 N ? A ? 2 N 1
+   HETATM 9 C20 . 3WT G 3 ? 2.24300 47.73600 15.98100 1.000 42.04000 C ? A ? 2 C20 1
+   HETATM 10 C21 . 3WT G 3 ? 3.69000 46.77800 17.85600 1.000 40.01000 C ? A ? 2 C21 1
+   HETATM 11 CA . 3WT G 3 ? 2.56100 46.54000 16.86900 1.000 51.03000 C ? A ? 2 CA 1
+   HETATM 12 C26 . 3WT G 3 ? 3.45600 48.27400 15.17500 1.000 39.40000 C ? A ? 2 C26 1
+   HETATM 13 C . 3WT G 3 ? 3.36400 49.82100 14.98200 1.000 44.53000 C ? A ? 2 C 1
+   HETATM 14 O5 . 3WT G 3 ? 1.20500 47.34300 15.09000 1.000 43.93000 O ? A ? 2 O5 1
+   HETATM 15 O . 3WT G 3 ? 2.83500 50.50000 15.85300 1.000 50.06000 O ? A ? 2 O 1
+   HETATM 16 C23 . 3WT G 3 ? 3.71700 45.62600 18.85100 1.000 36.02000 C ? A ? 2 C23 1
+   HETATM 17 C24 . 3WT G 3 ? 2.75300 45.80100 20.02500 1.000 41.40000 C ? A ? 2 C24 1
+   HETATM 18 C22 . 3WT G 3 ? 3.53900 48.08900 18.56300 1.000 40.95000 C ? A ? 2 C22 1
+   HETATM 19 C25 . 3WT G 3 ? 4.06500 45.10500 15.44000 1.000 46.20000 C ? A ? 2 C25 1
+   HETATM 20 C28 . 3WT G 3 ? -0.02500 48.06700 15.27700 1.000 45.18000 C ? A ? 2 C28 1
+   HETATM 21 C4 . 3WU G 4 ? 5.44200 50.92900 12.01400 1.000 39.89000 C ? A ? 3 C4 1
+   HETATM 22 C7 . 3WU G 4 ? 0.93200 54.32800 13.39300 1.000 39.91000 C ? A ? 3 C7 1
+   HETATM 23 C6 . 3WU G 4 ? 2.36300 53.87700 13.42700 1.000 47.21000 C ? A ? 3 C6 1
+   HETATM 24 C9 . 3WU G 4 ? 0.67500 50.86500 12.94100 1.000 36.27000 C ? A ? 3 C9 1
+   HETATM 25 C . 3WU G 4 ? 3.06700 54.51800 14.62100 1.000 44.94000 C ? A ? 3 C 1
+   HETATM 26 N . 3WU G 4 ? 3.91600 50.46100 13.75300 1.000 37.62000 N ? A ? 3 N 1
+   HETATM 27 CA . 3WU G 4 ? 3.87400 51.88000 13.49100 1.000 44.23000 C ? A ? 3 CA 1
+   HETATM 28 C3 . 3WU G 4 ? 4.50800 52.14900 12.17300 1.000 50.12000 C ? A ? 3 C3 1
+   HETATM 29 C1 . 3WU G 4 ? 4.58400 49.81300 12.67300 1.000 48.90000 C ? A ? 3 C1 1
+   HETATM 30 C5 . 3WU G 4 ? 2.43800 52.35600 13.52300 1.000 38.60000 C ? A ? 3 C5 1
+   HETATM 31 O1 . 3WU G 4 ? 1.69600 51.78600 12.47400 1.000 43.93000 O ? A ? 3 O1 1
+   HETATM 32 O . 3WU G 4 ? 2.84100 54.13200 15.77400 1.000 52.94000 O ? A ? 3 O 1
+   ATOM 33 N . PHE G 5 ? 4.02100 55.58300 14.36600 1.000 50.85000 N ? A ? 4 N 1
+   ATOM 34 CA . PHE G 5 ? 4.73100 56.24300 15.40800 1.000 45.04000 C ? A ? 4 CA 1
+   ATOM 35 C . PHE G 5 ? 3.98700 57.52800 15.74900 1.000 63.02000 C ? A ? 4 C 1
+   ATOM 36 O . PHE G 5 ? 3.25100 58.02800 14.91500 1.000 64.15000 O -1 A ? 4 O 1
+   ATOM 37 CB . PHE G 5 ? 6.09500 56.57600 14.86500 1.000 50.87000 C ? A ? 4 CB 1
+   ATOM 38 CG . PHE G 5 ? 6.89400 55.25900 14.61500 1.000 42.89000 C ? A ? 4 CG 1
+   ATOM 39 CD1 . PHE G 5 ? 7.47200 54.59400 15.66900 1.000 50.75000 C ? A ? 4 CD1 1
+   ATOM 40 CD2 . PHE G 5 ? 7.02800 54.71000 13.19500 1.000 43.93000 C ? A ? 4 CD2 1
+   ATOM 41 CE1 . PHE G 5 ? 8.25100 53.30800 15.41800 1.000 49.84000 C ? A ? 4 CE1 1
+   ATOM 42 CE2 . PHE G 5 ? 7.72600 53.55600 12.97700 1.000 38.28000 C ? A ? 4 CE2 1
+   ATOM 43 CZ . PHE G 5 ? 8.37200 52.81300 14.14800 1.000 40.96000 C ? A ? 4 CZ 1
+   ATOM 44 OXT . PHE G 5 ? 4.12500 58.05000 16.82400 1.000 58.32000 O ? A ? 4 OXT 1
+
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_symmetry
+covale G VAL 2 C G 3WT 3 N 1.509 ? 1_555 1_555
+covale G 3WT 3 C G 3WU 4 N 1.492 ? 1_555 1_555
+covale G 3WU 4 C G PHE 5 N 1.452 ? 1_555 1_555

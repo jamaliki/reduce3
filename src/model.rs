@@ -7,6 +7,9 @@ use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 use crate::resclass::{self, ResClass};
 
+mod endpoints;
+pub(crate) use endpoints::EndpointResolver;
+
 #[derive(Clone, Debug)]
 pub struct Atom {
     /// Atom name as stored by iotbx: the 4-column PDB field for PDB input
@@ -238,6 +241,8 @@ pub struct LinkRecord {
     pub atom1: AtomLabel,
     pub atom2: AtomLabel,
     pub distance: Option<f64>,
+    /// Deposited bond order, when supplied.
+    pub order: Option<String>,
     pub kind: String,
 }
 
@@ -249,6 +254,18 @@ pub struct AtomLabel {
     pub chain: String,
     pub resseq: String,
     pub icode: String,
+}
+
+impl AtomLabel {
+    /// Match an endpoint in the retained hierarchy.
+    pub(crate) fn matches(&self, st: &Structure, p: AtomPath) -> bool {
+        st.atom(p).name.trim() == self.name.trim()
+            && st.atom_group(p).resname.trim() == self.resname.trim()
+            && st.chain(p).id == self.chain
+            && st.residue_group(p).resseq.trim() == self.resseq.trim()
+            && st.residue_group(p).icode.trim() == self.icode.trim()
+            && (self.altloc.is_empty() || st.atom_group(p).altloc == self.altloc)
+    }
 }
 
 /// Records of an input PDB file that refer to atoms, which fixed mode writes

@@ -1,0 +1,95 @@
+data_reduce3_6wgn
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1298 C CA . GLY F 2 1 ? 2.983 -18.996 12.949 1.00 25.61 ? 0 GLY G CA 1
+ATOM 1299 C C . GLY F 2 1 ? 3.140 -18.561 11.514 1.00 22.38 ? 0 GLY G C 1
+ATOM 1300 O O . GLY F 2 1 ? 3.985 -17.731 11.175 1.00 19.40 ? 0 GLY G O 1
+HETATM 1301 N N . DTY F 2 2 ? 2.304 -19.129 10.660 1.00 16.66 ? 1 DTY G N 1
+HETATM 1302 C CA . DTY F 2 2 ? 2.321 -18.783 9.254 1.00 14.51 ? 1 DTY G CA 1
+HETATM 1303 C C . DTY F 2 2 ? 1.557 -19.845 8.503 1.00 12.46 ? 1 DTY G C 1
+HETATM 1304 O O . DTY F 2 2 ? 0.788 -20.599 9.091 1.00 12.36 ? 1 DTY G O 1
+HETATM 1305 C CB . DTY F 2 2 ? 1.689 -17.395 9.015 1.00 16.45 ? 1 DTY G CB 1
+HETATM 1306 C CG . DTY F 2 2 ? 0.418 -17.133 9.805 1.00 14.91 ? 1 DTY G CG 1
+HETATM 1307 C CD1 . DTY F 2 2 ? 0.449 -16.408 10.996 1.00 16.68 ? 1 DTY G CD1 1
+HETATM 1308 C CD2 . DTY F 2 2 ? -0.817 -17.605 9.361 1.00 12.34 ? 1 DTY G CD2 1
+HETATM 1309 C CE1 . DTY F 2 2 ? -0.707 -16.167 11.717 1.00 15.31 ? 1 DTY G CE1 1
+HETATM 1310 C CE2 . DTY F 2 2 ? -1.982 -17.361 10.080 1.00 15.52 ? 1 DTY G CE2 1
+HETATM 1311 C CZ . DTY F 2 2 ? -1.921 -16.648 11.253 1.00 14.04 ? 1 DTY G CZ 1
+HETATM 1312 O OH . DTY F 2 2 ? -3.080 -16.420 11.961 1.00 14.09 ? 1 DTY G OH 1
+ATOM 1313 N N . PHE F 2 3 ? 1.784 -19.887 7.196 1.00 12.37 ? 2 PHE G N 1
+ATOM 1314 C CA . PHE F 2 3 ? 1.126 -20.831 6.311 1.00 13.67 ? 2 PHE G CA 1
+ATOM 1315 C C . PHE F 2 3 ? 2.099 -21.905 5.855 1.00 12.12 ? 2 PHE G C 1
+ATOM 1316 O O . PHE F 2 3 ? 3.298 -21.659 5.751 1.00 20.11 ? 2 PHE G O 1
+ATOM 1317 C CB . PHE F 2 3 ? 0.544 -20.096 5.112 1.00 12.08 ? 2 PHE G CB 1
+ATOM 1318 C CG . PHE F 2 3 ? -0.494 -19.084 5.494 1.00 10.68 ? 2 PHE G CG 1
+ATOM 1319 C CD1 . PHE F 2 3 ? -1.732 -19.496 5.961 1.00 13.55 ? 2 PHE G CD1 1
+ATOM 1320 C CD2 . PHE F 2 3 ? -0.212 -17.734 5.434 1.00 11.20 ? 2 PHE G CD2 1
+ATOM 1321 C CE1 . PHE F 2 3 ? -2.706 -18.554 6.340 1.00 10.80 ? 2 PHE G CE1 1
+ATOM 1322 C CE2 . PHE F 2 3 ? -1.158 -16.787 5.818 1.00 11.03 ? 2 PHE G CE2 1
+ATOM 1323 C CZ . PHE F 2 3 ? -2.411 -17.202 6.260 1.00 12.63 ? 2 PHE G CZ 1
+ATOM 1420 N N . CYS F 2 14 ? 2.994 -20.895 15.978 1.00 37.21 ? 13 CYS G N 1
+ATOM 1421 C CA . CYS F 2 14 ? 4.304 -20.342 16.342 1.00 44.26 ? 13 CYS G CA 1
+ATOM 1422 C C . CYS F 2 14 ? 4.341 -20.187 17.876 1.00 50.96 ? 13 CYS G C 1
+ATOM 1423 O O . CYS F 2 14 ? 5.123 -19.372 18.301 1.00 54.72 ? 13 CYS G O 1
+ATOM 1424 C CB . CYS F 2 14 ? 4.540 -18.971 15.712 1.00 41.28 ? 13 CYS G CB 1
+ATOM 1425 S SG . CYS F 2 14 ? 4.264 -18.851 13.919 1.00 67.86 ? 13 CYS G SG 1
+
+loop_
+_struct_conn.id
+_struct_conn.conn_type_id
+_struct_conn.pdbx_leaving_atom_flag
+_struct_conn.pdbx_PDB_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_comp_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_standard_comp_id
+_struct_conn.ptnr1_symmetry
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_comp_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_label_alt_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_comp_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_comp_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_symmetry
+_struct_conn.pdbx_ptnr3_label_atom_id
+_struct_conn.pdbx_ptnr3_label_seq_id
+_struct_conn.pdbx_ptnr3_label_comp_id
+_struct_conn.pdbx_ptnr3_label_asym_id
+_struct_conn.pdbx_ptnr3_label_alt_id
+_struct_conn.pdbx_ptnr3_PDB_ins_code
+_struct_conn.details
+_struct_conn.pdbx_dist_value
+_struct_conn.pdbx_value_order
+_struct_conn.pdbx_role
+covale7 covale both ? F GLY 1 C ? ? ? 1_555 F DTY 2 N ? ? G GLY 0 G DTY 1 1_555 ? ? ? ? ? ? ? 1.323 ? ?
+covale8 covale none ? F GLY 1 CA ? ? ? 1_555 F CYS 14 SG ? ? G GLY 0 G CYS 13 1_555 ? ? ? ? ? ? ? 1.613 sing ?
+covale9 covale both ? F DTY 2 C ? ? ? 1_555 F PHE 3 N ? ? G DTY 1 G PHE 2 1_555 ? ? ? ? ? ? ? 1.327 ? ?

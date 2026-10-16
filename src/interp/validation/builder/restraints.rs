@@ -20,25 +20,30 @@ pub(super) fn residue(
             "CCD-derived restraints have not passed reference interpretation parity",
         );
     }
-    if r.is_rna_dna {
-        graph.unsupported(
-            ALL,
-            "Nucleotide pucker and CDL need reference interpretation",
-        );
-    }
     let disulfide = comp.id == "CYS"
         && lookup(r, "SG").is_some_and(|sg| {
             graph
                 .topology
                 .bonds
                 .iter()
+                .chain(&graph.topology.sym_bonds)
                 .any(|b| b.origin == ORIGIN_SS && (b.i == sg || b.j == sg))
+        });
+    let substituted_thiol = comp.id == "CYS"
+        && lookup(r, "SG").is_some_and(|sg| {
+            let cb = lookup(r, "CB");
+            graph
+                .topology
+                .bonds
+                .iter()
+                .chain(&graph.topology.sym_bonds)
+                .any(|b| (b.i == sg && Some(b.j) != cb) || (b.j == sg && Some(b.i) != cb))
         });
     let optional = |name: &str| {
         if lookup(r, name).is_some() {
             return false;
         }
-        if disulfide && name == "HG" {
+        if (disulfide || substituted_thiol) && name == "HG" {
             return true;
         }
         let is_h = comp
@@ -136,7 +141,7 @@ pub(super) fn residue(
             graph.unresolved("chiralities");
             continue;
         }
-        let Some(mut ideal) = chirality::target(comp, chir) else {
+        let Some(ideal) = chirality::target(comp, chir) else {
             graph.unsupported(&["chiralities"], "Undefined chiral target geometry");
             continue;
         };
@@ -145,26 +150,13 @@ pub(super) fn residue(
             graph.unsupported(&["chiralities"], "Unknown chiral volume sign");
             continue;
         }
-        let mut indices = ids.map(Option::unwrap);
-        for i in 1..4 {
-            for j in i + 1..4 {
-                if indices[i] > indices[j] {
-                    indices.swap(i, j);
-                    ideal = -ideal;
-                }
-            }
-        }
-        if graph.chiral_keys.contains_key(&indices) {
-            continue;
-        }
-        graph.chiral_keys.insert(indices, graph.chiralities.len());
-        graph.chiralities.push(WeightedChirality {
-            indices,
+        graph.chirality(
+            ids.map(Option::unwrap),
             ideal,
-            weight: 1. / options.chirality_sigma.powi(2),
-            both_signs: sign.starts_with("both"),
-            pseudochiral: chirality::pseudo(&comp.id, &chir.centre),
-        });
+            1. / options.chirality_sigma.powi(2),
+            sign.starts_with("both"),
+            chirality::pseudo(&comp.id, &chir.centre),
+        );
     }
     let mut planes: Vec<(String, Vec<(u32, f64)>)> = Vec::new();
     for p in &comp.planes {
@@ -177,64 +169,6 @@ pub(super) fn residue(
         };
         let Some(sigma) = p.esd.filter(|v| v.is_finite() && *v > 0.) else {
             graph.unsupported(&["planarities"], "Undefined plane target uncertainty");
-            continue;
-        };
-        match planes.iter_mut().find(|row| row.0 == p.plane_id) {
-            Some(row) => row.1.push((atom, sigma)),
-            None => planes.push((p.plane_id.clone(), vec![(atom, sigma)])),
-        }
-    }
-    for (_, atoms) in planes {
-        graph.plane(atoms);
-    }
-}
-
-pub(super) fn link(
-    graph: &mut ValidationGraph,
-    previous: &ResInterp,
-    current: &ResInterp,
-    link: &crate::monlib::ChemLink,
-    _options: &ValidationOptions,
-) {
-    let side = |c: u8| if c == 1 { previous } else { current };
-    for b in &link.bonds {
-        if let (Some(i), Some(j), Some(ideal), Some(sigma)) = (
-            lookup(side(b.c1), &b.a1),
-            lookup(side(b.c2), &b.a2),
-            b.value_dist,
-            b.esd,
-        ) {
-            graph.bond([i, j], ideal, sigma, ORIGIN_COVALENT);
-        } else {
-            graph.unresolved("bonds");
-        }
-    }
-    for a in &link.angles {
-        let ids = std::array::from_fn::<_, 3, _>(|i| lookup_angle(side(a.c[i]), &a.a[i]));
-        if let (Some(ideal), Some(sigma)) = (a.value, a.esd) {
-            if ids.iter().all(Option::is_some) {
-                graph.angle(ids.map(Option::unwrap), ideal, sigma);
-            } else {
-                graph.unresolved("angles");
-            }
-        } else {
-            graph.unsupported(&["angles"], "Undefined link angle uncertainty");
-        }
-    }
-    if !link.chirs.is_empty() {
-        graph.unsupported(
-            &["chiralities"],
-            "Cross-residue chiral target assignment needs reference parity",
-        );
-    }
-    let mut planes: Vec<(String, Vec<(u32, f64)>)> = Vec::new();
-    for p in &link.planes {
-        let Some(atom) = lookup(side(p.c), &p.atom) else {
-            graph.unresolved("planarities");
-            continue;
-        };
-        let Some(sigma) = p.esd.filter(|v| v.is_finite() && *v > 0.) else {
-            graph.unsupported(&["planarities"], "Undefined link plane uncertainty");
             continue;
         };
         match planes.iter_mut().find(|row| row.0 == p.plane_id) {
