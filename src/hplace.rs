@@ -14,6 +14,8 @@ mod linked;
 pub mod terminal;
 #[cfg(test)]
 mod linked_tests;
+#[cfg(test)]
+mod seed_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NTermCharge {
@@ -146,6 +148,26 @@ fn pad_name(n: &str) -> String {
     if n.len() < 4 { format!("{:<4}", format!(" {}", n)) } else { n.to_string() }
 }
 
+fn methine_seed(comp: &Comp, atoms: &[Atom], hydrogen: &str, seed: Vec3) -> Vec3 {
+    let parent = comp.bonds.iter().find_map(|bond| {
+        if bond.a1 == hydrogen { Some(bond.a2.as_str()) }
+        else if bond.a2 == hydrogen { Some(bond.a1.as_str()) }
+        else { None }
+    });
+    let Some(parent) = parent else { return seed };
+    let Some(atom) = atoms.iter().find(|atom| atom.name.trim() == parent) else { return seed };
+    if atom.xyz.dist(seed) >= 0.001 {
+        return seed;
+    }
+    let heavy = comp.bonds.iter().filter_map(|bond| {
+        if bond.a1 == parent { Some(bond.a2.as_str()) }
+        else if bond.a2 == parent { Some(bond.a1.as_str()) }
+        else { None }
+    }).filter(|name| !comp.is_h(name)).count();
+    // Three heavy neighbors determine placement without the temporary H direction.
+    if heavy == 3 { atom.xyz + v3(1., 0., 0.) } else { seed }
+}
+
 /// Add every missing dictionary H at a bogus position (mean of the atom
 /// group + 0.5 on each axis).
 fn add_missing_h(
@@ -222,10 +244,12 @@ fn add_missing_h(
                     }
                     let nat = ag.atoms.len().max(1) as f64;
                     let bogus = mean / nat + v3(0.5, 0.5, 0.5);
+                    let repair_seed = !p.compat && ag.atoms.iter().any(|a| !a.is_hydrogen() && a.xyz.dist(bogus) < 0.001);
                     let hetero = ag.atoms.first().map(|a| a.hetero).unwrap_or(false);
                     let segid = ag.atoms.first().map(|a| a.segid.clone()).unwrap_or_default();
                     for mh in missing {
-                        let mut a = Atom::new(&pad_name(&mh), "H", bogus);
+                        let seed = if repair_seed { methine_seed(&comp, &ag.atoms, &mh, bogus) } else { bogus };
+                        let mut a = Atom::new(&pad_name(&mh), "H", seed);
                         a.element = "H".into();
                         a.hetero = hetero;
                         a.segid = segid.clone();
