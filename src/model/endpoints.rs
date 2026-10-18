@@ -1,50 +1,81 @@
 //! Exact deposited-endpoint lookup for one unchanged atom hierarchy.
 
-use super::{AtomLabel, AtomPath, Structure};
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use super::{Atom, AtomGroup, AtomLabel, AtomPath, Structure};
+use rustc_hash::{FxHashMap, FxHashSet};
 
+/// Residue part of an endpoint label: the chain id as stored, and the trimmed
+/// residue number and insertion code.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Key<'a> {
-    name: &'a str,
-    resname: &'a str,
+struct ResKey<'a> {
     chain: &'a str,
     resseq: &'a str,
     icode: &'a str,
 }
 
-impl<'a> Key<'a> {
-    fn from_label(label: &'a AtomLabel) -> Self {
-        Self { name: label.name.trim(), resname: label.resname.trim(), chain: &label.chain,
-            resseq: label.resseq.trim(), icode: label.icode.trim() }
-    }
-
-    fn from_path(st: &'a Structure, p: AtomPath) -> Self {
-        Self { name: st.atom(p).name.trim(), resname: st.atom_group(p).resname.trim(),
-            chain: &st.chain(p).id, resseq: st.residue_group(p).resseq.trim(),
-            icode: st.residue_group(p).icode.trim() }
+impl<'a> ResKey<'a> {
+    fn of_label(label: &'a AtomLabel) -> Self {
+        ResKey { chain: &label.chain, resseq: label.resseq.trim(), icode: label.icode.trim() }
     }
 }
 
 /// Keep every candidate in the caller's atom-path order, including duplicates.
+/// Atoms are filed by residue; a lookup compares the atom fields of that
+/// residue's candidates.
 pub(crate) struct EndpointResolver<'a> {
-    by_label: FxHashMap<Key<'a>, SmallVec<[(u32, &'a str); 1]>>,
+    by_residue: FxHashMap<ResKey<'a>, u32>,
+    /// Per residue key: (index in `paths`, atom group, atom) in path order.
+    candidates: Vec<Vec<(u32, &'a AtomGroup, &'a Atom)>>,
 }
 
 impl<'a> EndpointResolver<'a> {
+    #[cfg(test)]
     pub(crate) fn new(st: &'a Structure, paths: &[AtomPath]) -> Self {
-        let mut by_label: FxHashMap<_, SmallVec<[_; 1]>> = FxHashMap::default();
+        Self::build(st, paths, None)
+    }
+
+    /// Like `new`, but files only the residues that `labels` name. A lookup
+    /// gives the same result as with `new` for any of these labels.
+    pub(crate) fn for_labels<'l>(st: &'a Structure, paths: &[AtomPath],
+        labels: impl IntoIterator<Item = &'l AtomLabel>) -> Self {
+        let wanted: FxHashSet<ResKey<'l>> = labels.into_iter().map(ResKey::of_label).collect();
+        Self::build(st, paths, Some(&wanted))
+    }
+
+    fn build(st: &'a Structure, paths: &[AtomPath], wanted: Option<&FxHashSet<ResKey<'_>>>) -> Self {
+        let mut by_residue: FxHashMap<ResKey<'a>, u32> = FxHashMap::default();
+        let mut candidates: Vec<Vec<(u32, &'a AtomGroup, &'a Atom)>> = Vec::new();
+        // consecutive paths usually share a residue group
+        let mut last: Option<((u32, u32, u32), Option<u32>)> = None;
         for (index, &p) in paths.iter().enumerate() {
-            by_label.entry(Key::from_path(st, p)).or_default()
-                .push((index as u32, st.atom_group(p).altloc.as_str()));
+            let rg_id = (p.model, p.chain, p.rg);
+            let slot = match last {
+                Some((id, slot)) if id == rg_id => slot,
+                _ => {
+                    let rg = st.residue_group(p);
+                    let key = ResKey { chain: &st.chain(p).id, resseq: rg.resseq.trim(), icode: rg.icode.trim() };
+                    let slot = wanted.is_none_or(|w| w.contains(&key)).then(|| *by_residue.entry(key).or_insert_with(|| {
+                        candidates.push(Vec::new());
+                        (candidates.len() - 1) as u32
+                    }));
+                    last = Some((rg_id, slot));
+                    slot
+                }
+            };
+            if let Some(slot) = slot {
+                candidates[slot as usize].push((index as u32, st.atom_group(p), st.atom(p)));
+            }
         }
-        Self { by_label }
+        Self { by_residue, candidates }
     }
 
     pub(crate) fn matching_indices<'b>(&'b self, label: &'b AtomLabel) -> impl Iterator<Item = u32> + 'b {
-        self.by_label.get(&Key::from_label(label)).into_iter().flatten()
-            .filter(move |(_, altloc)| label.altloc.is_empty() || *altloc == label.altloc)
-            .map(|&(index, _)| index)
+        let key = ResKey::of_label(label);
+        let (name, resname) = (label.name.trim(), label.resname.trim());
+        self.by_residue.get(&key).into_iter()
+            .flat_map(move |&slot| self.candidates[slot as usize].iter())
+            .filter(move |(_, ag, atom)| atom.name.trim() == name && ag.resname.trim() == resname
+                && (label.altloc.is_empty() || ag.altloc == label.altloc))
+            .map(|&(index, _, _)| index)
     }
 }
 
@@ -110,6 +141,24 @@ mod tests {
             compare(&st, &paths, &AtomLabel { name: "CA".into(), resname: resname.into(),
                 chain: "A".into(), resseq: "12".into(), icode: "".into(), altloc: "".into() });
         }
+    }
+
+    #[test]
+    fn label_subset_matches_full_index() {
+        let st = structure();
+        let mut paths = st.atom_paths();
+        paths.reverse();
+        paths.extend_from_within(..9);
+        let labels: Vec<AtomLabel> = [("CA", "A", "12", ""), ("D1", " A", "12A", "B"), ("CA", "?", "?", " B ")]
+            .into_iter().map(|(name, chain, resseq, icode)| AtomLabel { name: name.into(), resname: "LIG".into(),
+                chain: chain.into(), resseq: resseq.into(), icode: icode.into(), altloc: "".into() }).collect();
+        let full = EndpointResolver::new(&st, &paths);
+        let subset = EndpointResolver::for_labels(&st, &paths, &labels[..2]);
+        for label in &labels[..2] {
+            assert_eq!(subset.matching_indices(label).collect::<Vec<_>>(), full.matching_indices(label).collect::<Vec<_>>());
+            assert!(full.matching_indices(label).next().is_some());
+        }
+        assert_eq!(subset.matching_indices(&labels[2]).count(), 0);
     }
 
     #[test]

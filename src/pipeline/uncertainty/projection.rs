@@ -87,7 +87,7 @@ fn remove_sites(policy: &Policy, st: &mut Structure, placed: &Placed, unresolved
     for (name, sources) in policy.bridges.sites() {
         let p = group(st, sources[0])?;
         let atoms = st.atom_group(p);
-        let heavy = atoms.atoms.iter().filter(|atom| !atom.is_hydrogen()).map(|atom| atom.name.clone()).collect::<Vec<_>>();
+        let heavy = atoms.atoms.iter().filter(|atom| !atom.is_hydrogen()).map(|atom| atom.name.to_string()).collect::<Vec<_>>();
         let comp = crate::hplace::hydrogen_dictionary(ml, &atoms.resname, &heavy, false)
             .ok_or("A declared bridge lost its selected dictionary")?;
         for atom in atoms.atoms.iter().filter(|atom| atom.is_hydrogen()) {
@@ -157,8 +157,8 @@ fn project_arrays(policy: &Policy, st: &Structure, paths: &[AtomPath], placed: &
             let observed = policy.observed.iter().find(|observed| observed.atom.src == st.atom(p).src)
                 .ok_or("A fixed hydrogen has no original source record")?;
             let energy = observed.comp.atom(&observed.dictionary_name).and_then(|atom| atom.type_energy.clone());
-            etype.push(energy.map(EType::Typed).unwrap_or(EType::NoneType));
-            dict.push(AtomDictInfo { comp: Some(std::sync::Arc::clone(&observed.comp)), dict_id: Some(observed.dictionary_name.clone()) });
+            etype.push(energy.map(|t| EType::Typed(t.into())).unwrap_or(EType::NoneType));
+            dict.push(AtomDictInfo { comp: Some(std::sync::Arc::clone(&observed.comp)), dict_id: Some(observed.dictionary_name.as_str().into()), instance: 0 });
             coefs.push(None);
         } else {
             etype.push(placed.etype[old].clone());

@@ -9,12 +9,12 @@ fn order(value: &str) -> u8 {
 }
 
 /// Require complete source-defined trigonal carbon connectivity.
-pub(super) fn dictionary_carbon(it: &Interp, at: &RidingAtoms, neighbors: &[Vec<u32>], nb: &Nb) -> bool {
+pub(super) fn dictionary_carbon(it: &Interp, at: &RidingAtoms, neighbors: &Adjacency, nb: &Nb) -> bool {
     let Some((parent, _)) = nb.a0 else { return false };
     let parent = parent as usize;
     let info = &it.dict[parent];
     let (Some(comp), Some(id)) = (&info.comp, &info.dict_id) else { return false };
-    if comp.atom(id).is_none_or(|a| a.type_symbol != "C") || neighbors[parent].len() != 3 {
+    if comp.atom(id).is_none_or(|a| a.type_symbol != "C") || neighbors.of(parent as u32).len() != 3 {
         return false;
     }
     let mut expected = FxHashMap::default();
@@ -25,11 +25,11 @@ pub(super) fn dictionary_carbon(it: &Interp, at: &RidingAtoms, neighbors: &[Vec<
     if expected.len() != 3 { return false; }
     let mut hydrogen = 0;
     let mut heavy = Vec::with_capacity(2);
-    for &neighbor in &neighbors[parent] {
+    for &neighbor in neighbors.of(parent as u32) {
         let i = neighbor as usize;
         let info = &it.dict[i];
         let (Some(source), Some(name)) = (&info.comp, &info.dict_id) else { return false };
-        if !Arc::ptr_eq(source, comp) { return false; }
+        if !Arc::ptr_eq(source, comp) || it.dict[i].instance != it.dict[parent].instance { return false; }
         let Some(bond_order) = expected.remove(name.as_str()) else { return false };
         if at.is_h[i] {
             if neighbor != nb.ih || bond_order != 1 || !comp.is_h(name) { return false; }

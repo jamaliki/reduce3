@@ -74,7 +74,7 @@ pub(super) fn place(rg: &mut ResidueGroup, members: &[(usize, usize)], np: (usiz
     cap: (usize, usize), cp: (usize, usize), ml: &MonLib,
     auto_comps: &mut FxHashMap<String, Arc<Comp>>) -> bool {
     let group = &rg.atom_groups[np.0];
-    let heavy: Vec<_> = group.atoms.iter().filter(|atom| !atom.is_hydrogen()).map(|atom| atom.name.clone()).collect();
+    let heavy: Vec<_> = group.atoms.iter().filter(|atom| !atom.is_hydrogen()).map(|atom| atom.name.to_string()).collect();
     let Some(base) = hydrogen_dictionary(ml, &group.resname, &heavy, false) else { return false };
     if !collision(&base) { return false; }
     let key = group.resname.trim().to_ascii_uppercase();

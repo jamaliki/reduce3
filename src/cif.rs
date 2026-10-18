@@ -324,6 +324,9 @@ pub fn parse(text: &str) -> Document<'_> {
 
 /// Parse a CIF number, ignoring a trailing standard-uncertainty suffix like `1.23(4)`.
 pub fn parse_f64(v: &str) -> Option<f64> {
+    if let Some(x) = parse_plain_decimal(v) {
+        return Some(x);
+    }
     if is_null(v) {
         return None;
     }
@@ -334,9 +337,86 @@ pub fn parse_f64(v: &str) -> Option<f64> {
     v.trim().parse::<f64>().ok()
 }
 
+/// `v.parse::<f64>()` for a plain decimal (a sign, digits and at most one
+/// point) whose digits form an integer of at most 2^53 with at most 22 of them
+/// after the point; `None` for any other text. Both the integer and the power
+/// of ten are exact doubles, so one division rounds the quotient correctly, as
+/// `parse` does.
+fn parse_plain_decimal(v: &str) -> Option<f64> {
+    const POW10: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+        1e20, 1e21, 1e22,
+    ];
+    let b = v.as_bytes();
+    let (negative, digits) = match b.first()? {
+        b'-' => (true, &b[1..]),
+        b'+' => (false, &b[1..]),
+        _ => (false, b),
+    };
+    let mut mantissa: u64 = 0;
+    let mut count = 0;
+    let mut point = None;
+    for (i, &c) in digits.iter().enumerate() {
+        match c {
+            b'0'..=b'9' if count < 19 => {
+                mantissa = mantissa * 10 + u64::from(c - b'0');
+                count += 1;
+            }
+            b'.' if point.is_none() => point = Some(i),
+            _ => return None,
+        }
+    }
+    let after = point.map_or(0, |i| digits.len() - i - 1);
+    if count == 0 || mantissa > 1 << 53 {
+        return None;
+    }
+    let x = mantissa as f64 / *POW10.get(after)?;
+    Some(if negative { -x } else { x })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_decimals_parse_as_str_parse() {
+        let old = |v: &str| -> Option<f64> {
+            if is_null(v) {
+                return None;
+            }
+            let v = match v.find('(') {
+                Some(p) => &v[..p],
+                None => v,
+            };
+            v.trim().parse::<f64>().ok()
+        };
+        let mut cases: Vec<String> = [
+            "", "-", "+", ".", "?", "-.", "1.", ".5", "-.5", "+.5", "+1.5", "-0", "-0.000", "0.0", "00012.50", "1e5",
+            "1.5(3)", " 1.5", "1.5 ", "inf", "-nan", "1..2", "1.2.3", "9007199254740992", "9007199254740993",
+            "0.9007199254740993", "1234567890123456789", "12345678901234567890", "0.0000000000000000000001",
+            "0.00000000000000000000001", "-123.456", "4503599627370495.5",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut s: u64 = 0x2545f4914f6cdd1d;
+        for _ in 0..200_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let digits = (s % 20) as usize + 1;
+            let mut text: String = (0..digits).map(|i| char::from(b'0' + ((s >> (3 * i)) % 10) as u8)).collect();
+            text.insert((s >> 60) as usize % (digits + 1), '.');
+            if s & (1 << 61) != 0 {
+                text.insert(0, '-');
+            }
+            cases.push(text);
+        }
+        for v in &cases {
+            let (a, b) = (parse_f64(v), old(v));
+            assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{:?}", v);
+        }
+    }
 
     #[test]
     fn parses_loops_and_items() {

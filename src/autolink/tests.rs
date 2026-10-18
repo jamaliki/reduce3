@@ -36,12 +36,16 @@ fn carbon(orders: [&str; 2]) -> (Structure, FlatAtoms, Interp) {
     }
     let comp = Arc::new(comp);
     for i in 0..4 {
-        it.dict[i] = crate::interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some(flat.name[i].trim().into()) };
+        it.dict[i] = crate::interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some(flat.name[i].trim().into()), instance: 0 };
     }
     (st, flat, it)
 }
 
-fn initial(it: &Interp) -> Vec<Vec<u32>> {
+fn initial(it: &Interp) -> Initial {
+    Initial::from_lists(&lists(it))
+}
+
+fn lists(it: &Interp) -> Vec<Vec<u32>> {
     let mut result = vec![Vec::new(); it.dict.len()];
     for bond in &it.bonds {
         result[bond.i as usize].push(bond.j);
@@ -66,7 +70,7 @@ fn declare(st: &mut Structure, flat: &FlatAtoms, first: u32, second: u32) {
         let p = flat.path[i as usize];
         AtomLabel { name: flat.name[i as usize].trim().into(), resname: st.atom_group(p).resname.clone(),
             chain: st.chain(p).id.clone(), resseq: st.residue_group(p).resseq.trim().into(),
-            altloc: flat.altloc[i as usize].clone(), icode: st.residue_group(p).icode.clone() }
+            altloc: flat.altloc[i as usize].to_string(), icode: st.residue_group(p).icode.clone() }
     };
     st.links.push(LinkRecord { atom1: label(first), atom2: label(second), distance: None, order: None, kind: "covale".into() });
 }
@@ -120,9 +124,9 @@ fn compatible_alternates_count_once_and_same_alt_duplicates_are_ambiguous() {
     let ml = library();
     let cx = Ctx::new(&st, &flat, &ml, &params);
     assert_eq!(cx.carbon_valence(&it, &initial(&it), 0, 5), Some(8));
-    let mut neighbors = initial(&it);
+    let mut neighbors = lists(&it);
     neighbors[0].push(1);
-    assert_eq!(cx.carbon_valence(&it, &neighbors, 0, 5), None);
+    assert_eq!(cx.carbon_valence(&it, &Initial::from_lists(&neighbors), 0, 5), None);
 }
 
 #[test]

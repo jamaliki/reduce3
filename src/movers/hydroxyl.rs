@@ -143,8 +143,8 @@ mod tests {
         let mover = single_hydrogen_rotator(&mut w, 0, &[5], &[], &options(true)).unwrap();
         let plane = planar_hydroxyl(&w, 1, 2, &[3, 4]).unwrap();
         assert!(mover.num_coarse() <= 12);
-        assert!(!mover.fine_pos[0].is_empty());
-        for pose in mover.coarse_pos.iter().chain(mover.fine_pos.iter().flatten()) {
+        assert!(mover.fine.count() > 0);
+        for pose in mover.coarse_pos.iter().map(Vec::as_slice).chain(mover.fine.iter()) {
             assert!(plane.height(&w, pose[0]) <= MAX_HEIGHT + 1e-9);
             assert!(pose[1].dist(heavy[0]) < 1e-12);
         }
@@ -197,7 +197,7 @@ mod tests {
         w.pos[3].z = 0.15;
         w.pos[4].z = 0.15;
         let mover = single_hydrogen_rotator(&mut w, 0, &[5], &[], &options(true)).unwrap();
-        assert!(mover.fine_pos.iter().all(Vec::is_empty));
+        assert_eq!(mover.fine.count(), 0);
         let plane = planar_hydroxyl(&w, 1, 2, &[3, 4]).unwrap();
         assert!(mover.coarse_pos.iter().all(|pose| plane.height(&w, pose[0]) <= MAX_HEIGHT + 1e-9));
     }

@@ -162,7 +162,7 @@ pub fn run(mut st: Structure, ml: &MonLib, p: &Params) -> Result<Output, String>
         let kept = st.take_atoms(|ag, a| {
             a.is_hydrogen()
                 && !*described.entry(ag.resname.clone()).or_insert_with(|| {
-                    let names: Vec<String> = ag.atoms.iter().map(|x| x.name.clone()).collect();
+                    let names: Vec<String> = ag.atoms.iter().map(|x| x.name.to_string()).collect();
                     hplace::residue_dictionary(ml, &ag.resname, &names).is_some() || ml.ccd_comp(&ag.resname, false).is_some()
                 })
         });
@@ -385,7 +385,8 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
     let sym = it.sym_bonds.iter().filter(|b| !p.compat && b.i != b.j).map(|b| (b.i, b.j));
     let bonded = atominfo::bonded_lists(n, it.bonds.iter().map(|b| (b.i, b.j)).chain(sym));
     info += &timing("compute bonded neighbor lists", &mut tm);
-    let ex = atominfo::extra_atom_info(st, &flat, &it.etype, ml, &bonded, p.opt.probe.set_polar_hydrogen_radius);
+    let ex = atominfo::extra_atom_info_report(st, &flat, &it.etype, ml, &bonded, p.opt.probe.set_polar_hydrogen_radius,
+        p.opt.report);
     info += &ex.warnings;
     info += &timing("get extra atom info", &mut tm);
 
@@ -397,10 +398,10 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
             let occ: Vec<f64> = flat.path.iter().map(|&pp| st.atom(pp).occ).collect();
             let rg_of: Vec<u64> =
                 flat.path.iter().map(|pp| ((pp.model as u64) << 40) | ((pp.chain as u64) << 20) | pp.rg as u64).collect();
-            let resnames: Vec<String> = flat.path.iter().map(|&pp| st.atom_group(pp).resname.trim().to_string()).collect();
+            let resnames: Vec<&str> = flat.path.iter().map(|&pp| st.atom_group(pp).resname.trim()).collect();
             let table = hplace::expected_heavy_table(ml, &Default::default(), &resnames);
             let expected_heavy = |a: u32| -> Option<usize> {
-                table.get(&resnames[a as usize])?.as_ref()?.get(flat.name[a as usize].trim()).copied()
+                table.get(resnames[a as usize])?.as_ref()?.get(flat.name[a as usize].trim()).copied()
             };
             let ra = crate::riding::RidingAtoms {
                 is_h: &flat.is_h,

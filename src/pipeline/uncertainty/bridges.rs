@@ -145,7 +145,7 @@ fn validate_site(st: &Structure, ml: &MonLib, name: &str, rows: [u32; 2]) -> Res
         || (atom.name.trim() != name && atom.elem() != "D")) {
         return Err("An observed bridge hydrogen has an ambiguous or mistyped isotope identity".into());
     }
-    let names = group.atoms.iter().filter(|atom| !atom.is_hydrogen()).map(|atom| atom.name.clone()).collect::<Vec<_>>();
+    let names = group.atoms.iter().filter(|atom| !atom.is_hydrogen()).map(|atom| atom.name.to_string()).collect::<Vec<_>>();
     let comp = hplace::hydrogen_dictionary(ml, &group.resname, &names, false)
         .ok_or("An allowed bridge hydrogen has no selected dictionary")?;
     let parents = dictionary_parents(&comp, name).ok_or("An allowed bridge hydrogen lacks exactly two single-bond metal parents")?;

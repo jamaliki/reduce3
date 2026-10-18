@@ -32,13 +32,13 @@ fn fixture() -> (Structure, FlatAtoms, Interp) {
     }
     let comp = Arc::new(comp);
     for (i, id) in ["C35", "C18", "H351", "H352"].iter().enumerate() {
-        it.dict[i] = interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*id).into()) };
+        it.dict[i] = interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*id).into()), instance: 0 };
     }
     let sulfur = Arc::new(Comp { id: "CYS".into(), bonds: vec![crate::monlib::CompBond {
         a1: "SG".into(), a2: "CB".into(), type_: "single".into(), ..Default::default()
     }], ..Default::default() });
     for (i, id) in [(5, "SG"), (6, "CB")] {
-        it.dict[i] = interp::AtomDictInfo { comp: Some(sulfur.clone()), dict_id: Some(id.into()) };
+        it.dict[i] = interp::AtomDictInfo { comp: Some(sulfur.clone()), dict_id: Some(id.into()), instance: 0 };
     }
     it.add_bond(5, 6, 1.8, 0);
     for (i, ideal, origin) in [(1, 1.5, 0), (2, 0.97, 0), (3, 0.97, 0), (5, 1.766, 10)] {

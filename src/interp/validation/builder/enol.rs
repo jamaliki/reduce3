@@ -26,7 +26,7 @@ pub(super) fn prepare(
             add_hno(&mut comp);
         }
         if let Some(atom_type) = comp.atom("HNO").and_then(|a| a.type_energy.clone()) {
-            graph.topology.etype[hydrogen as usize] = EType::Typed(atom_type);
+            graph.topology.etype[hydrogen as usize] = EType::Typed(atom_type.into());
         }
         residues[k].comp = Some(Arc::new(comp));
         residues[k].id_to_atom.insert("HNO".into(), hydrogen);

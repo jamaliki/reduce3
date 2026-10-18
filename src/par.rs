@@ -9,9 +9,11 @@ thread_local! {
     static SEQUENTIAL: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Whether work on this thread runs sequentially.
+/// Whether work on this thread runs sequentially: inside `run_sequential`,
+/// or when the pool has one thread, where handing work to it only adds a
+/// thread switch.
 pub fn sequential() -> bool {
-    SEQUENTIAL.with(|s| s.get())
+    SEQUENTIAL.with(|s| s.get()) || rayon::current_num_threads() == 1
 }
 
 /// Run `f` with this thread's work on one model kept sequential.

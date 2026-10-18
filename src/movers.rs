@@ -54,16 +54,64 @@ pub struct Mover {
     pub n_moved: usize,
     pub coarse_pos: Vec<Vec<Vec3>>,
     /// Per coarse state: atom info for the leading atoms (empty when unchanged).
+    /// This and the other per-state lists below may be empty when no state
+    /// changes anything; read them with `in_state`.
     pub coarse_info: Vec<Vec<AtomInfo>>,
     /// Per coarse state: deletion flags for the leading atoms (empty = none).
     pub coarse_del: Vec<Vec<bool>>,
     pub coarse_pref: Vec<f64>,
-    pub fine_pos: Vec<Vec<Vec<Vec3>>>,
-    pub fine_pref: Vec<Vec<f64>>,
+    pub fine: FinePoses,
     pub fixup_pos: Vec<Vec<Vec3>>,
     pub fixup_info: Vec<Vec<AtomInfo>>,
     pub fixup_del: Vec<Vec<bool>>,
     pub rot: Option<RotatorMeta>,
+}
+
+/// Entry `c` of one of a Mover's per-state lists, or nothing when the list is
+/// empty.
+#[inline]
+pub fn in_state<T>(per_state: &[Vec<T>], c: usize) -> &[T] {
+    per_state.get(c).map_or(&[], Vec::as_slice)
+}
+
+/// The fine poses of a Mover's leading atoms, the same number for each coarse
+/// state, stored end to end with their preferences.
+#[derive(Clone, Debug, Default)]
+pub struct FinePoses {
+    per_coarse: usize,
+    atoms: usize,
+    pos: Vec<Vec3>,
+    pref: Vec<f64>,
+}
+
+impl FinePoses {
+    /// Number of fine poses of each coarse state.
+    pub fn count(&self) -> usize {
+        self.per_coarse
+    }
+
+    /// Atom positions of fine pose `f` of coarse state `c`.
+    #[inline]
+    pub fn pos(&self, c: usize, f: usize) -> &[Vec3] {
+        let k = (c * self.per_coarse + f) * self.atoms;
+        &self.pos[k..k + self.atoms]
+    }
+
+    /// Preference of fine pose `f` of coarse state `c`.
+    #[inline]
+    pub fn pref(&self, c: usize, f: usize) -> f64 {
+        self.pref[c * self.per_coarse + f]
+    }
+
+    /// Preferences of the fine poses of coarse state `c`.
+    pub fn prefs(&self, c: usize) -> &[f64] {
+        &self.pref[c * self.per_coarse..(c + 1) * self.per_coarse]
+    }
+
+    /// All poses, by coarse state and then fine pose.
+    pub fn iter(&self) -> std::slice::ChunksExact<'_, Vec3> {
+        self.pos.chunks_exact(self.atoms.max(1))
+    }
 }
 
 impl Mover {
@@ -71,9 +119,14 @@ impl Mover {
         self.coarse_pos.len()
     }
 
+    /// Every pose: the coarse ones, then the fine ones.
+    pub fn all_poses(&self) -> impl Iterator<Item = &[Vec3]> {
+        self.coarse_pos.iter().map(Vec::as_slice).chain(self.fine.iter())
+    }
+
     /// `PoseDescription(coarseIndex, fineIndex, fixedUp)`.
     pub fn pose_description(&self, coarse: usize, fine: Option<usize>, fixed_up: bool) -> String {
-        let nfine0 = self.fine_pos.first().map(|f| f.len()).unwrap_or(0);
+        let nfine0 = self.fine.count();
         let bad = coarse >= self.num_coarse() || matches!(fine, Some(f) if f > 0 && f >= nfine0);
         match &self.kind {
             MoverKind::SingleHydrogenRotator | MoverKind::NH3Rotator | MoverKind::AromaticMethylRotator => {
@@ -189,32 +242,129 @@ fn fine_angles(coarse_step: f64, fine_step: f64) -> Vec<f64> {
     v
 }
 
+/// `rotate_deg_axis_dir` about one axis by one angle, set up once for many
+/// points. It does the same arithmetic in the same order, so each point
+/// lands on the same bits.
+struct AxisRotation {
+    a: Vec3,
+    m: [[f64; 3]; 3],
+}
+
+/// The terms of `AxisRotation` that do not depend on the angle, for many
+/// rotations about one axis.
+struct Axis {
+    a1: Vec3,
+    l: [f64; 3],
+    lsq: [f64; 3],
+    dlsq: f64,
+    dl: f64,
+}
+
+impl Axis {
+    fn new(origin: Vec3, dir: Vec3) -> Axis {
+        // geom::rotate_point_around_axis(origin, origin + dir, _, degrees * PI / 180)
+        let (a1, a2) = (origin, origin + dir);
+        let l = [a2.x - a1.x, a2.y - a1.y, a2.z - a1.z];
+        let lsq = [l[0] * l[0], l[1] * l[1], l[2] * l[2]];
+        let dlsq = lsq[0] + lsq[1] + lsq[2];
+        Axis { a1, l, lsq, dlsq, dl: dlsq.sqrt() }
+    }
+
+    fn rotation(&self, degrees: f64) -> AxisRotation {
+        let (ca, sa) = AxisRotation::trig(degrees);
+        let ([xl, yl, zl], [xlsq, ylsq, zlsq]) = (self.l, self.lsq);
+        let dsa = sa / self.dl;
+        let oca = (1.0 - ca) / self.dlsq;
+        let xlylo = xl * yl * oca;
+        let xlzlo = xl * zl * oca;
+        let ylzlo = yl * zl * oca;
+        AxisRotation {
+            a: self.a1,
+            m: [
+                [xlsq * oca + ca, xlylo - zl * dsa, xlzlo + yl * dsa],
+                [xlylo + zl * dsa, ylsq * oca + ca, ylzlo - xl * dsa],
+                [xlzlo - yl * dsa, ylzlo + xl * dsa, zlsq * oca + ca],
+            ],
+        }
+    }
+}
+
+impl AxisRotation {
+    fn new(origin: Vec3, dir: Vec3, degrees: f64) -> AxisRotation {
+        Axis::new(origin, dir).rotation(degrees)
+    }
+
+    /// Cosine and sine of the angle, as `rotate_deg_axis_dir` takes them.
+    /// Most rotator poses lie at whole degrees, whose values come from a
+    /// table worked out the same way.
+    fn trig(degrees: f64) -> (f64, f64) {
+        const MAX: i32 = 190;
+        static TABLE: std::sync::OnceLock<Vec<(f64, f64)>> = std::sync::OnceLock::new();
+        let compute = |degrees: f64| {
+            let angle_rad = degrees * (std::f64::consts::PI / 180.0);
+            (angle_rad.cos(), angle_rad.sin())
+        };
+        if degrees.abs() <= MAX as f64 && degrees == degrees.trunc() {
+            let i = degrees as i32;
+            // -0.0 has other bits than the table's 0.0
+            if (i as f64).to_bits() == degrees.to_bits() {
+                let table = TABLE.get_or_init(|| (-MAX..=MAX).map(|d| compute(d as f64)).collect());
+                return table[(i + MAX) as usize];
+            }
+        }
+        compute(degrees)
+    }
+
+    #[inline]
+    fn apply(&self, point: Vec3) -> Vec3 {
+        let (a, m) = (self.a, &self.m);
+        let xma = point.x - a.x;
+        let yma = point.y - a.y;
+        let zma = point.z - a.z;
+        v3(
+            xma * m[0][0] + yma * m[0][1] + zma * m[0][2] + a.x,
+            xma * m[1][0] + yma * m[1][1] + zma * m[1][2] + a.y,
+            xma * m[2][0] + yma * m[2][1] + zma * m[2][2] + a.z,
+        )
+    }
+}
+
 fn poses_for(w: &World, atoms: &[u32], origin: Vec3, dir: Vec3, angles: &[f64]) -> Vec<Vec<Vec3>> {
+    let axis = Axis::new(origin, dir);
     angles
         .iter()
-        .map(|&ang| atoms.iter().map(|&a| rotate_deg_axis_dir(origin, dir, w.pos[a as usize], ang)).collect())
+        .map(|&ang| {
+            let rot = axis.rotation(ang);
+            atoms.iter().map(|&a| rot.apply(w.pos[a as usize])).collect()
+        })
         .collect()
 }
 
 /// `_MoverRotator.__init__`: rotate the atoms into the canonical start and
 /// build coarse and fine poses.
 fn build_rotator(w: &mut World, kind: MoverKind, spec: RotatorSpec) -> Mover {
+    build_rotator_poses(w, kind, spec, true)
+}
+
+/// `build_rotator`; without `poses_now` all poses are left empty for a caller
+/// that computes them later.
+fn build_rotator_poses(w: &mut World, kind: MoverKind, spec: RotatorSpec, poses_now: bool) -> Mover {
+    let start = AxisRotation::new(spec.axis_origin, spec.axis_dir, spec.offset + spec.dihedral);
     for &a in &spec.atoms {
         let p = w.pos[a as usize];
-        w.set_pos(a, rotate_deg_axis_dir(spec.axis_origin, spec.axis_dir, p, spec.offset + spec.dihedral));
+        w.set_pos(a, start.apply(p));
     }
     let coarse_angles = rotator_angles(spec.coarse_range, spec.coarse_step);
     let fine = fine_angles(spec.coarse_step, spec.fine_step);
     let mut m = Mover {
         kind,
-        atoms: spec.atoms.clone(),
         n_moved: spec.atoms.len(),
+        atoms: spec.atoms,
         coarse_pos: vec![],
         coarse_info: vec![],
         coarse_del: vec![],
         coarse_pref: vec![],
-        fine_pos: vec![],
-        fine_pref: vec![],
+        fine: FinePoses::default(),
         fixup_pos: vec![],
         fixup_info: vec![],
         fixup_del: vec![],
@@ -226,7 +376,9 @@ fn build_rotator(w: &mut World, kind: MoverKind, spec: RotatorSpec) -> Mover {
             axis_dir: spec.axis_dir,
         }),
     };
-    recompute_rotator_positions(w, &mut m, spec.preference, spec.pref_scale, spec.do_fine);
+    if poses_now {
+        recompute_rotator_positions(w, &mut m, spec.preference, spec.pref_scale, spec.do_fine);
+    }
     m
 }
 
@@ -241,23 +393,30 @@ fn recompute_rotator_positions(w: &World, m: &mut Mover, pref: Option<fn(f64) ->
     m.coarse_pos = poses_for(w, &m.atoms, r.axis_origin, r.axis_dir, &r.coarse_angles);
     m.coarse_pref = pf(&r.coarse_angles);
     let n = r.coarse_angles.len();
-    m.coarse_info = vec![vec![]; n];
-    m.coarse_del = vec![vec![]; n];
-    m.fine_pos = Vec::with_capacity(n);
-    m.fine_pref = Vec::with_capacity(n);
-    for &ca in &r.coarse_angles {
-        if !do_fine {
-            m.fine_pos.push(vec![]);
-            m.fine_pref.push(vec![]);
-            continue;
+    // a rotator changes only positions
+    m.coarse_info = Vec::new();
+    m.coarse_del = Vec::new();
+    m.fine = FinePoses::default();
+    if do_fine {
+        let (nf, na) = (r.fine_angles.len(), m.atoms.len());
+        let mut fine = FinePoses { per_coarse: nf, atoms: na, pos: Vec::with_capacity(n * nf * na), pref: Vec::with_capacity(n * nf) };
+        let axis = Axis::new(r.axis_origin, r.axis_dir);
+        for &ca in &r.coarse_angles {
+            for &fa in &r.fine_angles {
+                let ang = fa + ca;
+                let rot = axis.rotation(ang);
+                fine.pos.extend(m.atoms.iter().map(|&a| rot.apply(w.pos[a as usize])));
+                fine.pref.push(match pref {
+                    Some(f) => f(ang) * scale,
+                    None => 0.0,
+                });
+            }
         }
-        let angles: Vec<f64> = r.fine_angles.iter().map(|fa| fa + ca).collect();
-        m.fine_pos.push(poses_for(w, &m.atoms, r.axis_origin, r.axis_dir, &angles));
-        m.fine_pref.push(pf(&angles));
+        m.fine = fine;
     }
-    m.fixup_pos = vec![vec![]; n];
-    m.fixup_info = vec![vec![]; n];
-    m.fixup_del = vec![vec![]; n];
+    m.fixup_pos = Vec::new();
+    m.fixup_info = Vec::new();
+    m.fixup_del = Vec::new();
 }
 
 fn pref_120(deg: f64) -> f64 {
@@ -349,19 +508,13 @@ pub fn single_hydrogen_rotator(
     if w.elem(atom) != "H" {
         return Err("MoverSingleHydrogenRotator(): Atom is not a hydrogen".into());
     }
-    let neighbors = w.bonded[atom as usize].clone();
-    if neighbors.len() != 1 {
+    let &[neighbor] = w.bonded[atom as usize].as_slice() else {
         return Err("MoverSingleHydrogenRotator(): Atom does not have a single bonded neighbor".into());
-    }
-    let neighbor = neighbors[0];
-    let partners = w.bonded[neighbor as usize].clone();
-    if partners.len() != 2 {
+    };
+    let &[p0, p1] = w.bonded[neighbor as usize].as_slice() else {
         return Err("MoverSingleHydrogenRotator(): Atom does not have a single bonded neighbor's neighbor".into());
-    }
-    let mut partner = partners[0];
-    if partner == atom {
-        partner = partners[1];
-    }
+    };
+    let partner = if p0 == atom { p1 } else { p0 };
     let friends: Vec<u32> = w.bonded[partner as usize].iter().copied().filter(|&b| b != neighbor).collect();
     let valence_ok = if opts.any_partner_valence { !friends.is_empty() } else { friends.len() == 2 || friends.len() == 3 };
     if !valence_ok {
@@ -375,7 +528,8 @@ pub fn single_hydrogen_rotator(
     let atoms = vec![atom, neighbor];
     let (conv_h, conv_friend) = dihedral_choice_or_any(w, &atoms, &friends, partner, neighbor, opts.any_partner_valence)?;
     let dihedral = dihedral_of(w, conv_h, partner, neighbor, conv_friend)?;
-    let mut m = build_rotator(
+    // the poses are computed below, once the coarse angles are known
+    let mut m = build_rotator_poses(
         w,
         MoverKind::SingleHydrogenRotator,
         RotatorSpec {
@@ -391,6 +545,7 @@ pub fn single_hydrogen_rotator(
             preference: None,
             pref_scale: 1.0,
         },
+        false,
     );
 
     // Orientations toward potential acceptors, sorted by an atom-ID string.
@@ -406,12 +561,15 @@ pub fn single_hydrogen_rotator(
     let mut best_touch_angle = 0.0;
     let mut best_touch_gap = 1e100;
     let ra = w.info[atom as usize].vdw_radius;
-    let coarse_angles = m.rot.as_ref().unwrap().coarse_angles.clone();
-    for (i, &ang) in coarse_angles.iter().enumerate() {
+    let coarse_angles = &m.rot.as_ref().unwrap().coarse_angles;
+    let axis = Axis::new(origin, normal);
+    for &ang in coarse_angles {
+        // the hydrogen in this coarse pose, as `poses_for` places it
+        let h = axis.rotation(ang).apply(w.pos[atom as usize]);
         let mut min_gap = 1e100;
         for &pt in potential_touches {
             let rt = w.info[pt as usize].vdw_radius;
-            let dist = m.coarse_pos[i][0].dist(w.pos[pt as usize]);
+            let dist = h.dist(w.pos[pt as usize]);
             let gap = dist - (ra + rt);
             if gap < min_gap {
                 min_gap = gap;
@@ -436,12 +594,15 @@ pub fn single_hydrogen_rotator(
             sofar.push(if eclipsed > 0.0 { eclipsed - 180.0 } else { eclipsed + 180.0 });
         }
     }
-    for &ang in &coarse_angles {
+    for &ang in coarse_angles {
         let mut min_ang = 360.0f64;
         for &a in &sofar {
             let mut diff = (a - ang).abs();
             if opts.circular_angle_spacing {
-                diff = diff % 360.0;
+                // the remainder leaves a smaller difference as it is
+                if diff >= 360.0 {
+                    diff %= 360.0;
+                }
                 diff = diff.min(360.0 - diff);
             }
             if diff < min_ang {
@@ -461,9 +622,9 @@ pub fn single_hydrogen_rotator(
     recompute_rotator_positions(w, &mut m, None, 1.0, true);
     if let Some(r) = &planar {
         let (pl, syn) = (opts.planar_preference, opts.syn_preference);
-        let pref = |pose: &Vec<Vec3>| planar_hydroxyl_preference(w, r, pose[0], neighbor, partner, pl, syn);
-        m.coarse_pref = m.coarse_pos.iter().map(pref).collect();
-        m.fine_pref = m.fine_pos.iter().map(|poses| poses.iter().map(pref).collect()).collect();
+        let pref = |pose: &[Vec3]| planar_hydroxyl_preference(w, r, pose[0], neighbor, partner, pl, syn);
+        m.coarse_pref = m.coarse_pos.iter().map(|pose| pref(pose)).collect();
+        m.fine.pref = m.fine.iter().map(pref).collect();
     }
     Ok(m)
 }
@@ -784,8 +945,7 @@ pub fn amide_flip(w: &mut World, nh2: u32, ca_name: &str, non_flip_preference: f
         coarse_info: vec![vec![], vec![]],
         coarse_del: vec![vec![], vec![]],
         coarse_pref: vec![0.0, -non_flip_preference],
-        fine_pos: vec![vec![], vec![]],
-        fine_pref: vec![vec![], vec![]],
+        fine: FinePoses::default(),
         fixup_pos: vec![vec![], movable],
         fixup_info: vec![vec![], vec![]],
         fixup_del: vec![vec![], vec![]],
@@ -977,8 +1137,7 @@ pub fn his_flip(
         coarse_info: infos.clone(),
         coarse_del: dels.clone(),
         coarse_pref: pref,
-        fine_pos: vec![vec![]; n],
-        fine_pref: vec![vec![]; n],
+        fine: FinePoses::default(),
         fixup_pos,
         fixup_info: infos,
         fixup_del: dels,

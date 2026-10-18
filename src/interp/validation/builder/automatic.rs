@@ -191,7 +191,7 @@ fn default_target(st: &Structure, flat: &FlatAtoms, [first, second]: [u32; 2]) -
     let element = |i: u32| {
         let value = &flat.element[i as usize];
         if value.len() < 2 {
-            value.clone()
+            value.to_string()
         } else {
             format!("{}{}", &value[..1], value[1..].to_ascii_lowercase())
         }

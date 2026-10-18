@@ -10,20 +10,220 @@ use crate::resclass::{self, ResClass};
 mod endpoints;
 pub(crate) use endpoints::EndpointResolver;
 
+/// Bytes a [`ShortStr`] holds without allocating.
+const SHORT_CAP: usize = 22;
+
+/// Text of an atom field: up to 22 bytes inline, longer text on the heap.
+/// It hashes, compares and formats as the `str` it holds, so maps keyed by
+/// it behave as with `String` keys.
+#[derive(Clone)]
+pub struct ShortStr(Repr);
+
+#[derive(Clone)]
+enum Repr {
+    Inline(u8, [u8; SHORT_CAP]),
+    Heap(Box<str>),
+}
+
+impl ShortStr {
+    pub const fn new() -> ShortStr {
+        ShortStr(Repr::Inline(0, [0; SHORT_CAP]))
+    }
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            // SAFETY: the inline bytes are always copied whole from a `str`
+            // (`from` and `push_str`), so they are valid UTF-8.
+            Repr::Inline(n, b) => unsafe { std::str::from_utf8_unchecked(&b[..*n as usize]) },
+            Repr::Heap(s) => s,
+        }
+    }
+    pub fn push_str(&mut self, s: &str) {
+        if let Repr::Inline(n, b) = &mut self.0 {
+            let (at, end) = (*n as usize, *n as usize + s.len());
+            if end <= SHORT_CAP {
+                b[at..end].copy_from_slice(s.as_bytes());
+                *n = end as u8;
+                return;
+            }
+        }
+        let mut t = String::with_capacity(self.len() + s.len());
+        t.push_str(self);
+        t.push_str(s);
+        self.0 = Repr::Heap(t.into_boxed_str());
+    }
+    pub fn push(&mut self, c: char) {
+        self.push_str(c.encode_utf8(&mut [0; 4]));
+    }
+    pub fn clear(&mut self) {
+        *self = ShortStr::new();
+    }
+    /// The text of a fixed-width ASCII field, copied without a call to `memcpy`.
+    #[inline]
+    pub fn from_ascii_field<const N: usize>(field: [u8; N]) -> ShortStr {
+        if N <= SHORT_CAP && field.is_ascii() {
+            let mut b = [0; SHORT_CAP];
+            b[..N].copy_from_slice(&field);
+            return ShortStr(Repr::Inline(N as u8, b));
+        }
+        String::from_utf8_lossy(&field).as_ref().into()
+    }
+    /// `s.to_ascii_uppercase()`.
+    pub fn upper(s: &str) -> ShortStr {
+        let mut t = ShortStr::from(s);
+        match &mut t.0 {
+            // upper-casing ASCII bytes keeps the bytes valid UTF-8
+            Repr::Inline(n, b) => b[..*n as usize].make_ascii_uppercase(),
+            Repr::Heap(h) => h.make_ascii_uppercase(),
+        }
+        t
+    }
+}
+
+impl Default for ShortStr {
+    fn default() -> ShortStr {
+        ShortStr::new()
+    }
+}
+
+impl From<&str> for ShortStr {
+    #[inline]
+    fn from(s: &str) -> ShortStr {
+        let mut t = ShortStr::new();
+        t.push_str(s);
+        t
+    }
+}
+
+impl From<&String> for ShortStr {
+    fn from(s: &String) -> ShortStr {
+        ShortStr::from(s.as_str())
+    }
+}
+
+impl From<String> for ShortStr {
+    fn from(s: String) -> ShortStr {
+        if s.len() <= SHORT_CAP { ShortStr::from(s.as_str()) } else { ShortStr(Repr::Heap(s.into_boxed_str())) }
+    }
+}
+
+impl From<&ShortStr> for ShortStr {
+    fn from(s: &ShortStr) -> ShortStr {
+        s.clone()
+    }
+}
+
+impl From<ShortStr> for String {
+    fn from(s: ShortStr) -> String {
+        s.as_str().to_string()
+    }
+}
+
+impl std::ops::Deref for ShortStr {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ShortStr {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl std::borrow::Borrow<str> for ShortStr {
+    fn borrow(&self) -> &str {
+        self
+    }
+}
+
+impl std::hash::Hash for ShortStr {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.as_str().hash(h)
+    }
+}
+
+impl PartialEq for ShortStr {
+    #[inline]
+    fn eq(&self, o: &ShortStr) -> bool {
+        self.as_str() == o.as_str()
+    }
+}
+
+impl Eq for ShortStr {}
+
+impl PartialOrd for ShortStr {
+    fn partial_cmp(&self, o: &ShortStr) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+
+impl Ord for ShortStr {
+    fn cmp(&self, o: &ShortStr) -> std::cmp::Ordering {
+        self.as_str().cmp(o.as_str())
+    }
+}
+
+macro_rules! short_str_eq {
+    ($($t:ty),*) => {$(
+        impl PartialEq<$t> for ShortStr {
+            #[inline]
+            fn eq(&self, o: &$t) -> bool {
+                self.as_str() == &o[..]
+            }
+        }
+        impl PartialEq<ShortStr> for $t {
+            #[inline]
+            fn eq(&self, o: &ShortStr) -> bool {
+                &self[..] == o.as_str()
+            }
+        }
+    )*};
+}
+short_str_eq!(str, &str, String);
+
+impl std::fmt::Debug for ShortStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl std::fmt::Display for ShortStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+impl serde::Serialize for ShortStr {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self)
+    }
+}
+
+impl std::fmt::Write for ShortStr {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push_str(s);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Atom {
     /// Atom name as stored by iotbx: the 4-column PDB field for PDB input
     /// (e.g. `" CA "`), or the bare name for mmCIF input.
-    pub name: String,
+    pub name: ShortStr,
     /// Upper-case element symbol, right-justified in two columns (e.g. `" C"`).
-    pub element: String,
+    pub element: ShortStr,
     /// Two-column charge field such as `"1+"` or `"  "`.
-    pub charge: String,
-    pub serial: String,
+    pub charge: ShortStr,
+    pub serial: ShortStr,
     pub xyz: Vec3,
     pub occ: f64,
     pub b: f64,
-    pub segid: String,
+    pub segid: ShortStr,
     pub hetero: bool,
     pub uij: Option<[f64; 6]>,
     /// Index in the flattened atom array (set by `Structure::reset_i_seq`).
@@ -36,14 +236,18 @@ pub struct Atom {
 impl Atom {
     pub fn new(name: &str, element: &str, xyz: Vec3) -> Atom {
         Atom {
-            name: name.to_string(),
-            element: format!("{:>2}", element.trim().to_ascii_uppercase()),
-            charge: "  ".to_string(),
-            serial: String::new(),
+            name: name.into(),
+            element: {
+                let mut e = ShortStr::new();
+                let _ = std::fmt::Write::write_fmt(&mut e, format_args!("{:>2}", ShortStr::upper(element.trim())));
+                e
+            },
+            charge: "  ".into(),
+            serial: ShortStr::new(),
             xyz,
             occ: 1.0,
             b: 0.0,
-            segid: String::new(),
+            segid: ShortStr::new(),
             hetero: false,
             uij: None,
             i_seq: 0,
@@ -324,7 +528,7 @@ impl Structure {
 
     /// All atom paths in hierarchy (i_seq) order.
     pub fn atom_paths(&self) -> Vec<AtomPath> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.atom_count());
         for (mi, m) in self.models.iter().enumerate() {
             for (ci, c) in m.chains.iter().enumerate() {
                 for (ri, rg) in c.residue_groups.iter().enumerate() {
@@ -341,6 +545,21 @@ impl Structure {
                     }
                 }
             }
+        }
+        out
+    }
+
+    /// Number of atoms in all models.
+    pub fn atom_count(&self) -> usize {
+        self.models.iter().flat_map(|m| &m.chains).flat_map(|c| &c.residue_groups)
+            .flat_map(|r| &r.atom_groups).map(|g| g.atoms.len()).sum()
+    }
+
+    /// The atoms in `atom_paths` order.
+    pub fn atom_refs(&self) -> Vec<&Atom> {
+        let mut out = Vec::with_capacity(self.atom_count());
+        for g in self.models.iter().flat_map(|m| &m.chains).flat_map(|c| &c.residue_groups).flat_map(|r| &r.atom_groups) {
+            out.extend(g.atoms.iter());
         }
         out
     }
@@ -372,6 +591,24 @@ impl Structure {
         }
     }
 
+    /// `reset_serial` and `reset_i_seq` in one pass over the atoms.
+    pub fn reset_serial_and_i_seq(&mut self) {
+        let mut i = 0usize;
+        for m in &mut self.models {
+            for c in &mut m.chains {
+                for rg in &mut c.residue_groups {
+                    for ag in &mut rg.atom_groups {
+                        for a in &mut ag.atoms {
+                            a.serial = hy36_short(5, i as i64 + 1).unwrap_or_else(|| "*****".into());
+                            a.i_seq = i;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// `atoms().reset_serial()`: serial numbers 1..N in hybrid-36.
     pub fn reset_serial(&mut self) {
         let mut i = 1i64;
@@ -380,7 +617,7 @@ impl Structure {
                 for rg in &mut c.residue_groups {
                     for ag in &mut rg.atom_groups {
                         for a in &mut ag.atoms {
-                            a.serial = hy36_encode(5, i).unwrap_or_else(|| "*****".into());
+                            a.serial = hy36_short(5, i).unwrap_or_else(|| "*****".into());
                             i += 1;
                         }
                     }
@@ -391,11 +628,12 @@ impl Structure {
 
     /// iotbx `hierarchy.sort_atoms_in_place()`.
     pub fn sort_atoms_in_place(&mut self) {
+        let mut orders = SortOrders::default();
         for m in &mut self.models {
             for c in &mut m.chains {
                 for rg in &mut c.residue_groups {
                     for ag in &mut rg.atom_groups {
-                        sort_atom_group(ag);
+                        orders.sort(ag);
                     }
                 }
             }
@@ -483,7 +721,56 @@ fn order_index(order: &'static [&'static str], cell: &'static OnceLock<FxHashMap
     })
 }
 
-fn sort_atom_group(ag: &mut AtomGroup) {
+/// Sort orders already worked out. The order of an atom group depends only
+/// on its residue name and atom names, so groups with the same names reuse it.
+#[derive(Default)]
+struct SortOrders {
+    /// Entries by a hash of the residue name and atom names.
+    buckets: FxHashMap<u64, Vec<u32>>,
+    entries: Vec<SortOrder>,
+}
+
+struct SortOrder {
+    resname: String,
+    names: Vec<ShortStr>,
+    /// Old index of the atom at each new position; `None` if already sorted.
+    order: Option<Vec<u32>>,
+}
+
+impl SortOrders {
+    fn sort(&mut self, ag: &mut AtomGroup) {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        ag.resname.hash(&mut h);
+        for a in &ag.atoms {
+            a.name.hash(&mut h);
+        }
+        let key = h.finish();
+        let same = |e: &SortOrder| e.resname == ag.resname && e.names.len() == ag.atoms.len()
+            && e.names.iter().zip(&ag.atoms).all(|(n, a)| *n == a.name);
+        let found = self.buckets.get(&key).and_then(|b| b.iter().copied().find(|&k| same(&self.entries[k as usize])));
+        let k = match found {
+            Some(k) => k as usize,
+            None => {
+                self.entries.push(SortOrder {
+                    resname: ag.resname.clone(),
+                    names: ag.atoms.iter().map(|a| a.name.clone()).collect(),
+                    order: sort_order(ag),
+                });
+                self.buckets.entry(key).or_default().push((self.entries.len() - 1) as u32);
+                self.entries.len() - 1
+            }
+        };
+        if let Some(order) = &self.entries[k].order {
+            let mut old: Vec<Option<Atom>> = std::mem::take(&mut ag.atoms).into_iter().map(Some).collect();
+            ag.atoms = order.iter().filter_map(|&i| old[i as usize].take()).collect();
+        }
+    }
+}
+
+/// The iotbx order of an atom group, as the old index of the atom at each
+/// position, or `None` if the atoms are already in order.
+pub(crate) fn sort_order(ag: &AtomGroup) -> Option<Vec<u32>> {
     static AA: OnceLock<FxHashMap<&str, usize>> = OnceLock::new();
     static SMALL_NA: OnceLock<FxHashMap<&str, usize>> = OnceLock::new();
     static BIG_NA: OnceLock<FxHashMap<&str, usize>> = OnceLock::new();
@@ -533,14 +820,14 @@ fn sort_atom_group(ag: &mut AtomGroup) {
         p1.cmp(&p2)
     };
     if (1..ag.atoms.len()).all(|k| cmp(k - 1, k) != std::cmp::Ordering::Greater) {
-        return;
+        return None;
     }
     // a stable sort of the indices with the same comparator: the same order
-    let mut idx: Vec<usize> = (0..ag.atoms.len()).collect();
-    idx.sort_by(|&i, &j| cmp(i, j));
-    let mut old: Vec<Option<Atom>> = std::mem::take(&mut ag.atoms).into_iter().map(Some).collect();
-    ag.atoms = idx.into_iter().map(|k| old[k].take().unwrap()).collect();
+    let mut idx: Vec<u32> = (0..ag.atoms.len() as u32).collect();
+    idx.sort_by(|&i, &j| cmp(i as usize, j as usize));
+    Some(idx)
 }
+
 
 // ----------------------------------------------------------------------------
 // Hybrid-36 encoding (PDB serial numbers and residue numbers beyond 4/5 digits).
@@ -591,6 +878,59 @@ pub fn hy36_encode(width: usize, value: i64) -> Option<String> {
     None
 }
 
+/// `hy36_encode` into a [`ShortStr`].
+pub fn hy36_short(width: usize, value: i64) -> Option<ShortStr> {
+    let w = width as u32;
+    let min = -(10i64.pow(w - 1)) + 1;
+    let max = 10i64.pow(w) - 1;
+    if value >= min && value <= max {
+        // `{:>width$}` of the decimal value
+        return Some(pure_short(b"0123456789", width, value));
+    }
+    let lim = 26 * 36i64.pow(w - 1);
+    let mut v = value - (max + 1);
+    if v >= 0 && v < lim {
+        v += 10 * 36i64.pow(w - 1);
+        return Some(pure_short(DIGITS_UPPER, width, v));
+    }
+    v -= lim;
+    if v >= 0 && v < lim {
+        v += 10 * 36i64.pow(w - 1);
+        return Some(pure_short(DIGITS_LOWER, width, v));
+    }
+    None
+}
+
+/// `encode_pure` into a [`ShortStr`].
+fn pure_short(digits: &[u8], width: usize, mut value: i64) -> ShortStr {
+    // an i64 takes at most 19 digits and a sign
+    let mut buf = [b' '; 24];
+    if width > buf.len() {
+        return encode_pure(digits, width, value).into();
+    }
+    let neg = value < 0;
+    if neg {
+        value = -value;
+    }
+    let base = digits.len() as i64;
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = digits[(value % base) as usize];
+        value /= base;
+        if value == 0 {
+            break;
+        }
+    }
+    if neg {
+        at -= 1;
+        buf[at] = b'-';
+    }
+    // right-justified: the spaces before the digits pad it to `width`
+    let start = at.min(buf.len() - width);
+    std::str::from_utf8(&buf[start..]).unwrap().into()
+}
+
 pub fn hy36_decode(s: &str) -> Option<i32> {
     let t = s.trim();
     if t.is_empty() {
@@ -627,6 +967,19 @@ mod tests {
 
     fn atom(name: &str, element: &str) -> Atom {
         Atom::new(name, element, v3(0.0, 0.0, 0.0))
+    }
+
+    #[test]
+    fn short_hybrid_36_matches_the_string_encoding() {
+        for width in [4, 5] {
+            let max = 10i64.pow(width as u32) + 2 * 26 * 36i64.pow(width as u32 - 1);
+            for v in (-10i64.pow(width as u32 - 1) - 2..max + 2).step_by(7).chain([0, 1, 9999, 10000, 99999, 100000]) {
+                assert_eq!(hy36_short(width, v).map(String::from), hy36_encode(width, v), "{width} {v}");
+            }
+        }
+        let long = ShortStr::from("a name longer than twenty-two bytes");
+        assert_eq!(long, "a name longer than twenty-two bytes");
+        assert_eq!(format!("{:>4}|{:?}", ShortStr::from("CA"), ShortStr::from("CA")), format!("{:>4}|{:?}", "CA", "CA"));
     }
 
     fn residue(resseq: &str, groups: Vec<(&str, &str, Vec<Atom>)>) -> ResidueGroup {
@@ -765,27 +1118,32 @@ impl Structure {
     /// where they were.
     pub fn take_atoms(&mut self, mut pick: impl FnMut(&AtomGroup, &Atom) -> bool) -> HeldAtoms {
         let mut held = HeldAtoms::default();
+        // a place is a key and the number of earlier chains or residue groups
+        // with that key; they are copied only for held groups
+        let own = |(k, n): Place<(&str, &str)>| ((k.0.to_string(), k.1.to_string()), n);
         for (mi, m) in self.models.iter().enumerate() {
-            let mut chain_seen: Vec<String> = Vec::new();
-            let mut chain_before: Option<Place<String>> = None;
+            let mut chain_seen: FxHashMap<&str, usize> = FxHashMap::default();
+            let mut chain_before: Option<Place<&str>> = None;
             for c in &m.chains {
-                let chain = (c.id.clone(), chain_seen.iter().filter(|x| **x == c.id).count());
-                chain_seen.push(c.id.clone());
-                let mut rg_seen: Vec<(String, String)> = Vec::new();
-                let mut residue_before: Option<Place<(String, String)>> = None;
+                let seen = chain_seen.entry(c.id.as_str()).or_insert(0);
+                let chain = (c.id.as_str(), *seen);
+                *seen += 1;
+                let mut rg_seen: FxHashMap<(&str, &str), usize> = FxHashMap::default();
+                let mut residue_before: Option<Place<(&str, &str)>> = None;
                 for rg in &c.residue_groups {
-                    let key = (rg.resseq.clone(), rg.icode.clone());
-                    let residue = (key.clone(), rg_seen.iter().filter(|x| **x == key).count());
-                    rg_seen.push(key);
+                    let key = (rg.resseq.as_str(), rg.icode.as_str());
+                    let seen = rg_seen.entry(key).or_insert(0);
+                    let residue = (key, *seen);
+                    *seen += 1;
                     for ag in &rg.atom_groups {
                         let atoms: Vec<Atom> = ag.atoms.iter().filter(|a| pick(ag, a)).cloned().collect();
                         if !atoms.is_empty() {
                             held.groups.push(HeldGroup {
                                 model: (m.id.clone(), mi),
-                                chain: chain.clone(),
-                                chain_before: chain_before.clone(),
-                                residue: residue.clone(),
-                                residue_before: residue_before.clone(),
+                                chain: (chain.0.to_string(), chain.1),
+                                chain_before: chain_before.map(|(k, n)| (k.to_string(), n)),
+                                residue: own(residue),
+                                residue_before: residue_before.map(own),
                                 link_to_previous: rg.link_to_previous,
                                 altloc: ag.altloc.clone(),
                                 resname: ag.resname.clone(),

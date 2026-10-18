@@ -11,17 +11,17 @@ fn neighbors(it: &Interp, i: u32) -> Vec<u32> {
     }).collect()
 }
 
-pub(super) fn tertiary_amide_h(it: &Interp, st: &Structure, flat: &FlatAtoms, h: u32) -> bool {
+pub(super) fn tertiary_amide_h(nbrs: &Adjacency, st: &Structure, flat: &FlatAtoms, h: u32) -> bool {
     if !flat.is_h[h as usize] {
         return false;
     }
-    let parents: Vec<u32> = neighbors(it, h).into_iter().filter(|&i| !flat.is_h[i as usize]).collect();
+    let parents: Vec<u32> = nbrs.of(h).iter().copied().filter(|&i| !flat.is_h[i as usize]).collect();
     let [parent] = parents[..] else { return false };
     if flat.name[parent as usize].trim() != "N"
         || !resclass::get_class(st.atom_group(flat.path[parent as usize]).resname.trim()).is_amino_acid() {
         return false;
     }
-    neighbors(it, parent).into_iter().filter(|&i| {
+    nbrs.of(parent).iter().filter(|&&i| {
         !flat.is_h[i as usize] && (flat.altloc[i as usize].is_empty() || flat.altloc[i as usize] == flat.altloc[h as usize])
     }).count() >= 3
 }
@@ -29,7 +29,8 @@ pub(super) fn tertiary_amide_h(it: &Interp, st: &Structure, flat: &FlatAtoms, h:
 pub(super) fn add_replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms,
     bond_order: &impl Fn(&Comp, &crate::monlib::CompBond, &str) -> Option<u8>) -> Vec<(u32, u32, String)> {
     if !st.links.iter().any(|link| link.kind == "covale") { return Vec::new(); }
-    let resolver = EndpointResolver::new(st, &flat.path);
+    let labels = st.links.iter().filter(|link| link.kind == "covale").flat_map(|link| [&link.atom1, &link.atom2]);
+    let resolver = EndpointResolver::for_labels(st, &flat.path, labels);
     let mut pairs = Vec::new();
     let mut annotated = FxHashSet::default();
     for link in &st.links {
@@ -149,12 +150,3 @@ fn replacement_angles(it: &mut Interp, st: &Structure, flat: &FlatAtoms, parent:
     Some(leaving)
 }
 
-pub(super) fn prochiral_atoms<'a>(st: &'a Structure, flat: &FlatAtoms, paths: &[AtomPath], replacements: &'a [(u32, u32, String)]) -> FxHashMap<&'a str, AtomPath> {
-    let mut atoms: FxHashMap<&str, AtomPath> = paths.iter().map(|&p| (st.atom(p).name.trim(), p)).collect();
-    for &(parent, partner, ref leaving) in replacements {
-        if paths.contains(&flat.path[parent as usize]) {
-            atoms.insert(leaving, flat.path[partner as usize]);
-        }
-    }
-    atoms
-}

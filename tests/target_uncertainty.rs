@@ -33,7 +33,7 @@ fn declare(st: &mut Structure, a: u32, b: u32, kind: &str) {
     let flat = FlatAtoms::from_structure(st);
     let label = |index: u32| {
         let p = flat.path[index as usize];
-        AtomLabel { name: st.atom(p).name.clone(), resname: st.atom_group(p).resname.clone(),
+        AtomLabel { name: st.atom(p).name.to_string(), resname: st.atom_group(p).resname.clone(),
             resseq: st.residue_group(p).resseq.clone(), chain: st.chain(p).id.clone(),
             altloc: st.atom_group(p).altloc.clone(), icode: st.residue_group(p).icode.clone() }
     };

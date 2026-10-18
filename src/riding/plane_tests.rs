@@ -16,8 +16,8 @@ fn fixture() -> (Interp, Vec<Vec3>) {
 }
 
 fn parameterize(it: &Interp, sites: &mut [Vec3], fixed: bool) -> RidingResult {
-    let names = ["N3", "C4", "C2", "H5", "HN3"].map(String::from);
-    let alts = vec![String::new(); 5];
+    let names = ["N3", "C4", "C2", "H5", "HN3"].map(ShortStr::from);
+    let alts = vec![ShortStr::new(); 5];
     riding(it, sites, &RidingAtoms {
         is_h: &[false, false, false, true, true], altloc: &alts,
         name: &names, occ: &[1.; 5], rg_of: &[0; 5], expected_heavy: &|_| None,

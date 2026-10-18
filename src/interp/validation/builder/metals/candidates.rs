@@ -22,7 +22,7 @@ fn radii(graph: &ValidationGraph, ml: &MonLib, nuclear: bool) -> Vec<Option<f64>
             let EType::Typed(name) = kind else {
                 return None;
             };
-            let atom = ml.ener.get(name)?;
+            let atom = ml.ener.get(name.as_str())?;
             let vdw = if nuclear {
                 atom.vdw_radius_neutron.or(atom.vdw_radius)
             } else {

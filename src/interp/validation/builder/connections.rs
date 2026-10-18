@@ -78,11 +78,12 @@ fn apply_modification(
             graph.topology.etype[atom as usize] = definition
                 .type_energy
                 .as_ref()
-                .map(|value| EType::Typed(value.clone()))
+                .map(|value| EType::Typed(value.into()))
                 .unwrap_or(EType::NoneType);
             graph.topology.dict[atom as usize] = AtomDictInfo {
                 comp: Some(Arc::clone(&comp)),
-                dict_id: Some(name.clone()),
+                dict_id: Some(name.into()),
+                instance: 0,
             };
         }
     }

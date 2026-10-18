@@ -2,9 +2,14 @@
 //! parameterization and `compute_h_position`).
 
 use crate::geom::*;
-use crate::interp::{angle_delta_deg, Interp};
+use crate::interp::{angle_delta_deg, Adjacency, Interp};
+use crate::model::ShortStr;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use std::f64::consts::PI;
+
+/// Neighbor list of one atom, inline for up to four.
+type Neighbors = SmallVec<[u32; 4]>;
 
 #[cfg(test)]
 mod plane_tests;
@@ -74,11 +79,61 @@ struct Nb {
     valid: bool,
 }
 
+/// The neighbor records of the atoms, found by atom index. Only hydrogens
+/// get records, so each has a slot, in atom order, made when it is created.
+struct Conn {
+    slot: Vec<u32>,
+    /// Whether each slot holds a record, so `index` need not read the
+    /// large records.
+    live: Vec<bool>,
+    nbs: Vec<Option<Nb>>,
+}
+
+impl Conn {
+    const NONE: u32 = u32::MAX;
+
+    fn new(is_h: &[bool]) -> Conn {
+        let mut next = 0u32;
+        let slot = is_h.iter().map(|&h| if h { next += 1; next - 1 } else { Conn::NONE }).collect();
+        let nbs = std::iter::repeat_with(|| None).take(next as usize).collect();
+        Conn { slot, live: vec![false; next as usize], nbs }
+    }
+    /// The slot of atom `a`, if it has a record.
+    #[inline]
+    fn index(&self, a: u32) -> Option<usize> {
+        let k = self.slot[a as usize];
+        (k != Conn::NONE && self.live[k as usize]).then_some(k as usize)
+    }
+    #[inline]
+    fn get(&self, a: u32) -> Option<&Nb> {
+        let k = self.slot[a as usize];
+        if k == Conn::NONE { None } else { self.nbs[k as usize].as_ref() }
+    }
+    #[inline]
+    fn get_mut(&mut self, a: u32) -> Option<&mut Nb> {
+        let k = self.slot[a as usize];
+        if k == Conn::NONE { None } else { self.nbs[k as usize].as_mut() }
+    }
+    /// Create or replace the record of atom `a`; returns its slot.
+    fn set(&mut self, a: u32, nb: Nb) -> usize {
+        let mut k = self.slot[a as usize];
+        if k == Conn::NONE {
+            k = self.nbs.len() as u32;
+            self.slot[a as usize] = k;
+            self.nbs.push(None);
+            self.live.push(false);
+        }
+        self.nbs[k as usize] = Some(nb);
+        self.live[k as usize] = true;
+        k as usize
+    }
+}
+
 /// Inputs describing the atoms.
 pub struct RidingAtoms<'a> {
     pub is_h: &'a [bool],
-    pub altloc: &'a [String],
-    pub name: &'a [String],
+    pub altloc: &'a [ShortStr],
+    pub name: &'a [ShortStr],
     pub occ: &'a [f64],
     /// Atoms of the same residue group (for alternate-neighbor reduction).
     pub rg_of: &'a [u64],
@@ -153,87 +208,91 @@ fn reduce_alternates(at: &RidingAtoms, cands: &[u32]) -> Vec<u32> {
 pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihedral: bool) -> RidingResult {
     let n = sites.len();
     let mut warnings = Vec::new();
-    // bond order: sorted by (i, j)
-    let mut bonds: Vec<(u32, u32, f64)> = it.bonds.iter().map(|b| (b.i, b.j, b.ideal)).collect();
-    bonds.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
-    let mut fsc0: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for &(i, j, _) in &bonds {
-        fsc0[i as usize].push(j);
-        fsc0[j as usize].push(i);
-    }
-    let mut conn: Vec<Option<Nb>> = vec![None; n];
-    let mut double_h: FxHashSet<u32> = FxHashSet::default();
-    let mut parents: FxHashSet<u32> = FxHashSet::default();
-    // 1. first neighbors
-    for &(i, j, ideal) in &bonds {
-        let (hi, hj) = (at.is_h[i as usize], at.is_h[j as usize]);
-        if !hi && !hj {
+    // The neighbors in bond order, a stable sort of the bonds by (i, j),
+    // which lists each atom's neighbors in ascending order.
+    let (fsc0, fsc0_bond) = Adjacency::sorted(n, &it.bonds);
+    let mut conn = Conn::new(at.is_h);
+    // the parent of each record of `conn` from step 1, by slot
+    let mut parent_of: Vec<u32> = vec![u32::MAX; conn.nbs.len()];
+    let mut double_h = vec![false; n];
+    let mut is_parent = vec![false; n];
+    // 1. first neighbors: the parent of an H is the heavy atom of its first
+    // bond in bond order, which is its lowest heavy neighbor
+    for ih in 0..n as u32 {
+        if !at.is_h[ih as usize] {
             continue;
         }
-        if hi && hj {
-            continue;
+        let entries = fsc0.range(ih);
+        let Some(e) = entries.clone().find(|&e| !at.is_h[fsc0.of_entry(e) as usize]) else { continue };
+        let parent = fsc0.of_entry(e);
+        let ideal = it.bonds[fsc0_bond[e] as usize].ideal;
+        if entries.len() > 1 {
+            double_h[ih as usize] = true;
         }
-        let (ih, parent) = if hi { (i, j) } else { (j, i) };
-        if conn[ih as usize].is_some() {
-            continue;
-        }
-        if fsc0[ih as usize].len() > 1 {
-            double_h.insert(ih);
-        }
-        conn[ih as usize] = Some(Nb { ih, a0: Some((parent, ideal)), valid: true, ..Default::default() });
-        parents.insert(parent);
+        let k = conn.set(ih, Nb { ih, a0: Some((parent, ideal)), valid: true, ..Default::default() });
+        parent_of.resize(conn.nbs.len(), u32::MAX);
+        parent_of[k] = parent;
+        is_parent[parent as usize] = true;
     }
     // 2. slipped H (no bond)
-    let slipped: Vec<u32> = (0..n as u32).filter(|&k| at.is_h[k as usize] && conn[k as usize].is_none()).collect();
-    // 3. second neighbors (angle proxy order)
-    let mut second_raw: Vec<Vec<u32>> = vec![Vec::new(); n];
-    let mut angle_dict: FxHashMap<(u32, u32, u32), f64> = FxHashMap::default();
-    for ap in &it.angles {
+    let slipped: Vec<u32> = (0..n as u32).filter(|&k| at.is_h[k as usize] && conn.index(k).is_none()).collect();
+    // 3. second neighbors (angle proxy order), by record of `conn`
+    let mut second_raw: Vec<Neighbors> = vec![Neighbors::new(); conn.nbs.len()];
+    // the ideal angle of each entry of second_raw; an H has one parent here,
+    // and a later entry for the same second neighbor replaces an earlier one
+    let mut second_angle: Vec<SmallVec<[f64; 4]>> = vec![SmallVec::new(); conn.nbs.len()];
+    // the angles with two heavy end atoms, in angle order, for step 7
+    let mut heavy_angles: Vec<u32> = Vec::new();
+    for (ai, ap) in it.angles.iter().enumerate() {
+        if !at.is_h[ap.i[0] as usize] && !at.is_h[ap.i[2] as usize] {
+            heavy_angles.push(ai as u32);
+        }
         for &i_test in &ap.i {
-            if conn[i_test as usize].is_none() && !at.is_h[i_test as usize] {
-                continue;
-            }
+            let Some(k) = conn.index(i_test) else { continue };
             let ih = i_test;
             let parent = ap.i[1];
-            if !parents.contains(&parent) {
+            if !is_parent[parent as usize] {
                 continue;
             }
-            let Some(nb) = conn[ih as usize].as_ref() else { continue };
             let second = match ap.i.iter().find(|&&x| x != ih && x != parent) {
                 Some(&s) => s,
                 None => continue,
             };
-            if nb.a0.unwrap().0 != parent {
-                if double_h.contains(&ih) {
+            if parent_of[k] != parent {
+                if double_h[ih as usize] {
                     continue;
                 }
                 warnings.push(format!("angle and bond restraints conflict for H {}", ih));
                 continue;
             }
-            second_raw[ih as usize].push(second);
-            angle_dict.insert((ih, parent, second), ap.ideal);
+            second_raw[k].push(second);
+            second_angle[k].push(ap.ideal);
         }
     }
     // 4. Retain Reduce2's first-H placement for restraints that already work.
-    let mut plane_h: FxHashSet<u32> = FxHashSet::default();
-    let mut explicit_plane_h: FxHashSet<u32> = FxHashSet::default();
+    let mut plane_h = vec![false; n];
+    let mut explicit_plane_h = vec![false; n];
     for pl in &it.planes {
         if let Some(&h) = pl.iter().find(|&&a| at.is_h[a as usize]) {
-            plane_h.insert(h);
+            plane_h[h as usize] = true;
         }
         if at.use_plane_restraints {
-            explicit_plane_h.extend(pl.iter().copied().filter(|&a| at.is_h[a as usize]));
+            for &a in pl.iter().filter(|&&a| at.is_h[a as usize]) {
+                explicit_plane_h[a as usize] = true;
+            }
         }
     }
     // 5. process second neighbors
-    let mut a1_atoms: FxHashSet<u32> = FxHashSet::default();
-    let mut a0a1: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    for ih in 0..n {
-        let Some(nb) = conn[ih].as_mut() else { continue };
-        let parent = nb.a0.unwrap().0;
-        let mut reduced: Vec<u32> = Vec::new();
-        let mut alts: Vec<u32> = Vec::new();
-        for &s in &second_raw[ih] {
+    let mut a1_atoms = vec![false; n];
+    let mut a0a1: FxHashMap<u32, Neighbors> = FxHashMap::default();
+    let (mut reduced, mut alts, mut hs, mut non_h): (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) = Default::default();
+    for ih in 0..n as u32 {
+        let Some(slot) = conn.index(ih) else { continue };
+        let Some(nb) = conn.nbs[slot].as_mut() else { continue };
+        let parent = parent_of[slot];
+        reduced.clear();
+        alts.clear();
+        for &s in &second_raw[slot] {
             if at.altloc[s as usize].is_empty() {
                 reduced.push(s);
             } else {
@@ -243,48 +302,51 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         if !alts.is_empty() {
             reduced.extend(reduce_alternates(at, &alts));
         }
-        let hs: Vec<u32> = reduced.iter().copied().filter(|&x| at.is_h[x as usize]).collect();
+        hs.clear();
+        hs.extend(reduced.iter().copied().filter(|&x| at.is_h[x as usize]));
         // non-H: Python set order (iteration by hash); positions do not depend on it
-        let mut non_h: Vec<u32> = Vec::new();
+        non_h.clear();
         for &x in &reduced {
             if !at.is_h[x as usize] && !non_h.contains(&x) {
                 non_h.push(x);
             }
         }
+        let angle_to = |x: u32| {
+            let k = second_raw[slot].iter().rposition(|&s| s == x).unwrap_or(0);
+            second_angle[slot][k]
+        };
         let mut cnt = 0;
         for (k, &x) in non_h.iter().take(3).enumerate() {
-            nb.a[k] = Some(NbAngle { iseq: x, angle: angle_dict[&(ih as u32, parent, x)] });
+            nb.a[k] = Some(NbAngle { iseq: x, angle: angle_to(x) });
             cnt += 1;
         }
         let mut hc = 0;
         for (k, &x) in hs.iter().take(2).enumerate() {
-            nb.h[k] = Some(NbAngle { iseq: x, angle: angle_dict[&(ih as u32, parent, x)] });
+            nb.h[k] = Some(NbAngle { iseq: x, angle: angle_to(x) });
             hc += 1;
         }
         nb.nh = hc;
         nb.nnonh = cnt;
         if cnt == 1 {
             let a1 = nb.a[0].unwrap().iseq;
-            a1_atoms.insert(a1);
+            a1_atoms[a1 as usize] = true;
             a0a1.entry(parent).or_default().push(a1);
         }
     }
     // 6. third neighbors from dihedral proxies (const first, then var; last write wins)
-    let assign_group = |conn: &mut Vec<Option<Nb>>, ih: u32, third: u32| {
-        let (nh, h1, h2) = {
-            let nb = conn[ih as usize].as_ref().unwrap();
-            (nb.nh, nb.h[0].map(|x| x.iseq), nb.h[1].map(|x| x.iseq))
-        };
+    let assign_group = |conn: &mut Conn, ih: u32, third: u32| {
+        let Some(nb) = conn.get(ih) else { return };
+        let (nh, h1, h2) = (nb.nh, nb.h[0].map(|x| x.iseq), nb.h[1].map(|x| x.iseq));
         if nh > 0 {
             if let Some(h1) = h1 {
-                if let Some(o) = conn[h1 as usize].as_mut() {
+                if let Some(o) = conn.get_mut(h1) {
                     o.b1_iseq = Some(third);
                     o.b1_ideal = None;
                 }
             }
             if nh == 2 {
                 if let Some(h2) = h2 {
-                    if let Some(o) = conn[h2 as usize].as_mut() {
+                    if let Some(o) = conn.get_mut(h2) {
                         o.b1_iseq = Some(third);
                         o.b1_ideal = None;
                     }
@@ -294,7 +356,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
     };
     for dp in &it.const_dihedrals {
         for &t in &dp.i {
-            if conn[t as usize].is_none() {
+            if conn.index(t).is_none() {
                 continue;
             }
             let (third, ideal) = if t == dp.i[0] {
@@ -304,8 +366,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             } else {
                 continue;
             };
-            {
-                let nb = conn[t as usize].as_mut().unwrap();
+            if let Some(nb) = conn.get_mut(t) {
                 nb.b1_iseq = Some(third);
                 nb.b1_ideal = Some(ideal);
             }
@@ -314,7 +375,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
     }
     'dp: for dp in &it.dihedrals {
         for &t in &dp.i {
-            if conn[t as usize].is_none() {
+            if conn.index(t).is_none() {
                 continue;
             }
             let third = if t == dp.i[0] {
@@ -330,8 +391,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             };
             let model_deg = model.to_degrees();
             let delta = angle_delta_deg(model_deg, dp.ideal, dp.period);
-            {
-                let nb = conn[t as usize].as_mut().unwrap();
+            if let Some(nb) = conn.get_mut(t) {
                 nb.b1_iseq = Some(third);
                 let nh2 = at.dictionary_nh2_torsion && dp.period == 2 && nb.nh == 1;
                 // alg1a places the H at its torsion parameter + 180 degrees
@@ -341,27 +401,38 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         }
     }
     // 7. angles at the parent and fallback third neighbors
-    let mut parent_angles: FxHashMap<u32, FxHashMap<(u32, u32), f64>> = FxHashMap::default();
-    let mut third_raw: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    for ap in &it.angles {
+    // heavy-atom angles at each parent, in angle order: (first, third atom,
+    // ideal), grouped by the parent
+    let mut pa_start = vec![0u32; n + 1];
+    for &ai in &heavy_angles {
+        let iy = it.angles[ai as usize].i[1];
+        if is_parent[iy as usize] {
+            pa_start[iy as usize + 1] += 1;
+        }
+    }
+    for k in 0..n {
+        pa_start[k + 1] += pa_start[k];
+    }
+    let mut pa_fill = pa_start.clone();
+    let mut pa_list: Vec<(u32, u32, f64)> = vec![(0, 0, 0.0); pa_start[n] as usize];
+    let mut third_raw: FxHashMap<u32, Neighbors> = FxHashMap::default();
+    for &ai in &heavy_angles {
+        let ap = &it.angles[ai as usize];
         let [ix, iy, iz] = ap.i;
-        let (hx, hz) = (at.is_h[ix as usize], at.is_h[iz as usize]);
-        if parents.contains(&iy) && !hx && !hz {
-            parent_angles.entry(iy).or_default().insert((ix, iz), ap.ideal);
+        if is_parent[iy as usize] {
+            pa_list[pa_fill[iy as usize] as usize] = (ix, iz, ap.ideal);
+            pa_fill[iy as usize] += 1;
         }
-        if hx || hz {
+        if !a1_atoms[iy as usize] {
             continue;
         }
-        if !a1_atoms.contains(&iy) {
-            continue;
-        }
-        let (parent, third) = if parents.contains(&ix) && a0a1.contains_key(&ix) {
+        let (parent, third) = if is_parent[ix as usize] && a0a1.contains_key(&ix) {
             if a0a1[&ix].contains(&iy) {
                 (ix, iz)
             } else {
                 continue;
             }
-        } else if parents.contains(&iz) && a0a1.contains_key(&iz) {
+        } else if is_parent[iz as usize] && a0a1.contains_key(&iz) {
             if a0a1[&iz].contains(&iy) {
                 (iz, ix)
             } else {
@@ -373,47 +444,49 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         let e = third_raw.entry(parent).or_default();
         if !e.contains(&third) {
             e.push(third);
-            if parents.contains(&third) {
+            if is_parent[third as usize] {
                 third_raw.entry(third).or_default().push(parent);
             }
         }
     }
+    // the last angle (a0; x, z) recorded, else the last (a0; z, x)
     let get_pa = |a0: u32, x: u32, z: u32| -> Option<f64> {
-        let m = parent_angles.get(&a0)?;
-        m.get(&(x, z)).or_else(|| m.get(&(z, x))).copied()
+        let list = &pa_list[pa_start[a0 as usize] as usize..pa_start[a0 as usize + 1] as usize];
+        let last = |p: u32, q: u32| list.iter().rev().find(|e| e.0 == p && e.1 == q).map(|e| e.2);
+        last(x, z).or_else(|| last(z, x))
     };
     for ih in 0..n {
-        let Some(nb0) = conn[ih].clone() else { continue };
+        let Some(slot) = conn.index(ih as u32) else { continue };
+        let Some(nb) = conn.nbs[slot].as_mut() else { continue };
+        // the record as it was before this step
+        let (nnonh, nh, b1_iseq, h0) = (nb.nnonh, nb.nh, nb.b1_iseq, nb.h[0]);
+        let parent = parent_of[slot];
         // assign_a0_angles
-        if nb0.nnonh > 1 {
-            let a0 = nb0.a0.unwrap().0;
-            let a1 = nb0.a[0].unwrap().iseq;
-            let a2 = nb0.a[1].unwrap().iseq;
-            let ang = get_pa(a0, a1, a2);
-            let nb = conn[ih].as_mut().unwrap();
+        if let (true, Some(a1), Some(a2)) = (nnonh > 1, nb.a[0], nb.a[1]) {
+            let (a1, a2) = (a1.iseq, a2.iseq);
+            let ang = get_pa(parent, a1, a2);
             nb.angle_a1a0a2 = ang;
             if ang.is_none() {
                 *nb = Nb { ih: ih as u32, valid: false, ..Default::default() };
                 continue;
             }
-            if nb0.nnonh == 3 {
-                let a3 = nb0.a[2].unwrap().iseq;
-                nb.angle_a2a0a3 = get_pa(a0, a2, a3);
-                nb.angle_a3a0a1 = get_pa(a0, a3, a1);
+            if let (3, Some(a3)) = (nnonh, nb.a[2]) {
+                let a3 = a3.iseq;
+                nb.angle_a2a0a3 = get_pa(parent, a2, a3);
+                nb.angle_a3a0a1 = get_pa(parent, a3, a1);
                 if nb.angle_a2a0a3.is_none() || nb.angle_a3a0a1.is_none() {
                     *nb = Nb { ih: ih as u32, valid: false, ..Default::default() };
                     continue;
                 }
             }
         }
-        if nb0.nnonh != 1 || nb0.b1_iseq.is_some() {
+        if nnonh != 1 || b1_iseq.is_some() {
             continue;
         }
-        let parent = nb0.a0.unwrap().0;
-        let raw = third_raw.get(&parent).cloned().unwrap_or_default();
-        let mut reduced: Vec<u32> = Vec::new();
-        let mut alts: Vec<u32> = Vec::new();
-        for t in raw {
+        let raw = third_raw.get(&parent).map_or(&[][..], |v| v.as_slice());
+        reduced.clear();
+        alts.clear();
+        for &t in raw {
             if at.altloc[t as usize].is_empty() {
                 reduced.push(t);
             } else {
@@ -424,18 +497,18 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             reduced.extend(reduce_alternates(at, &alts));
         }
         if reduced.is_empty() {
-            conn[ih] = Some(Nb { ih: ih as u32, valid: false, ..Default::default() });
+            conn.nbs[slot] = Some(Nb { ih: ih as u32, valid: false, ..Default::default() });
             continue;
         }
         if parent_lost_heavy_neighbor(at, &fsc0, parent) {
-            conn[ih] = Some(Nb { ih: ih as u32, valid: false, ..Default::default() });
+            conn.nbs[slot] = Some(Nb { ih: ih as u32, valid: false, ..Default::default() });
             continue;
         }
         let third = reduced[0];
-        let nb = conn[ih].as_mut().unwrap();
-        if nb0.nh == 2 {
+        let Some(nb) = conn.nbs[slot].as_mut() else { continue };
+        if nh == 2 {
             nb.b1_iseq = Some(third);
-            let sibling = nb0.h[0].map(|x| x.iseq);
+            let sibling = h0.map(|x| x.iseq);
             nb.b1_ideal = Some(if sibling.map(|s| (ih as u32) < s).unwrap_or(false) { 60.0 } else { -60.0 });
         } else {
             nb.b1_iseq = Some(third);
@@ -443,12 +516,12 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         }
     }
     for &s in &slipped {
-        conn[s as usize] = Some(Nb { ih: s, valid: false, ..Default::default() });
+        conn.set(s, Nb { ih: s, valid: false, ..Default::default() });
     }
     for ih in 0..n {
-        if let Some(nb) = conn[ih].as_mut() {
-            nb.is_in_plane = plane_h.contains(&(ih as u32));
-            nb.explicit_plane = explicit_plane_h.contains(&(ih as u32));
+        if let Some(nb) = conn.get_mut(ih as u32) {
+            nb.is_in_plane = plane_h[ih];
+            nb.explicit_plane = explicit_plane_h[ih];
         }
     }
 
@@ -458,10 +531,10 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
 
     // ---------------- parameterization
     let mut axial_reference: Vec<u32> = Vec::new();
-    let mut coef: Vec<Option<RidingCoef>> = vec![None; n];
+    let mut coef: Vec<Option<RidingCoef>> = std::iter::repeat_with(|| None).take(n).collect();
     let mut unk: Vec<u32> = Vec::new();
     for ih in 0..n {
-        let Some(nb) = conn[ih].clone() else { continue };
+        let Some(nb) = conn.get(ih as u32) else { continue };
         if coef[ih].is_some() {
             continue;
         }
@@ -470,14 +543,14 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             continue;
         }
         let r = if nb.nnonh == 2 {
-            process_2(&nb, &conn, sites, &mut coef, at.use_plane_restraints,
-                &|| planar::dictionary_carbon(it, at, &fsc0, &nb))
+            process_2(nb, sites, &mut coef, at.use_plane_restraints,
+                &|| planar::dictionary_carbon(it, at, &fsc0, nb))
         } else if nb.nnonh == 3 && nb.nh == 0 {
-            process_3(&nb, sites, &mut coef)
+            process_3(nb, sites, &mut coef)
         } else if nb.nnonh == 1 && (nb.nh == 0 || nb.nh == 2) {
-            process_1(&nb, &conn, sites, &mut coef, use_ideal_dihedral, &mut axial_reference)
+            process_1(nb, &conn, sites, &mut coef, use_ideal_dihedral, &mut axial_reference)
         } else if nb.nnonh == 1 && nb.nh == 1 {
-            process_1_arg(&nb, &conn, sites, &mut coef, &mut axial_reference)
+            process_1_arg(nb, &conn, sites, &mut coef, &mut axial_reference)
         } else {
             Err(())
         };
@@ -486,23 +559,30 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
         }
     }
     // ---------------- positions (i_seq order, written immediately)
+    // only hydrogens get coefficients
+    let mut unparameterized: Vec<u32> = Vec::new();
     for ih in 0..n {
-        if let Some(c) = coef[ih] {
-            if let Some(p) = compute_h_position(&c, sites) {
-                sites[ih] = p;
+        if !at.is_h[ih] {
+            continue;
+        }
+        match coef[ih] {
+            Some(c) => {
+                if let Some(p) = compute_h_position(&c, sites) {
+                    sites[ih] = p;
+                }
             }
+            None => unparameterized.push(ih as u32),
         }
     }
-    let unparameterized: Vec<u32> = (0..n as u32).filter(|&k| at.is_h[k as usize] && coef[k as usize].is_none()).collect();
     let _ = unk;
     RidingResult { coef, unparameterized, axial_reference, warnings }
 }
 
-fn parent_lost_heavy_neighbor(at: &RidingAtoms, fsc0: &[Vec<u32>], parent: u32) -> bool {
+fn parent_lost_heavy_neighbor(at: &RidingAtoms, fsc0: &Adjacency, parent: u32) -> bool {
     let Some(expected) = (at.expected_heavy)(parent) else { return false };
     let palt = &at.altloc[parent as usize];
     let mut seen: FxHashSet<&str> = FxHashSet::default();
-    for &j in &fsc0[parent as usize] {
+    for &j in fsc0.of(parent) {
         if at.is_h[j as usize] {
             continue;
         }
@@ -537,9 +617,9 @@ const AXIS_TOLERANCE: f64 = 0.001;
 /// neighbor when there is one (so the movers can name it too), else the
 /// nearest heavy atom off the axis. The ideal torsion is kept; it is undefined
 /// about the axial atom, and the groups this touches are rotatable.
-fn reroute_axial_references(at: &RidingAtoms, fsc0: &[Vec<u32>], sites: &[Vec3], conn: &mut [Option<Nb>]) {
-    for ih in 0..conn.len() {
-        let Some(nb) = conn[ih].as_ref() else { continue };
+fn reroute_axial_references(at: &RidingAtoms, fsc0: &Adjacency, sites: &[Vec3], conn: &mut Conn) {
+    for ih in 0..conn.slot.len() as u32 {
+        let Some(nb) = conn.get(ih) else { continue };
         if !nb.valid || nb.nnonh != 1 {
             continue;
         }
@@ -558,19 +638,22 @@ fn reroute_axial_references(at: &RidingAtoms, fsc0: &[Vec<u32>], sites: &[Vec3],
                 && (altloc.is_empty() || calt.is_empty() || calt == altloc)
                 && off_axis(r0, r1, sites[c as usize]) >= AXIS_TOLERANCE
         };
-        let bonded = fsc0[a1 as usize].iter().copied().find(|&c| usable(c));
+        let bonded = fsc0.of(a1).iter().copied().find(|&c| usable(c));
         let nearest = || {
             (0..sites.len() as u32)
                 .filter(|&c| usable(c))
                 .min_by(|&x, &y| (sites[x as usize] - r1).length().total_cmp(&(sites[y as usize] - r1).length()))
         };
-        conn[ih].as_mut().unwrap().b1_iseq = bonded.or_else(nearest);
+        let b1 = bonded.or_else(nearest);
+        if let Some(nb) = conn.get_mut(ih) {
+            nb.b1_iseq = b1;
+        }
     }
 }
 
 fn process_1(
     nb: &Nb,
-    conn: &[Option<Nb>],
+    conn: &Conn,
     sites: &[Vec3],
     coef: &mut [Option<RidingCoef>],
     use_ideal_dihedral: bool,
@@ -581,12 +664,12 @@ fn process_1(
         let (h1, h2) = (nb.h[0].unwrap().iseq, nb.h[1].unwrap().iseq);
         if nb.b1_ideal.is_some() {
             // use self
-        } else if conn[h1 as usize].as_ref().map(|x| x.b1_ideal.is_some()).unwrap_or(false) {
+        } else if let Some(o) = conn.get(h1).filter(|x| x.b1_ideal.is_some()) {
             if coef[h1 as usize].is_none() {
-                nbs = conn[h1 as usize].clone().unwrap();
+                nbs = o.clone();
             }
-        } else if conn[h2 as usize].as_ref().map(|x| x.b1_ideal.is_some()).unwrap_or(false) && coef[h2 as usize].is_none() {
-            nbs = conn[h2 as usize].clone().unwrap();
+        } else if let Some(o) = conn.get(h2).filter(|x| x.b1_ideal.is_some() && coef[h2 as usize].is_none()) {
+            nbs = o.clone();
         }
     }
     let ih = nbs.ih;
@@ -652,7 +735,7 @@ fn process_1(
 
 fn process_1_arg(
     nb: &Nb,
-    conn: &[Option<Nb>],
+    conn: &Conn,
     sites: &[Vec3],
     coef: &mut [Option<RidingCoef>],
     axial: &mut Vec<u32>,
@@ -663,12 +746,12 @@ fn process_1_arg(
     let a1 = nb.a[0].ok_or(())?;
     let (ih_d, ih_nd) = if nb.b1_ideal.is_some() {
         (ih, h1.iseq)
-    } else if conn[h1.iseq as usize].as_ref().map(|x| x.b1_ideal.is_some()).unwrap_or(false) {
+    } else if conn.get(h1.iseq).is_some_and(|x| x.b1_ideal.is_some()) {
         (h1.iseq, ih)
     } else {
         return Err(());
     };
-    let nbd = conn[ih_d as usize].as_ref().unwrap();
+    let nbd = conn.get(ih_d).ok_or(())?;
     let i_b1 = nbd.b1_iseq.ok_or(())?;
     if h1.angle > 107.0 && h1.angle < 111.0 {
         return Err(());
@@ -703,8 +786,7 @@ fn process_1_arg(
     Ok(())
 }
 
-fn process_2(nb: &Nb, conn: &[Option<Nb>], sites: &[Vec3], coef: &mut [Option<RidingCoef>], use_plane_restraints: bool, dictionary_plane: &dyn Fn() -> bool) -> Result<(), ()> {
-    let _ = conn;
+fn process_2(nb: &Nb, sites: &[Vec3], coef: &mut [Option<RidingCoef>], use_plane_restraints: bool, dictionary_plane: &dyn Fn() -> bool) -> Result<(), ()> {
     let ih = nb.ih;
     let (i_a0, disth) = nb.a0.ok_or(())?;
     let a1 = nb.a[0].ok_or(())?;

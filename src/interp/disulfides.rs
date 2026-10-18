@@ -54,7 +54,7 @@ mod tests {
     fn deposited_disulfide_overrides_metal_exclusion_in_fixed_mode() {
         for compat in [false, true] {
             let (st, flat, mut it) = fixture();
-            super::super::add_disulfides(&mut it, &st, &flat, &[0, 1], compat);
+            super::super::add_disulfides(&mut it, &st, &flat, &super::super::SpecialAtoms::new(&flat), &[0, 1], compat);
             assert_eq!(it.has_bond(0, 1), !compat);
             assert_eq!(flat.pos[0], st.atom(flat.path[0]).xyz);
         }

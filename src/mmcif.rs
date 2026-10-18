@@ -3,22 +3,35 @@
 
 use crate::cell::{space_group_info, UnitCell};
 use crate::cif;
-use crate::cifsource::{CifCell, CifSink, CifSource, CifTable, CifText};
+use crate::cifsource::{CifCell, CifSink, CifSource, CifTable, CifText, ColumnValue};
 use crate::geom::v3;
 use crate::model::*;
 use crate::resclass::{self, ResClass};
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 /// `format_pdb_atom_name`: the 4-column PDB spelling of an mmCIF atom name.
-fn format_pdb_atom_name(name: &str, element: &str) -> String {
+fn format_pdb_atom_name(name: &str, element: &str) -> ShortStr {
     if name.len() >= 4 {
-        return name.to_string();
+        return name.into();
     }
-    let mut n = name.trim().to_string();
-    let first = n.chars().next().map(|c| c.to_ascii_uppercase());
+    let b = name.as_bytes();
+    // the usual name: ASCII without blanks, which `trim` leaves as it is
+    if b.iter().all(u8::is_ascii_graphic) {
+        let lead = element.len() == 1
+            && b.first().map(u8::to_ascii_uppercase) == element.as_bytes().first().map(u8::to_ascii_uppercase);
+        let mut field = [b' '; 4];
+        let at = usize::from(lead);
+        field[at..at + b.len()].copy_from_slice(b);
+        return ShortStr::from_ascii_field(field);
+    }
+    let t = name.trim();
+    let first = t.chars().next().map(|c| c.to_ascii_uppercase());
+    let mut n = ShortStr::new();
     if element.len() == 1 && first == element.chars().next().map(|c| c.to_ascii_uppercase()) {
-        n = format!(" {}", n);
+        n.push(' ');
     }
+    n.push_str(t);
     while n.len() < 4 {
         n.push(' ');
     }
@@ -46,6 +59,18 @@ pub fn read_mmcif(text: &str) -> Result<Structure, String> {
 /// Build the model from a parsed mmCIF data block (`_atom_site`,
 /// `_atom_site_anisotrop`, `_cell` and the space group items).
 pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure, String> {
+    read_structure(block, None)
+}
+
+/// [`structure_from_cif`], with the numbers it read for
+/// [`write_cif_preserving_with`].
+pub fn structure_and_numbers_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<(Structure, SourceNumbers), String> {
+    let mut numbers = SourceNumbers(Default::default());
+    let st = read_structure(block, Some(&mut numbers))?;
+    Ok((st, numbers))
+}
+
+fn read_structure<S: CifSource + ?Sized>(block: &S, mut numbers: Option<&mut SourceNumbers>) -> Result<Structure, String> {
     let cat = block.table("atom_site").ok_or_else(|| "no _atom_site loop found in the mmCIF data".to_string())?;
     let col = |names: &[&str]| names.iter().find_map(|n| cat.column(n));
     let req = |names: &[&str]| col(names).ok_or_else(|| format!("_atom_site.{} is missing", names[0]));
@@ -103,123 +128,243 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         }
     }
 
+    let nrows = cat.row_count();
+    // The first pass reads the hierarchy items and gives each row an atom
+    // group; the second reads the atoms into groups sized by the first.
     let mut models: Vec<Model> = Vec::new();
+    // the atom groups of each residue group in their final order, by model,
+    // chain and residue group
+    let mut res_groups: Vec<Vec<Vec<Vec<u32>>>> = Vec::new();
+    // altloc, resname and number of rows of each atom group
+    let mut groups: Vec<(String, String, usize)> = Vec::new();
+    let mut group_of_row: Vec<u32> = Vec::with_capacity(nrows);
     // Rows may return to a chain or residue earlier in the same model block.
     let mut chain_index = rustc_hash::FxHashMap::default();
-    let mut residue_index = rustc_hash::FxHashMap::default();
-    let (mut cur_model, mut cur_label_asym, mut cur_auth_asym): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut residue_index: rustc_hash::FxHashMap<(usize, usize, ShortStr, ShortStr), usize> = rustc_hash::FxHashMap::default();
+    // the hierarchy items of the previous row and its atom group: a row with
+    // the same items belongs to the same group
+    let mut last: Option<[Cow<'_, str>; 7]> = None;
+    let mut last_group = 0u32;
     let mut cur_chain = 0;
-    let mut prev_comp: Option<String> = None;
-    for r in 0..cat.row_count() {
-        let model_id = c_model.map(|c| get(r, c).into_owned()).unwrap_or_else(|| "1".into());
-        let new_model = cur_model.as_deref() != Some(model_id.as_str());
+    // (model, chain, residue number, insertion code) of the last new residue
+    // label and its residue group
+    let mut cur_res: Option<(usize, usize, ShortStr, ShortStr, usize)> = None;
+    let mut resname = String::new();
+    // the first row the first pass rejects, and why
+    let mut failure: Option<(usize, String)> = None;
+    for r in 0..nrows {
+        let items = [
+            c_model.map(|c| get(r, c)).unwrap_or(Cow::Borrowed("1")),
+            get(r, c_label_asym),
+            get(r, c_auth_asym),
+            get(r, c_seq),
+            c_ins.map(|c| get(r, c)).unwrap_or(Cow::Borrowed("\0")),
+            get(r, c_alt),
+            get(r, c_comp),
+        ];
+        if last.as_ref().is_some_and(|l| l.iter().zip(&items).all(|(a, b)| same_text(a, b))) {
+            groups[last_group as usize].2 += 1;
+            group_of_row.push(last_group);
+            continue;
+        }
+        let [model_id, label_asym, auth_asym, res, ins_cell, alt_cell, comp] = &items;
+        let prev = last.as_ref();
+        let new_model = prev.map(|p| &*p[0]) != Some(&**model_id);
         if new_model {
-            models.push(Model { id: model_id.clone(), chains: Vec::new() });
+            models.push(Model { id: model_id.to_string(), chains: Vec::new() });
+            res_groups.push(Vec::new());
         }
         let mi = models.len() - 1;
-        let label_asym = get(r, c_label_asym).into_owned();
-        let auth_asym = get(r, c_auth_asym).into_owned();
-        if matches!(auth_asym.as_str(), "." | "?" | " " | "") {
-            return Err("mmCIF file contains a record with an empty auth_asym_id".into());
+        if matches!(&**auth_asym, "." | "?" | " " | "") {
+            failure = Some((r, "mmCIF file contains a record with an empty auth_asym_id".into()));
+            break;
         }
-        let label_changed = cur_label_asym.as_deref() != Some(label_asym.as_str());
-        let auth_changed = cur_auth_asym.as_deref() != Some(auth_asym.as_str());
-        let model = &mut models[mi];
-        let ci = *chain_index.entry((mi, auth_asym.clone(), label_asym.clone())).or_insert_with(|| {
-            if auth_changed || new_model || (label_changed && r > 0 && prev_comp.as_deref().map_or(false, is_aa_or_rna_dna)) {
-                model.chains.push(Chain { id: auth_asym.clone(), residue_groups: Vec::new() });
-                model.chains.len() - 1
-            } else { cur_chain }
-        });
-        let res = get(r, c_seq).into_owned();
-        let mut ins = c_ins.map(|c| get(r, c).into_owned()).unwrap_or_else(|| " ".into());
-        if matches!(ins.as_str(), "?" | ".") {
-            ins = " ".into();
-        }
-        let chain = &mut model.chains[ci];
-        let ri = if let Some(&index) = residue_index.get(&(mi, ci, res.clone(), ins.clone())) { index } else {
-            let resseq = match res.trim().parse::<i64>() {
-                Ok(v) => hy36_encode(4, v).unwrap_or_else(|| res.clone()),
-                Err(_) => {
-                    if res.len() != 4 {
-                        return Err(format!("bad residue number '{}' in _atom_site row {}", res, r + 1));
+        let label_changed = prev.map(|p| &*p[1]) != Some(&**label_asym);
+        let auth_changed = prev.map(|p| &*p[2]) != Some(&**auth_asym);
+        let prev_comp = prev.map(|p| &*p[6]);
+        let ci = if !(new_model || label_changed || auth_changed) { cur_chain } else {
+            let (model, chain_groups) = (&mut models[mi], &mut res_groups[mi]);
+            *chain_index.entry((mi, auth_asym.to_string(), label_asym.to_string())).or_insert_with(|| {
+                if auth_changed || new_model || (label_changed && r > 0 && prev_comp.map_or(false, is_aa_or_rna_dna)) {
+                    model.chains.push(Chain { id: auth_asym.to_string(), residue_groups: Vec::new() });
+                    chain_groups.push(Vec::new());
+                    model.chains.len() - 1
+                } else { cur_chain }
+            })
+        };
+        let ins = match (c_ins, &**ins_cell) {
+            (None, _) | (Some(_), "?" | ".") => " ",
+            (Some(_), s) => s,
+        };
+        let ri = match &cur_res {
+            Some((m, c, rs, is, ri)) if *m == mi && *c == ci && *rs == **res && *is == *ins => *ri,
+            _ => {
+                let key = (mi, ci, ShortStr::from(&**res), ShortStr::from(ins));
+                let ri = if let Some(&index) = residue_index.get(&key) { index } else {
+                    let resseq = match res.trim().parse::<i64>() {
+                        Ok(v) => hy36_encode(4, v).unwrap_or_else(|| res.to_string()),
+                        Err(_) => {
+                            if res.len() != 4 {
+                                failure = Some((r, format!("bad residue number '{}' in _atom_site row {}", res, r + 1)));
+                                break;
+                            }
+                            res.to_string()
+                        }
+                    };
+                    let chain = &mut models[mi].chains[ci];
+                    let mut link = true;
+                    if let Some(cb) = c_break {
+                        if !chain.residue_groups.is_empty() && get(r, cb) == "1" {
+                            link = false;
+                        }
                     }
-                    res.clone()
-                }
-            };
-            let mut link = true;
-            if let Some(cb) = c_break {
-                if !chain.residue_groups.is_empty() && get(r, cb) == "1" {
-                    link = false;
-                }
+                    chain.residue_groups.push(ResidueGroup {
+                        resseq,
+                        icode: ins.to_string(),
+                        link_to_previous: link,
+                        atom_groups: Vec::new(),
+                    });
+                    res_groups[mi][ci].push(Vec::new());
+                    let index = chain.residue_groups.len() - 1;
+                    residue_index.insert(key.clone(), index);
+                    index
+                };
+                cur_res = Some((key.0, key.1, key.2, key.3, ri));
+                ri
             }
-            chain.residue_groups.push(ResidueGroup {
-                resseq,
-                icode: ins.clone(),
-                link_to_previous: link,
-                atom_groups: Vec::new(),
-            });
-            let index = chain.residue_groups.len() - 1;
-            residue_index.insert((mi, ci, res.clone(), ins.clone()), index);
-            index
         };
-        let rg = &mut chain.residue_groups[ri];
-        let mut alt = get(r, c_alt).into_owned();
-        if alt == "." || alt == "?" {
-            alt.clear();
-        }
-        let comp = get(r, c_comp).into_owned();
-        let resname = format!("{:>3}", comp);
-        let gi = match rg.atom_groups.iter().position(|group| group.altloc == alt && group.resname == resname) {
-            Some(i) => i,
+        let alt = if matches!(&**alt_cell, "." | "?") { "" } else { &**alt_cell };
+        // `format!("{:>3}", comp)`, which pads by characters
+        resname.clear();
+        resname.extend(std::iter::repeat_n(' ', 3usize.saturating_sub(comp.chars().count())));
+        resname.push_str(comp);
+        let order = &mut res_groups[mi][ci][ri];
+        let g = match order.iter().find(|&&g| groups[g as usize].0 == alt && groups[g as usize].1 == resname) {
+            Some(&g) => g,
             None => {
-                let ag = AtomGroup { altloc: alt.clone(), resname, atoms: Vec::new() };
+                let g = groups.len() as u32;
+                groups.push((alt.to_string(), resname.clone(), 0));
                 if alt.is_empty() {
-                    rg.atom_groups.insert(0, ag);
-                    0
+                    order.insert(0, g);
                 } else {
-                    rg.atom_groups.push(ag);
-                    rg.atom_groups.len() - 1
+                    order.push(g);
                 }
+                g
             }
         };
+        groups[g as usize].2 += 1;
+        group_of_row.push(g);
+        last = Some(items);
+        last_group = g;
+        cur_chain = ci;
+    }
+    // each group's first atom in structure order, which sets `i_seq`
+    let mut first_atom = vec![0usize; groups.len()];
+    let mut next = 0;
+    for &g in res_groups.iter().flatten().flatten().flatten() {
+        first_atom[g as usize] = next;
+        next += groups[g as usize].2;
+    }
+    let mut atoms: Vec<Vec<Atom>> = groups.iter().map(|g| Vec::with_capacity(g.2)).collect();
+    if let Some(SourceNumbers(items)) = numbers.as_deref_mut() {
+        items.iter_mut().for_each(|values| values.reserve(nrows));
+    }
+    // Atom::new formats the element symbol, which depends on nothing else;
+    // keep one per spelling, with one-byte spellings also found by their byte
+    let mut elements: Vec<(String, ShortStr)> = Vec::new();
+    let mut element_of_byte: Vec<Option<ShortStr>> = vec![None; 128];
+    let (blank_segid, blank_charge) = (ShortStr::from("    "), ShortStr::from("  "));
+    // the last segid and charge cells, with the fields they give
+    let mut last_segid: Option<(Cow<'_, str>, ShortStr)> = None;
+    let mut last_charge: Option<(Cow<'_, str>, ShortStr)> = None;
+    let rows = failure.as_ref().map_or(nrows, |f| f.0);
+    for (r, &g) in group_of_row.iter().enumerate().take(rows) {
         let type_symbol = get(r, c_type);
-        let mut atom =
-            Atom::new(&format_pdb_atom_name(&get(r, c_name), &type_symbol), &type_symbol, v3(num(r, c_x)?, num(r, c_y)?, num(r, c_z)?));
-        atom.occ = num(r, c_occ)?;
-        atom.b = num(r, c_b)?;
-        atom.src = r as u32;
+        let byte = match type_symbol.as_bytes() {
+            &[c] => element_of_byte.get_mut(c as usize),
+            _ => None,
+        };
+        let element = match byte {
+            Some(Some(e)) => e.clone(),
+            byte => {
+                let e = match elements.iter().find(|(t, _)| same_text(t, &type_symbol)) {
+                    Some((_, e)) => e.clone(),
+                    None => {
+                        let e = Atom::new("", &type_symbol, v3(0.0, 0.0, 0.0)).element;
+                        elements.push((type_symbol.to_string(), e.clone()));
+                        e
+                    }
+                };
+                if let Some(slot) = byte {
+                    *slot = Some(e.clone());
+                }
+                e
+            }
+        };
+        let name = format_pdb_atom_name(&get(r, c_name), &type_symbol);
+        let xyz = v3(num(r, c_x)?, num(r, c_y)?, num(r, c_z)?);
+        let occ = num(r, c_occ)?;
+        let b = num(r, c_b)?;
+        if let Some(SourceNumbers(items)) = numbers.as_deref_mut() {
+            for (values, v) in items.iter_mut().zip([xyz.x, xyz.y, xyz.z, occ, b]) {
+                // rows are read in order, so row r goes to index r
+                values.resize(r, f64::NAN);
+                values.push(v);
+            }
+        }
+        let (mut serial, mut uij) = (ShortStr::new(), None);
         if let Some(ci) = c_id {
             let id = get(r, ci);
-            atom.serial = id.trim().parse::<i64>().ok().and_then(|v| hy36_encode(5, v)).unwrap_or_else(|| id.to_string());
-            if let Some(u) = aniso.get(&*id) {
-                atom.uij = Some(*u);
+            serial = serial_number(&id);
+            if !aniso.is_empty() {
+                uij = aniso.get(&*id).copied();
             }
         }
-        atom.segid = match c_segid {
+        let segid = match c_segid {
             Some(cs) => {
                 let s = get(r, cs);
-                let s = if cif::is_null(&s) { "" } else { &*s };
-                format!("{:<4}", &s[..s.len().min(4)])
-            }
-            None => "    ".into(),
-        };
-        atom.hetero = c_group.map_or(false, |c| get(r, c) == "HETATM");
-        if let Some(cc) = c_charge {
-            let ch = get(r, cc);
-            if !matches!(&*ch, "?" | ".") {
-                let sign = if ch.ends_with('-') || ch.starts_with('-') { "-" } else { "+" };
-                if let Ok(v) = ch.trim_matches(|c| c == ' ' || c == '-' || c == '+').parse::<i32>() {
-                    atom.charge = if v == 0 { "  ".into() } else { format!("{}{}", v, sign) };
+                match &last_segid {
+                    Some((t, seg)) if same_text(t, &s) => seg.clone(),
+                    _ => {
+                        let seg = segid_field(&s);
+                        last_segid = Some((s, seg.clone()));
+                        seg
+                    }
                 }
             }
+            None => blank_segid.clone(),
+        };
+        let hetero = c_group.map_or(false, |c| get(r, c) == "HETATM");
+        let charge = match c_charge {
+            Some(cc) => {
+                let ch = get(r, cc);
+                match &last_charge {
+                    Some((t, c)) if same_text(t, &ch) => c.clone(),
+                    _ => {
+                        let c = charge_field(&ch);
+                        last_charge = Some((ch, c.clone()));
+                        c
+                    }
+                }
+            }
+            None => blank_charge.clone(),
+        };
+        let group = &mut atoms[g as usize];
+        let i_seq = first_atom[g as usize] + group.len();
+        group.push(Atom { name, element, charge, serial, xyz, occ, b, segid, hetero, uij, i_seq, src: r as u32 });
+    }
+    if let Some((_, message)) = failure {
+        return Err(message);
+    }
+    for (model, model_groups) in models.iter_mut().zip(&res_groups) {
+        for (chain, chain_groups) in model.chains.iter_mut().zip(model_groups) {
+            for (rg, order) in chain.residue_groups.iter_mut().zip(chain_groups) {
+                rg.atom_groups = order.iter().map(|&g| {
+                    let (altloc, resname, _) = std::mem::take(&mut groups[g as usize]);
+                    AtomGroup { altloc, resname, atoms: std::mem::take(&mut atoms[g as usize]) }
+                }).collect();
+            }
         }
-        rg.atom_groups[gi].atoms.push(atom);
-        cur_model = Some(model_id);
-        cur_label_asym = Some(label_asym);
-        cur_auth_asym = Some(auth_asym);
-        cur_chain = ci;
-        prev_comp = Some(comp);
     }
     if models.len() == 1 {
         models[0].id = String::new();
@@ -252,9 +397,68 @@ pub fn structure_from_cif<S: CifSource + ?Sized>(block: &S) -> Result<Structure,
         crystal = Some(CrystalSymmetry { cell: [a, b, c, al, be, ga], space_group: sg });
     }
     let had = crystal.is_some();
-    let mut st = Structure { models, crystal, had_cell_record: had, links: covalent_links(block), pdb_records: PdbRecords::default() };
-    st.reset_i_seq();
+    let st = Structure { models, crystal, had_cell_record: had, links: covalent_links(block), pdb_records: PdbRecords::default() };
     Ok(st)
+}
+
+/// `a == b` by a loop over the bytes: the values compared are a few bytes
+/// long, and a call to `memcmp` takes longer than the loop.
+#[inline]
+fn same_text(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut k = 0;
+    while k < a.len() {
+        if a[k] != b[k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// The serial number field of `_atom_site.id`: `hy36_encode(5, id)`, or the
+/// text itself when it is not a number.
+fn serial_number(id: &str) -> ShortStr {
+    let b = id.as_bytes();
+    // a plain decimal of at most five digits is the number right-justified
+    if (1..=5).contains(&b.len()) && b.iter().all(u8::is_ascii_digit) && (b.len() == 1 || b[0] != b'0') {
+        let mut field = [b' '; 5];
+        field[5 - b.len()..].copy_from_slice(b);
+        return ShortStr::from_ascii_field(field);
+    }
+    id.trim().parse::<i64>().ok().and_then(|v| hy36_short(5, v)).unwrap_or_else(|| id.into())
+}
+
+/// The four-column segment field of `_atom_site.auth_segid`.
+fn segid_field(s: &str) -> ShortStr {
+    let s = if cif::is_null(s) { "" } else { s };
+    // `format!("{:<4}", ..)`, which pads by characters
+    let s = &s[..s.len().min(4)];
+    let mut seg = ShortStr::from(s);
+    for _ in s.chars().count()..4 {
+        seg.push(' ');
+    }
+    seg
+}
+
+/// The two-column charge field of `_atom_site.pdbx_formal_charge`.
+fn charge_field(ch: &str) -> ShortStr {
+    if !matches!(ch, "?" | ".") {
+        let sign = if ch.ends_with('-') || ch.starts_with('-') { "-" } else { "+" };
+        if let Ok(v) = ch.trim_matches(|c| c == ' ' || c == '-' || c == '+').parse::<i32>() {
+            return if v == 0 {
+                "  ".into()
+            } else {
+                let mut c = ShortStr::from(v.to_string());
+                c.push_str(sign);
+                c
+            };
+        }
+    }
+    "  ".into()
 }
 
 fn covalent_links<S: CifSource + ?Sized>(source: &S) -> Vec<LinkRecord> {
@@ -674,11 +878,13 @@ enum AtomItem {
 }
 
 /// A value to send: from the source table, or made here.
+#[derive(Clone, Copy)]
 enum Val {
     Source(usize, usize),
     /// A byte range of the row's scratch text.
     Made(usize, usize),
-    Missing(CifCell<'static>),
+    Unknown,
+    NotApplicable,
 }
 
 /// Append `text` to the row's scratch text and name its range.
@@ -691,8 +897,62 @@ fn made(scratch: &mut String, text: &str) -> Val {
 /// `format!("{:.prec$}", v)` into the row's scratch text.
 fn made_fixed(scratch: &mut String, v: f64, prec: u32) -> Val {
     let s = scratch.len();
-    crate::fastfmt::push_fixed(scratch, v, prec, 0);
+    push_fixed_short(scratch, v, prec);
     Val::Made(s, scratch.len())
+}
+
+/// `format!("{:.prec$}", x)`, as [`crate::fastfmt::push_fixed`] writes it,
+/// in 64-bit arithmetic when `prec` is at most 3 and `|x|` is below 2^52.
+fn push_fixed_short(out: &mut String, x: f64, prec: u32) {
+    const SCALE: [u64; 4] = [1, 10, 100, 1000];
+    let bits = x.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as u32;
+    // below exponent 1075 the binary exponent e is negative, so m * 10^prec
+    // (under 2^63) needs no left shift; this also excludes NaN and infinity
+    let Some(&scale) = SCALE.get(prec as usize).filter(|_| exp < 1075) else {
+        crate::fastfmt::push_fixed(out, x, prec, 0);
+        return;
+    };
+    let frac = bits & ((1u64 << 52) - 1);
+    let (m, sh) = if exp == 0 { (frac, 1074) } else { (frac | (1u64 << 52), 1075 - exp) };
+    let p = m * scale;
+    // n = round_half_even(p / 2^sh); for sh >= 64, p / 2^sh is below 1/2
+    let n = if sh >= 64 {
+        0
+    } else {
+        let q = p >> sh;
+        let r = p & ((1u64 << sh) - 1);
+        let half = 1u64 << (sh - 1);
+        if r > half || (r == half && q & 1 == 1) { q + 1 } else { q }
+    };
+    let (mut int, mut fr) = (n / scale, n % scale);
+    let mut buf = [0u8; 32];
+    let mut k = buf.len();
+    for _ in 0..prec {
+        k -= 1;
+        buf[k] = b'0' + (fr % 10) as u8;
+        fr /= 10;
+    }
+    if prec > 0 {
+        k -= 1;
+        buf[k] = b'.';
+    }
+    loop {
+        k -= 1;
+        buf[k] = b'0' + (int % 10) as u8;
+        int /= 10;
+        if int == 0 {
+            break;
+        }
+    }
+    if bits >> 63 == 1 {
+        k -= 1;
+        buf[k] = b'-';
+    }
+    // the bytes are ASCII, so the check passes
+    if let Ok(text) = std::str::from_utf8(&buf[k..]) {
+        out.push_str(text);
+    }
 }
 
 fn made_int(scratch: &mut String, v: usize) -> Val {
@@ -716,9 +976,10 @@ fn send_row<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, vals: &[Val], scra
     let cells: smallvec::SmallVec<[(Option<CifCell<'static>>, std::borrow::Cow<'_, str>); 32]> = vals
         .iter()
         .map(|v| match v {
-            Val::Source(r, c) => (t.missing(*r, *c), t.cell(*r, *c)),
+            Val::Source(r, c) => t.cell_with_missing(*r, *c),
             Val::Made(a, b) => (None, std::borrow::Cow::Borrowed(&scratch[*a..*b])),
-            Val::Missing(m) => (Some(*m), std::borrow::Cow::Borrowed("")),
+            Val::Unknown => (Some(CifCell::Unknown), std::borrow::Cow::Borrowed("")),
+            Val::NotApplicable => (Some(CifCell::NotApplicable), std::borrow::Cow::Borrowed("")),
         })
         .collect();
     let row: smallvec::SmallVec<[CifCell<'_>; 32]> = cells.iter().map(|(m, s)| m.unwrap_or(CifCell::Text(s))).collect();
@@ -747,6 +1008,134 @@ fn send_table<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, sink: &mut K) {
     }
 }
 
+/// The coordinates, occupancy and B value of each row of a source
+/// `_atom_site` loop as [`structure_and_numbers_from_cif`] read them.
+/// [`write_cif_preserving_with`] compares the output with these numbers
+/// instead of parsing the source text again.
+pub struct SourceNumbers([Vec<f64>; 5]);
+
+/// The items of [`SourceNumbers`], as `structure_from_cif` finds their columns.
+const NUMBER_ITEMS: [&str; 5] = ["Cartn_x", "Cartn_y", "Cartn_z", "occupancy", "B_iso_or_equiv"];
+
+/// `s.trim()`, with a byte loop for ASCII ends.
+fn trim(s: &str) -> &str {
+    // the ASCII characters `char::is_whitespace` accepts
+    let blank = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+    let b = s.as_bytes();
+    let start = b.iter().position(|c| !blank(c)).unwrap_or(b.len());
+    let end = b.iter().rposition(|c| !blank(c)).map_or(start, |i| i + 1);
+    match s.get(start..end) {
+        Some(t) if t.as_bytes().first().is_none_or(u8::is_ascii) && t.as_bytes().last().is_none_or(u8::is_ascii) => t,
+        _ => s.trim(),
+    }
+}
+
+/// Chooses each value of the output `_atom_site` loop.
+struct AtomSiteValues<'s, T: ?Sized> {
+    atoms: &'s T,
+    roles: Vec<AtomItem>,
+    /// Output atoms in hierarchy order.
+    out: Vec<(&'s AtomGroup, &'s Atom)>,
+    /// For each output atom, the input row to take values from (`u32::MAX`
+    /// for none) and whether it is an input atom.
+    rows: Vec<(u32, bool)>,
+    /// x, y, z, occupancy and B of each output atom.
+    numbers: [Vec<f64>; 5],
+    /// The name of each output atom, trimmed.
+    names: Vec<&'s str>,
+    source_numbers: Option<&'s SourceNumbers>,
+    /// The column `structure_from_cif` read for each item of `source_numbers`.
+    number_columns: [Option<usize>; 5],
+}
+
+impl<T: CifTable + ?Sized> AtomSiteValues<'_, T> {
+    /// Whether `cell`, trimmed, equals the trimmed name `name`.
+    fn same_name(cell: &str, name: &str) -> bool {
+        cell == name || trim(cell) == name
+    }
+
+    /// Whether the number in row `r`, column `c` of the source equals `v`;
+    /// `item` indexes [`NUMBER_ITEMS`].
+    fn unchanged(&self, r: usize, c: usize, item: usize, v: f64) -> bool {
+        let read = self.source_numbers.filter(|_| self.number_columns[item] == Some(c));
+        match read.and_then(|n| n.0[item].get(r)) {
+            Some(&x) if !x.is_nan() => x == v,
+            _ => self.atoms.number(r, c) == Some(v),
+        }
+    }
+
+    /// The value of output atom `k` in column `c`; made text goes to `scratch`.
+    fn value(&self, k: usize, c: usize, scratch: &mut String) -> Val {
+        self.value_as(self.roles[c], k, c, scratch)
+    }
+
+    /// The values of column `c` in output order; made text goes to `scratch`.
+    fn column(&self, c: usize, scratch: &mut String, column: &mut Vec<ColumnValue>) {
+        let n = self.rows.len();
+        // one loop for each role, in which `value_as` reduces to that role's case
+        macro_rules! fill {
+            ($role:expr) => {
+                column.extend((0..n).map(|k| match self.value_as($role, k, c, scratch) {
+                    Val::Source(r, _) => ColumnValue::Source(r),
+                    Val::Made(a, b) => ColumnValue::Made(a, b),
+                    Val::Unknown => ColumnValue::Unknown,
+                    Val::NotApplicable => ColumnValue::NotApplicable,
+                }))
+            };
+        }
+        match self.roles[c] {
+            AtomItem::Id => fill!(AtomItem::Id),
+            AtomItem::TypeSymbol => fill!(AtomItem::TypeSymbol),
+            AtomItem::Name => fill!(AtomItem::Name),
+            AtomItem::AltId => fill!(AtomItem::AltId),
+            AtomItem::Coord(i) => fill!(AtomItem::Coord(i)),
+            AtomItem::Occupancy => fill!(AtomItem::Occupancy),
+            AtomItem::BIso => fill!(AtomItem::BIso),
+            AtomItem::Charge => fill!(AtomItem::Charge),
+            AtomItem::Residue => fill!(AtomItem::Residue),
+            AtomItem::Other => fill!(AtomItem::Other),
+        }
+    }
+
+    /// [`AtomSiteValues::value`] for a column with role `role`.
+    #[inline(always)]
+    fn value_as(&self, role: AtomItem, k: usize, c: usize, scratch: &mut String) -> Val {
+        let (row, input) = self.rows[k];
+        let row = (row != u32::MAX).then_some(row as usize);
+        match role {
+            AtomItem::Id => made_int(scratch, k + 1),
+            AtomItem::Coord(i) => {
+                let v = self.numbers[i][k];
+                match row {
+                    Some(r) if input && self.unchanged(r, c, i, v) => Val::Source(r, c),
+                    _ => made_fixed(scratch, v, 3),
+                }
+            }
+            AtomItem::Occupancy | AtomItem::BIso => {
+                let item = if role == AtomItem::Occupancy { 3 } else { 4 };
+                let v = self.numbers[item][k];
+                match row {
+                    Some(r) if input && self.unchanged(r, c, item, v) => Val::Source(r, c),
+                    _ => made_fixed(scratch, v, 2),
+                }
+            }
+            AtomItem::Name => match row {
+                Some(r) if input && Self::same_name(&self.atoms.cell(r, c), self.names[k]) => Val::Source(r, c),
+                _ => made(scratch, self.names[k]),
+            },
+            _ if input => Val::Source(row.unwrap_or(0), c),
+            AtomItem::TypeSymbol => made(scratch, self.out[k].1.elem()),
+            AtomItem::AltId if self.out[k].0.altloc.is_empty() => Val::NotApplicable,
+            AtomItem::AltId => made(scratch, &self.out[k].0.altloc),
+            AtomItem::Residue => match row {
+                Some(r) => Val::Source(r, c),
+                None => Val::Unknown,
+            },
+            AtomItem::Charge | AtomItem::Other => Val::Unknown,
+        }
+    }
+}
+
 /// Write the model into its source data block: every category of the source in
 /// its order, with `_atom_site` rebuilt and `_atom_site_anisotrop` renumbered.
 ///
@@ -761,6 +1150,19 @@ fn send_table<T: CifTable + ?Sized, K: CifSink + ?Sized>(t: &T, sink: &mut K) {
 pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
     st: &Structure,
     source: &S,
+    code: &str,
+    sink: &mut K,
+) -> Result<(), String> {
+    write_cif_preserving_with(st, source, None, code, sink)
+}
+
+/// [`write_cif_preserving`], with the numbers
+/// [`structure_and_numbers_from_cif`] read from `source`. The output is the
+/// same; the writer only skips parsing the source coordinates again.
+pub fn write_cif_preserving_with<S: CifSource + ?Sized, K: CifSink + ?Sized>(
+    st: &Structure,
+    source: &S,
+    numbers_read: Option<&SourceNumbers>,
     code: &str,
     sink: &mut K,
 ) -> Result<(), String> {
@@ -785,67 +1187,79 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
         })
         .collect();
     let c_id = roles.iter().position(|&r| r == AtomItem::Id);
-    // output atoms in hierarchy order, each with an input row to take values from
-    let mut out: Vec<(&AtomGroup, &Atom, Option<usize>)> = Vec::new();
+    // one pass over the atoms collects everything the columns need
+    let atom_count = st.atoms_size();
+    let mut out: Vec<(&AtomGroup, &Atom)> = Vec::with_capacity(atom_count);
+    let mut rows: Vec<(u32, bool)> = Vec::with_capacity(atom_count);
+    let mut numbers: [Vec<f64>; 5] = std::array::from_fn(|_| Vec::with_capacity(atom_count));
+    let mut names: Vec<&str> = Vec::with_capacity(atom_count);
+    // the element spellings, in order of first use, with their keys
+    let mut elements: Vec<&str> = Vec::new();
+    let mut element_keys: Vec<u64> = Vec::new();
+    // the length and bytes of a spelling of up to 7 bytes, else 0
+    let key = |s: &str| match s.len() {
+        n @ 1..=7 => s.bytes().enumerate().fold(n as u64, |k, (i, b)| k | u64::from(b) << (8 * (i + 1))),
+        _ => 0,
+    };
     for m in &st.models {
         for c in &m.chains {
             for rg in &c.residue_groups {
-                let rg_row = rg.atom_groups.iter().flat_map(|g| &g.atoms).find(|a| a.src != Atom::NEW).map(|a| a.src as usize);
+                let rg_row = rg.atom_groups.iter().flat_map(|g| &g.atoms).find(|a| a.src != Atom::NEW).map(|a| a.src);
                 for ag in &rg.atom_groups {
-                    let ag_row = ag.atoms.iter().find(|a| a.src != Atom::NEW).map(|a| a.src as usize).or(rg_row);
+                    let ag_row = ag.atoms.iter().find(|a| a.src != Atom::NEW).map(|a| a.src).or(rg_row);
                     for a in &ag.atoms {
-                        out.push((ag, a, if a.src != Atom::NEW { Some(a.src as usize) } else { ag_row }));
+                        out.push((ag, a));
+                        let input = a.src != Atom::NEW;
+                        rows.push((if input { a.src } else { ag_row.unwrap_or(Atom::NEW) }, input));
+                        for (values, v) in numbers.iter_mut().zip([a.xyz.x, a.xyz.y, a.xyz.z, a.occ, a.b]) {
+                            values.push(v);
+                        }
+                        names.push(trim(&a.name));
+                        let k = key(&a.element);
+                        let seen = if k == 0 { elements.contains(&a.element.as_str()) } else { element_keys.contains(&k) };
+                        if !seen {
+                            elements.push(a.element.as_str());
+                            element_keys.push(k);
+                        }
                     }
                 }
             }
         }
     }
+    let values = AtomSiteValues {
+        atoms: &atoms,
+        roles,
+        names,
+        out,
+        rows,
+        numbers,
+        source_numbers: numbers_read,
+        number_columns: NUMBER_ITEMS.map(|item| atoms.column(item)),
+    };
+    let out = &values.out;
     sink.begin_block(code);
     for cat in source.categories() {
         match cat.to_ascii_lowercase().as_str() {
             "atom_site" => {
                 let refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
-                sink.begin_loop(&refs, out.len());
                 let mut scratch = String::new();
-                let mut vals: Vec<Val> = Vec::with_capacity(roles.len());
-                for (k, &(ag, a, row)) in out.iter().enumerate() {
-                    let input = a.src != Atom::NEW;
-                    scratch.clear();
-                    vals.clear();
-                    for (c, &role) in roles.iter().enumerate() {
-                        let v = match role {
-                            AtomItem::Id => made_int(&mut scratch, k + 1),
-                            AtomItem::Coord(i) => {
-                                let v = [a.xyz.x, a.xyz.y, a.xyz.z][i];
-                                match row {
-                                    Some(r) if input && atoms.number(r, c) == Some(v) => Val::Source(r, c),
-                                    _ => made_fixed(&mut scratch, v, 3),
-                                }
-                            }
-                            AtomItem::Occupancy | AtomItem::BIso => {
-                                let v = if role == AtomItem::Occupancy { a.occ } else { a.b };
-                                match row {
-                                    Some(r) if input && atoms.number(r, c) == Some(v) => Val::Source(r, c),
-                                    _ => made_fixed(&mut scratch, v, 2),
-                                }
-                            }
-                            AtomItem::Name => match row {
-                                Some(r) if input && atoms.cell(r, c).trim() == a.name.trim() => Val::Source(r, c),
-                                _ => made(&mut scratch, a.name.trim()),
-                            },
-                            _ if input => Val::Source(row.unwrap_or(0), c),
-                            AtomItem::TypeSymbol => made(&mut scratch, a.elem()),
-                            AtomItem::AltId if ag.altloc.is_empty() => Val::Missing(CifCell::NotApplicable),
-                            AtomItem::AltId => made(&mut scratch, &ag.altloc),
-                            AtomItem::Residue => match row {
-                                Some(r) => Val::Source(r, c),
-                                None => Val::Missing(CifCell::Unknown),
-                            },
-                            AtomItem::Charge | AtomItem::Other => Val::Missing(CifCell::Unknown),
-                        };
-                        vals.push(v);
+                if sink.begin_source_loop("atom_site", &refs, out.len()) {
+                    let mut column: Vec<ColumnValue> = Vec::with_capacity(out.len());
+                    for c in 0..refs.len() {
+                        scratch.clear();
+                        column.clear();
+                        values.column(c, &mut scratch, &mut column);
+                        sink.source_column(c, &column, &scratch);
                     }
-                    send_row(&atoms, &vals, &scratch, sink);
+                } else {
+                    sink.begin_loop(&refs, out.len());
+                    let mut vals: Vec<Val> = Vec::with_capacity(refs.len());
+                    for k in 0..out.len() {
+                        scratch.clear();
+                        vals.clear();
+                        vals.extend((0..refs.len()).map(|c| values.value(k, c, &mut scratch)));
+                        send_row(&atoms, &vals, &scratch, sink);
+                    }
                 }
                 sink.end_loop();
             }
@@ -857,8 +1271,8 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
                 let rows: Vec<(usize, usize)> = out
                     .iter()
                     .enumerate()
-                    .filter(|(_, (_, a, _))| a.src != Atom::NEW)
-                    .filter_map(|(k, (_, a, _))| by_id.get(&*atoms.cell(a.src as usize, c_id)).map(|&r| (k, r)))
+                    .filter(|(_, (_, a))| a.src != Atom::NEW)
+                    .filter_map(|(k, (_, a))| by_id.get(&*atoms.cell(a.src as usize, c_id)).map(|&r| (k, r)))
                     .collect();
                 if rows.is_empty() {
                     continue;
@@ -882,8 +1296,9 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
                     None => Vec::new(),
                 };
                 let mut missing: Vec<String> = Vec::new();
-                for (_, a, _) in &out {
-                    let e = a.elem().to_ascii_uppercase();
+                for element in &elements {
+                    // `Atom::elem`
+                    let e = element.trim().to_ascii_uppercase();
                     if !present.contains(&e) && !missing.contains(&e) {
                         missing.push(e);
                     }
@@ -905,7 +1320,7 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
                 for e in missing {
                     scratch.clear();
                     let vals: Vec<Val> = (0..t_tags.len())
-                        .map(|c| if c == c_sym { made(&mut scratch, &e) } else { Val::Missing(CifCell::Unknown) })
+                        .map(|c| if c == c_sym { made(&mut scratch, &e) } else { Val::Unknown })
                         .collect();
                     send_row(&t, &vals, &scratch, sink);
                 }
@@ -922,4 +1337,50 @@ pub fn write_cif_preserving<S: CifSource + ?Sized, K: CifSink + ?Sized>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fixed_tests {
+    use super::{push_fixed_short, trim};
+
+    #[test]
+    fn trim_matches_str_trim() {
+        let chars = [' ', '\t', '\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{a0}', '\u{2003}', 'C', 'a', '1', '\u{e9}', '\''];
+        let mut s: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..100_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let text: String = (0..(s % 7)).map(|i| chars[((s >> (8 + 4 * i)) % chars.len() as u64) as usize]).collect();
+            assert_eq!(trim(&text), text.trim(), "{:?}", text);
+        }
+    }
+
+    #[test]
+    fn short_fixed_matches_format() {
+        let mut s: u64 = 0x2545f4914f6cdd1d;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut values = vec![0.0, -0.0, 0.5, -0.5, 1.5, 2.5, 0.0005, 0.0015, -0.0025, 0.125, 4503599627370495.5, 4503599627370496.0, f64::MIN_POSITIVE, 5e-324, 1e300, f64::NAN, f64::INFINITY, -f64::INFINITY];
+        for _ in 0..50_000 {
+            let r = next();
+            values.push(f64::from_bits(r));
+            // coordinates and B values as a file gives them
+            values.push((r % 4_000_000) as f64 / 1000.0 - 2000.0);
+            // halfway cases at each precision
+            values.push((r % 2_000_001) as f64 / 2000.0 - 500.0);
+            values.push(((r >> 8) % 1_000_000) as f64 * 0.37 - 1e5);
+        }
+        for x in values {
+            for prec in 0..5 {
+                let mut a = String::new();
+                push_fixed_short(&mut a, x, prec);
+                assert_eq!(a, format!("{:.p$}", x, p = prec as usize), "x = {:e} ({:#x}), prec {}", x, x.to_bits(), prec);
+            }
+        }
+    }
 }

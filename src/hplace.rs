@@ -1,7 +1,7 @@
 //! Hydrogen placement (port of mmtbx.hydrogens.reduce_hydrogen.place_hydrogens).
 
 use crate::geom::*;
-use crate::interp::{self, EType, FlatAtoms, Interp, InterpParams};
+use crate::interp::{self, Adjacency, EType, FlatAtoms, Interp, InterpParams};
 use crate::model::*;
 use crate::monlib::{Comp, MonLib};
 use crate::names;
@@ -57,6 +57,25 @@ pub struct Placed {
     pub n_h_initial: usize,
     pub n_h_final: usize,
     pub log: String,
+}
+
+/// A value of each atom's group, in flat (`atom_paths`) order.
+fn per_atom_of_group<'s, T: Copy>(st: &'s Structure, f: impl Fn(&'s AtomGroup) -> T) -> Vec<T> {
+    let mut out = Vec::with_capacity(st.atom_count());
+    for ag in st.models.iter().flat_map(|m| &m.chains).flat_map(|c| &c.residue_groups).flat_map(|r| &r.atom_groups) {
+        let v = f(ag);
+        out.extend(std::iter::repeat_n(v, ag.atoms.len()));
+    }
+    out
+}
+
+/// Write `pos` back to the atoms, given in flat (`atom_paths`) order.
+fn write_positions(st: &mut Structure, pos: &[Vec3]) {
+    let atoms = st.models.iter_mut().flat_map(|m| &mut m.chains).flat_map(|c| &mut c.residue_groups)
+        .flat_map(|r| &mut r.atom_groups).flat_map(|g| &mut g.atoms);
+    for (a, &p) in atoms.zip(pos) {
+        a.xyz = p;
+    }
 }
 
 fn label(st: &Structure, p: AtomPath) -> String {
@@ -177,9 +196,20 @@ fn add_missing_h(
     no_h_placed: &mut Vec<String>,
     auto_comps: &mut FxHashMap<String, Arc<Comp>>,
 ) {
+    // The dictionary choice depends only on the residue name and the atom
+    // names, the expected H only on the dictionary and the residue name, and
+    // the missing H on these and the atom names, so each is worked out once
+    // per distinct value. Atom groups with the same residue name, atom names
+    // and hydrogen flags share a template.
+    let mut templates = NameTemplates::default();
+    let mut chosen: Vec<Option<Option<Arc<Comp>>>> = Vec::new();
+    let mut expected_h: FxHashMap<(usize, String), (Arc<Comp>, Vec<String>)> = FxHashMap::default();
+    // missing H names, their new atoms and the merged order, by (template,
+    // dictionary address)
+    let mut missing_h: FxHashMap<(u32, usize), MissingH> = FxHashMap::default();
     for m in &mut st.models {
         for c in &mut m.chains {
-            for rg in &mut c.residue_groups {
+            for (ri, rg) in c.residue_groups.iter_mut().enumerate() {
                 let n_ag = rg.atom_groups.len();
                 for ag in &mut rg.atom_groups {
                     if n_ag > 2 && ag.altloc.is_empty() {
@@ -189,14 +219,23 @@ fn add_missing_h(
                     if p.exclude_water && cls == ResClass::CommonWater {
                         continue;
                     }
-                    let names: Vec<String> = ag.atoms.iter().map(|a| a.name.clone()).collect();
-                    let actual: FxHashSet<String> = ag.atoms.iter().map(|a| a.name.trim().to_ascii_uppercase()).collect();
+                    let template = templates.of(ag);
                     // `mon_lib_query`: the libraries, else restraints built from the CCD
-                    let key = ag.resname.trim().to_ascii_uppercase();
-                    let heavy_names: Vec<String> = ag.atoms.iter().filter(|a| !a.is_hydrogen()).map(|a| a.name.clone()).collect();
-                    let comp = match auto_comps.get(&key) {
+                    let key = ShortStr::upper(ag.resname.trim());
+                    let comp = match auto_comps.get(key.as_str()) {
                         Some(c) => Some(c.clone()),
-                        None => select_hydrogen_dictionary(ml, &ag.resname, &names, &heavy_names, p.compat),
+                        None => {
+                            if chosen.len() <= template as usize {
+                                chosen.resize(template as usize + 1, None);
+                            }
+                            let atoms = &ag.atoms;
+                            let resname = &ag.resname;
+                            chosen[template as usize].get_or_insert_with(|| {
+                                let names: Vec<String> = atoms.iter().map(|a| a.name.to_string()).collect();
+                                let heavy_names: Vec<String> = atoms.iter().filter(|a| !a.is_hydrogen()).map(|a| a.name.to_string()).collect();
+                                select_hydrogen_dictionary(ml, resname, &names, &heavy_names, p.compat)
+                            }).clone()
+                        }
                     };
                     let comp = match comp {
                         Some(c) => c,
@@ -205,37 +244,27 @@ fn add_missing_h(
                             continue;
                         }
                     };
-                    if comp.from_ccd { auto_comps.entry(key).or_insert_with(|| comp.clone()); }
-                    let mut removed: Vec<String> = Vec::new();
-                    if comp.test_for_peptide() {
-                        removed = terminal_h(&comp);
-                    }
-                    let mut expected: Vec<String> = comp
-                        .atoms
-                        .iter()
-                        .filter(|a| a.type_symbol == "H" && !removed.contains(&a.id))
-                        .map(|a| a.id.clone())
-                        .collect();
-                    let rename_classes: &[ResClass] = if p.compat {
-                        &[ResClass::CommonAminoAcid, ResClass::ModifiedAminoAcid, ResClass::DAminoAcid]
-                    } else {
-                        // Modified amino acids follow CCD names; renaming them
-                        // made the H unexpected and it was silently dropped.
-                        &[ResClass::CommonAminoAcid, ResClass::DAminoAcid]
-                    };
-                    if rename_classes.contains(&cls) {
-                        for alt in ALT_NAMES {
-                            if expected.iter().any(|e| e == alt[0]) && expected.iter().any(|e| e == alt[1]) {
-                                let te = |n: &str| comp.atom(n).and_then(|a| a.type_energy.clone()).unwrap_or_default();
-                                if te(alt[0]) == "HCH2" && te(alt[1]) == "HCH2" {
-                                    expected.push(alt[2].to_string());
-                                    expected.retain(|e| e != alt[0]);
-                                }
-                            }
-                        }
-                    }
-                    let missing: Vec<String> = expected.into_iter().filter(|e| !actual.contains(e)).collect();
-                    if missing.is_empty() {
+                    if comp.from_ccd { auto_comps.entry(key.to_string()).or_insert_with(|| comp.clone()); }
+                    let entry = missing_h.entry((template, Arc::as_ptr(&comp) as usize)).or_insert_with(|| {
+                        let (_, expected) = expected_h
+                            .entry((Arc::as_ptr(&comp) as usize, ag.resname.clone()))
+                            .or_insert_with(|| (comp.clone(), expected_hydrogens(&comp, cls, p.compat)));
+                        // the names present, trimmed and upper-cased
+                        let present = |e: &str| ag.atoms.iter().any(|a| {
+                            let t = a.name.trim();
+                            t.len() == e.len() && t.bytes().zip(e.bytes()).all(|(x, y)| x.to_ascii_uppercase() == y)
+                        });
+                        let missing: Vec<String> = expected.iter().filter(|e| !present(e)).cloned().collect();
+                        let new_atoms = missing.iter().map(|mh| {
+                            let mut a = Atom::new(&pad_name(mh), "H", Vec3::ZERO);
+                            a.element = "H".into();
+                            a.occ = 0.0;
+                            a.b = 0.0;
+                            a
+                        }).collect();
+                        MissingH { names: missing, atoms: new_atoms, merge: None }
+                    });
+                    if entry.names.is_empty() {
                         continue;
                     }
                     let mut mean = Vec3::ZERO;
@@ -247,20 +276,122 @@ fn add_missing_h(
                     let repair_seed = !p.compat && ag.atoms.iter().any(|a| !a.is_hydrogen() && a.xyz.dist(bogus) < 0.001);
                     let hetero = ag.atoms.first().map(|a| a.hetero).unwrap_or(false);
                     let segid = ag.atoms.first().map(|a| a.segid.clone()).unwrap_or_default();
-                    for mh in missing {
-                        let seed = if repair_seed { methine_seed(&comp, &ag.atoms, &mh, bogus) } else { bogus };
-                        let mut a = Atom::new(&pad_name(&mh), "H", seed);
-                        a.element = "H".into();
+                    let new_atom = |proto: &Atom, seed: Vec3| {
+                        let mut a = proto.clone();
+                        a.xyz = seed;
                         a.hetero = hetero;
                         a.segid = segid.clone();
-                        a.occ = 0.0;
-                        a.b = 0.0;
-                        ag.atoms.push(a);
+                        a
+                    };
+                    // `place_n_terminal_propeller` may change the first residue
+                    // of a chain before the sort, so it keeps the old path.
+                    if let (false, true, Some(Some(order))) = (repair_seed, ri > 0, &entry.merge) {
+                        // the atoms in the order that `sort_atoms_in_place`
+                        // gives the old atoms followed by the new ones
+                        let n_old = ag.atoms.len();
+                        let mut old = std::mem::take(&mut ag.atoms).into_iter();
+                        let mut atoms = Vec::with_capacity(n_old + entry.atoms.len());
+                        for &k in order {
+                            if (k as usize) < n_old {
+                                atoms.extend(old.next());
+                            } else {
+                                atoms.push(new_atom(&entry.atoms[k as usize - n_old], bogus));
+                            }
+                        }
+                        ag.atoms = atoms;
+                        continue;
+                    }
+                    ag.atoms.reserve_exact(entry.names.len());
+                    for (mh, proto) in entry.names.iter().zip(entry.atoms.iter()) {
+                        let seed = if repair_seed { methine_seed(&comp, &ag.atoms, mh, bogus) } else { bogus };
+                        ag.atoms.push(new_atom(proto, seed));
+                    }
+                    if entry.merge.is_none() {
+                        // Keep the sort order when it moves no old atom past
+                        // another; the order depends only on the names.
+                        let n_old = ag.atoms.len() - entry.names.len();
+                        let order = sort_order(ag).filter(|order| {
+                            let old = order.iter().filter(|&&k| (k as usize) < n_old);
+                            old.clone().zip(old.skip(1)).all(|(a, b)| a < b)
+                        });
+                        entry.merge = Some(order);
                     }
                 }
             }
         }
     }
+}
+
+/// The H that `add_missing_h` adds to atom groups of one template.
+struct MissingH {
+    names: Vec<String>,
+    /// New atoms, still without position, flags or segment id.
+    atoms: Vec<Atom>,
+    /// Once known: the sort order of the old atoms followed by the new ones,
+    /// if it keeps the old atoms in their order (`None` inside if not).
+    merge: Option<Option<Vec<u32>>>,
+}
+
+/// Atom groups numbered by residue name, atom names and hydrogen flags.
+#[derive(Default)]
+struct NameTemplates {
+    /// Template numbers by a hash of the residue name, names and flags.
+    buckets: FxHashMap<u64, Vec<u32>>,
+    entries: Vec<(String, Vec<(ShortStr, bool)>)>,
+}
+
+impl NameTemplates {
+    fn of(&mut self, ag: &AtomGroup) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        ag.resname.hash(&mut h);
+        for a in &ag.atoms {
+            a.name.hash(&mut h);
+            a.is_hydrogen().hash(&mut h);
+        }
+        let key = h.finish();
+        let same = |e: &(String, Vec<(ShortStr, bool)>)| e.0 == ag.resname && e.1.len() == ag.atoms.len()
+            && e.1.iter().zip(&ag.atoms).all(|((n, hy), a)| *n == a.name && *hy == a.is_hydrogen());
+        if let Some(k) = self.buckets.get(&key).and_then(|b| b.iter().copied().find(|&k| same(&self.entries[k as usize]))) {
+            return k;
+        }
+        self.entries.push((ag.resname.clone(), ag.atoms.iter().map(|a| (a.name.clone(), a.is_hydrogen())).collect()));
+        let k = (self.entries.len() - 1) as u32;
+        self.buckets.entry(key).or_default().push(k);
+        k
+    }
+}
+
+/// The dictionary H that `add_missing_h` adds when absent: free-form-only
+/// terminal H of peptides left out, and for amino acids the HCH2 pairs named
+/// as their residue class expects.
+fn expected_hydrogens(comp: &Comp, cls: ResClass, compat: bool) -> Vec<String> {
+    let removed = if comp.test_for_peptide() { terminal_h(comp) } else { Vec::new() };
+    let mut expected: Vec<String> = comp
+        .atoms
+        .iter()
+        .filter(|a| a.type_symbol == "H" && !removed.contains(&a.id))
+        .map(|a| a.id.clone())
+        .collect();
+    let rename_classes: &[ResClass] = if compat {
+        &[ResClass::CommonAminoAcid, ResClass::ModifiedAminoAcid, ResClass::DAminoAcid]
+    } else {
+        // Modified amino acids follow CCD names; renaming them
+        // made the H unexpected and it was silently dropped.
+        &[ResClass::CommonAminoAcid, ResClass::DAminoAcid]
+    };
+    if rename_classes.contains(&cls) {
+        for alt in ALT_NAMES {
+            if expected.iter().any(|e| e == alt[0]) && expected.iter().any(|e| e == alt[1]) {
+                let te = |n: &str| comp.atom(n).and_then(|a| a.type_energy.clone()).unwrap_or_default();
+                if te(alt[0]) == "HCH2" && te(alt[1]) == "HCH2" {
+                    expected.push(alt[2].to_string());
+                    expected.retain(|e| e != alt[0]);
+                }
+            }
+        }
+    }
+    expected
 }
 
 /// CCD heavy-atom bond partners of an atom (`bonds_in_restraints`).
@@ -667,10 +798,10 @@ fn ccd_for_unmatched_names(ml: &MonLib, lib: &Comp, cls: ResClass, resname: &str
 pub fn expected_heavy_table(
     ml: &MonLib,
     auto_comps: &FxHashMap<String, Arc<Comp>>,
-    resnames: &[String],
+    resnames: &[&str],
 ) -> FxHashMap<String, Option<FxHashMap<String, usize>>> {
     let mut heavy_cache: FxHashMap<String, Option<FxHashMap<String, usize>>> = FxHashMap::default();
-    for r in resnames.iter() {
+    for &r in resnames {
         if heavy_cache.contains_key(r) {
             continue;
         }
@@ -688,7 +819,7 @@ pub fn expected_heavy_table(
             }
             counts
         });
-        heavy_cache.insert(r.clone(), v);
+        heavy_cache.insert(r.to_string(), v);
     }
     heavy_cache
 }
@@ -730,8 +861,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     add_missing_h(st, ml, p, &mut no_h_placed, &mut auto_comps);
     place_n_terminal_propeller(st, ml, p, &mut auto_comps);
     st.sort_atoms_in_place();
-    st.reset_serial();
-    st.reset_i_seq();
+    st.reset_serial_and_i_seq();
     flip_symmetric_amino_acids(st, !p.compat);
     if p.compat {
         if let Some(uc) = &p.cell {
@@ -746,18 +876,31 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let mut it = interp::interpret(st, &flat, ml, &ip);
     log += &it.log;
     let mut w = Work { flat, removed: vec![false; n] };
+    // bonds stay fixed from here on
+    let nbrs = Adjacency::new(n, &it.bonds);
 
-    add_link_h_restraints(&mut it, ml, &w.flat, p.compat);
+    add_link_h_restraints(&mut it, ml, &w.flat, &nbrs, p.compat);
     let replacements = if !p.compat { linked::add_replacement_angles(&mut it, st, &w.flat,
         &|comp, bond, actual_component| interp::source_bond_order(ml, comp, bond, actual_component)) } else { Vec::new() };
 
     // ---------------- riding
-    let occ: Vec<f64> = w.flat.path.iter().map(|&pp| st.atom(pp).occ).collect();
+    // `w.flat` holds the atoms in structure order
+    let mut occ: Vec<f64> = Vec::with_capacity(n);
+    for ag in st.models.iter().flat_map(|m| &m.chains).flat_map(|c| &c.residue_groups).flat_map(|r| &r.atom_groups) {
+        occ.extend(ag.atoms.iter().map(|a| a.occ));
+    }
     let rg_of: Vec<u64> = w.flat.path.iter().map(|pp| ((pp.model as u64) << 40) | ((pp.chain as u64) << 20) | pp.rg as u64).collect();
-    let resnames: Vec<String> = w.flat.path.iter().map(|&pp| st.atom_group(pp).resname.trim().to_string()).collect();
-    let heavy_cache = expected_heavy_table(ml, &auto_comps, &resnames);
+    let resnames: Vec<&str> = per_atom_of_group(st, |ag| ag.resname.trim());
+    // the residue names with runs of one name merged
+    let mut distinct: Vec<&str> = Vec::new();
+    for &r in &resnames {
+        if distinct.last() != Some(&r) {
+            distinct.push(r);
+        }
+    }
+    let heavy_cache = expected_heavy_table(ml, &auto_comps, &distinct);
     let expected_heavy = |a: u32| -> Option<usize> {
-        let m = heavy_cache.get(&resnames[a as usize])?.as_ref()?;
+        let m = heavy_cache.get(resnames[a as usize])?.as_ref()?;
         m.get(w.flat.name[a as usize].trim()).copied()
     };
     let mut sites = w.flat.pos.clone();
@@ -785,18 +928,12 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
 
     if !p.compat {
         // A linked oxygen with two heavy neighbors cannot keep its hydroxyl H.
-        exclude_h_on_esterified_o(&mut w, &it);
+        exclude_h_on_esterified_o(&mut w, &nbrs);
     }
 
     // ---------------- remove H that could not be parameterized (waters keep theirs)
-    let bonds_all: Vec<(u32, u32)> = it.bonds.iter().map(|b| (b.i, b.j)).collect();
-    let mut nbrs: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for &(i, j) in &bonds_all {
-        nbrs[i as usize].push(j);
-        nbrs[j as usize].push(i);
-    }
-    let heavy_neighbors = |nbrs: &Vec<Vec<u32>>, flat: &FlatAtoms, i: u32| -> Vec<u32> {
-        let mut v: Vec<u32> = nbrs[i as usize].iter().copied().filter(|&m| !flat.is_h[m as usize]).collect();
+    let heavy_neighbors = |nbrs: &Adjacency, flat: &FlatAtoms, i: u32| -> Vec<u32> {
+        let mut v: Vec<u32> = nbrs.of(i).iter().copied().filter(|&m| !flat.is_h[m as usize]).collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -820,13 +957,13 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         if placed_anchorless.contains(&h) {
             continue;
         }
-        if !p.compat && linked::tertiary_amide_h(&it, st, &w.flat, h) {
+        if !p.compat && linked::tertiary_amide_h(&nbrs, st, &w.flat, h) {
             w.removed[h as usize] = true;
             coefs[h as usize] = None;
             removed_on_links.push((label(st, w.flat.path[h as usize]), "a tertiary amide".into()));
             continue;
         }
-        let isolated = nbrs[h as usize].is_empty();
+        let isolated = nbrs.of(h).is_empty();
         let parents = heavy_neighbors(&nbrs, &w.flat, h);
         let missing_neighbor = parents.len() == 1 && heavy_neighbors(&nbrs, &w.flat, parents[0]).len() < 2;
         unplaced_hydrogens.push(crate::pipeline::uncertainty::UnplacedHydrogen {
@@ -854,23 +991,17 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     }
 
     // ---------------- write positions; reset ADP and occupancy of H
-    for k in 0..n {
-        let pth = w.flat.path[k];
-        st.atom_mut(pth).xyz = w.flat.pos[k];
-    }
+    write_positions(st, &w.flat.pos);
     reset_h_adp_occ(st, &w, &it, p.adp_scale, if p.compat { p.cell.as_ref() } else { None });
 
     // ---------------- prochiral naming, links, esterified O
     let mut name_done: FxHashSet<u32> = FxHashSet::default();
     name_prochiral_h(st, ml, &w, &[2], &mut name_done, &replacements);
     removed_on_links.extend(exclude_h_on_links(st, ml, &mut w, &it, &mut coefs, p.compat));
-    exclude_h_on_esterified_o(&mut w, &it);
+    exclude_h_on_esterified_o(&mut w, &nbrs);
     name_prochiral_h(st, ml, &w, &[3], &mut name_done, &replacements);
     // write back any positions changed by exclude_h_on_links
-    for k in 0..n {
-        let pth = w.flat.path[k];
-        st.atom_mut(pth).xyz = w.flat.pos[k];
-    }
+    write_positions(st, &w.flat.pos);
 
     // ---------------- compact: drop removed atoms and remap everything
     let mut new_index = vec![u32::MAX; n];
@@ -881,19 +1012,11 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
             next += 1;
         }
     }
-    let removed_paths: FxHashSet<AtomPath> = (0..n).filter(|&k| w.removed[k]).map(|k| w.flat.path[k]).collect();
-    // remove by path (mark via a sentinel serial)
+    // the structure still holds the atoms of `w.flat`, in its order
     {
         let mut idx = 0usize;
-        let paths = st.atom_paths();
-        let mut keep = vec![true; paths.len()];
-        for (k, pth) in paths.iter().enumerate() {
-            if removed_paths.contains(pth) {
-                keep[k] = false;
-            }
-        }
         st.retain_atoms(|_| {
-            let r = keep[idx];
+            let r = !w.removed.get(idx).copied().unwrap_or(false);
             idx += 1;
             r
         });
@@ -911,12 +1034,13 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
     let mut etype = Vec::with_capacity(next as usize);
     let mut dict = Vec::with_capacity(next as usize);
     let mut riding_out = Vec::with_capacity(next as usize);
-    for k in 0..n {
+    let kept_info = std::mem::take(&mut it.etype).into_iter().zip(std::mem::take(&mut it.dict));
+    for (k, (e, d)) in kept_info.enumerate() {
         if w.removed[k] {
             continue;
         }
-        etype.push(it.etype[k].clone());
-        dict.push(it.dict[k].clone());
+        etype.push(e);
+        dict.push(d);
         riding_out.push(coefs[k].map(|mut c| {
             let map = |x: i64| if x < 0 { x } else { new_index[x as usize] as i64 };
             c.ih = new_index[c.ih as usize];
@@ -953,7 +1077,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
 
 /// `add_link_h_restraints`: amide H named other than H/D get the TRANS
 /// C-N-H angle (and plane), and their amine CA-N-H angle is replaced.
-fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms, compat: bool) {
+fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms, nbrs: &Adjacency, compat: bool) {
     let Some(link) = ml.link("TRANS") else { return };
     let Some(def) = link.angles.iter().find(|a| a.a[1] == "N" && (a.a[2] == "H" || a.a[2] == "D") && a.value.is_some() && a.esd.unwrap_or(0.0) > 0.0)
     else {
@@ -963,11 +1087,6 @@ fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms, compat:
     let ca_val = link.angles.iter().find(|a| a.a[1] == "N" && a.a[2] == "CA" && a.value.is_some()).map(|a| a.value.unwrap());
     let ca_ideal = ca_val.map(|v| 360.0 - ideal - v);
     let n = flat.pos.len();
-    let mut nbrs: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for b in &it.bonds {
-        nbrs[b.i as usize].push(b.j);
-        nbrs[b.j as usize].push(b.i);
-    }
     let rg_key = |a: u32| {
         let p = flat.path[a as usize];
         (p.model, p.chain, p.rg)
@@ -978,15 +1097,12 @@ fn add_link_h_restraints(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms, compat:
         if !flat.is_h[h as usize] {
             continue;
         }
-        let heavy: Vec<u32> = nbrs[h as usize].iter().copied().filter(|&x| !flat.is_h[x as usize]).collect();
-        if heavy.len() != 1 {
-            continue;
-        }
-        let nn = heavy[0];
+        let mut heavy = nbrs.of(h).iter().copied().filter(|&x| !flat.is_h[x as usize]);
+        let (Some(nn), None) = (heavy.next(), heavy.next()) else { continue };
         if flat.name[nn as usize].trim() != "N" {
             continue;
         }
-        let n_heavy: Vec<u32> = nbrs[nn as usize].iter().copied().filter(|&x| !flat.is_h[x as usize]).collect();
+        let n_heavy: Vec<u32> = nbrs.of(nn).iter().copied().filter(|&x| !flat.is_h[x as usize]).collect();
         if !compat && n_heavy.len() != 2 {
             continue;
         }
@@ -1027,10 +1143,10 @@ fn place_anchorless_h(
     st: &Structure,
     w: &mut Work,
     iseqs: &[u32],
-    nbrs: &[Vec<u32>],
+    nbrs: &Adjacency,
 ) -> Vec<u32> {
     let heavy = |i: u32| -> Vec<u32> {
-        let mut v: Vec<u32> = nbrs[i as usize].iter().copied().filter(|&m| !w.flat.is_h[m as usize]).collect();
+        let mut v: Vec<u32> = nbrs.of(i).iter().copied().filter(|&m| !w.flat.is_h[m as usize]).collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -1200,82 +1316,194 @@ fn reset_h_adp_occ(st: &mut Structure, w: &Work, it: &Interp, scale: f64, cell: 
 
 type ProchiralGroup = (String, Vec<String>, Vec<String>, FxHashMap<String, Vec3>);
 
-fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], done: &mut FxHashSet<u32>, replacements: &[(u32, u32, String)]) {
-    let mut cache: FxHashMap<(String, usize), Vec<ProchiralGroup>> = FxHashMap::default();
-    // flat index by path, to honor removals
-    let mut idx: FxHashMap<AtomPath, u32> = FxHashMap::default();
-    for (k, pth) in w.flat.path.iter().enumerate() {
-        idx.insert(*pth, k as u32);
+/// A prochiral group of `h_references` resolved for one conformer residue's
+/// atom names, with atoms given as positions in its member list.
+struct ProchiralSite {
+    parent: usize,
+    /// The heavy neighbors and hydrogens, which must lie within 2.4 A of the parent.
+    near: Vec<usize>,
+    refs: [usize; 3],
+    swap: [usize; 2],
+    /// Chiral volume of the dictionary sites.
+    v_ideal: f64,
+}
+
+/// The prochiral sites of conformer residues with one residue name and
+/// sequence of atom names, found by a hash of them.
+struct ProchiralTemplate {
+    resname: String,
+    names: Vec<ShortStr>,
+    sites: Vec<ProchiralSite>,
+}
+
+/// Resolve `refs` for the atom names of a conformer residue's members, the
+/// last of a name winning, in the order `name_prochiral_h` reads them.
+fn prochiral_sites(refs: &[(usize, ProchiralGroup)], names: &[&str]) -> Vec<ProchiralSite> {
+    let mut index: FxHashMap<&str, usize> = FxHashMap::default();
+    for (k, n) in names.iter().enumerate() {
+        index.insert(n, k);
+    }
+    let mut out = Vec::new();
+    for &(k, (ref p, ref hv, ref hs, ref sites)) in refs {
+        let at = |n: &String| index.get(n.as_str()).copied();
+        let (Some(parent), Some(near)) = (at(p), hv.iter().chain(hs.iter()).map(at).collect::<Option<Vec<usize>>>()) else { continue };
+        let (refn, swap) = if k == 2 { ([&hv[0], &hv[1], &hs[0]], [&hs[0], &hs[1]]) } else { ([&hs[0], &hs[1], &hv[0]], [&hs[1], &hs[2]]) };
+        let (Some(r0), Some(r1), Some(r2), Some(s0), Some(s1)) = (at(refn[0]), at(refn[1]), at(refn[2]), at(swap[0]), at(swap[1])) else { continue };
+        let (Some(&sp), Some(&q0), Some(&q1), Some(&q2)) = (sites.get(p), sites.get(refn[0]), sites.get(refn[1]), sites.get(refn[2])) else { continue };
+        out.push(ProchiralSite { parent, near, refs: [r0, r1, r2], swap: [s0, s1], v_ideal: chiral_volume(sp, q0, q1, q2) });
+    }
+    out
+}
+
+/// The structure holds the atoms of `w.flat` in its order; removed atoms are
+/// left out of the residues.
+fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize],
+    done: &mut FxHashSet<u32>, replacements: &[(u32, u32, String)]) {
+    use std::hash::{Hash, Hasher};
+    // the groups of each residue name, in `kinds` order
+    let mut cache: FxHashMap<String, Vec<(usize, ProchiralGroup)>> = FxHashMap::default();
+    let mut templates: Vec<ProchiralTemplate> = Vec::new();
+    let mut buckets: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+    // atoms whose residue takes a partner in place of a leaving atom
+    let mut replaced = vec![false; w.flat.pos.len()];
+    for &(parent, _, _) in replacements {
+        if let Some(r) = replaced.get_mut(parent as usize) {
+            *r = true;
+        }
     }
     let mut swaps: Vec<(AtomPath, AtomPath)> = Vec::new();
+    // flat index of the first atom of each atom group of the residue group
+    let mut ag_first: Vec<u32> = Vec::new();
+    // the members of a conformer residue: atom group, atom and flat index
+    let mut members: Vec<(u32, u32, u32)> = Vec::new();
+    // flat index of the first atom of the chain
+    let mut chain_first = 0u32;
     for mi in 0..st.models.len() {
         for ci in 0..st.models[mi].chains.len() {
             let alts = st.models[mi].chains[ci].conformer_altlocs();
+            let chain_atoms: u32 = st.models[mi].chains[ci].residue_groups.iter()
+                .flat_map(|rg| rg.atom_groups.iter()).map(|ag| ag.atoms.len() as u32).sum();
             for alt in &alts {
+                // flat index of the first atom of the residue group
+                let mut first = chain_first;
                 for ri in 0..st.models[mi].chains[ci].residue_groups.len() {
-                    // conformer residues: blank + this altloc, grouped by resname
                     let rg = &st.models[mi].chains[ci].residue_groups[ri];
-                    let mut groups: Vec<(&str, Vec<AtomPath>)> = Vec::new();
-                    for (gi, ag) in rg.atom_groups.iter().enumerate() {
-                        if !(ag.altloc.is_empty() || ag.altloc == *alt) {
+                    ag_first.clear();
+                    for ag in &rg.atom_groups {
+                        ag_first.push(first);
+                        first += ag.atoms.len() as u32;
+                    }
+                    let path = |gi: u32, k: u32| AtomPath { model: mi as u32, chain: ci as u32, rg: ri as u32, ag: gi, atom: k };
+                    let in_conformer = |ag: &AtomGroup| ag.altloc.is_empty() || ag.altloc == *alt;
+                    // conformer residues: blank + this altloc, grouped by
+                    // resname in order of first appearance
+                    for (g0, ag0) in rg.atom_groups.iter().enumerate() {
+                        if !in_conformer(ag0) || rg.atom_groups[..g0].iter().any(|g| in_conformer(g) && g.resname == ag0.resname) {
                             continue;
                         }
-                        let e = match groups.iter_mut().position(|g| g.0 == ag.resname) {
-                            Some(k) => k,
-                            None => {
-                                groups.push((ag.resname.as_str(), Vec::new()));
-                                groups.len() - 1
-                            }
-                        };
-                        for k in 0..ag.atoms.len() {
-                            let pth = AtomPath { model: mi as u32, chain: ci as u32, rg: ri as u32, ag: gi as u32, atom: k as u32 };
-                            if let Some(&fi) = idx.get(&pth) {
-                                if w.removed[fi as usize] {
-                                    continue;
-                                }
-                            }
-                            groups[e].1.push(pth);
+                        let rn = ag0.resname.trim();
+                        if !cache.contains_key(rn) {
+                            let refs = kinds.iter().flat_map(|&k| {
+                                let n_heavy = if k == 2 { 2 } else { 1 };
+                                h_references(ml, rn, k, n_heavy).into_iter().map(move |g| (k, g))
+                            });
+                            cache.insert(rn.to_string(), refs.collect());
                         }
-                    }
-                    for (resname, paths) in groups {
-                        let rn = resname.trim();
-                        for &k in kinds {
-                            let n_heavy = if k == 2 { 2 } else { 1 };
-                            if !cache.contains_key(&(rn.to_string(), k)) {
-                                cache.insert((rn.to_string(), k), h_references(ml, rn, k, n_heavy));
-                            }
-                        }
-                        let refs: Vec<(usize, &ProchiralGroup)> =
-                            kinds.iter().flat_map(|&k| cache[&(rn.to_string(), k)].iter().map(move |g| (k, g))).collect();
+                        let refs = &cache[rn];
                         if refs.is_empty() {
                             continue;
                         }
-                        let atoms = linked::prochiral_atoms(st, &w.flat, &paths, replacements);
-                        for (k, (p, hv, hs, sites)) in refs {
-                            if !std::iter::once(p).chain(hv.iter()).chain(hs.iter()).all(|n| atoms.contains_key(n.as_str())) {
+                        members.clear();
+                        for (gi, ag) in rg.atom_groups.iter().enumerate().skip(g0) {
+                            if !in_conformer(ag) || ag.resname != ag0.resname {
                                 continue;
                             }
-                            let at = |n: &String| atoms[n.as_str()];
-                            let pp = at(p);
-                            let pidx = idx[&pp];
+                            for k in 0..ag.atoms.len() {
+                                let fi = ag_first[gi] + k as u32;
+                                if !w.removed.get(fi as usize).copied().unwrap_or(false) {
+                                    members.push((gi as u32, k as u32, fi));
+                                }
+                            }
+                        }
+                        let atom_of = |m: &(u32, u32, u32)| &rg.atom_groups[m.0 as usize].atoms[m.1 as usize];
+                        if members.iter().any(|m| replaced.get(m.2 as usize).copied().unwrap_or(false)) {
+                            // atoms by name, the last of a name winning, then the
+                            // partners that replace a leaving atom
+                            let mut atoms: FxHashMap<&str, (AtomPath, u32)> =
+                                members.iter().map(|m| (atom_of(m).name.trim(), (path(m.0, m.1), m.2))).collect();
+                            for &(parent, partner, ref leaving) in replacements {
+                                if members.iter().any(|m| m.2 == parent) {
+                                    atoms.insert(leaving, (w.flat.path[partner as usize], partner));
+                                }
+                            }
+                            for &(k, (ref p, ref hv, ref hs, ref sites)) in refs {
+                                if !std::iter::once(p).chain(hv.iter()).chain(hs.iter()).all(|n| atoms.contains_key(n.as_str())) {
+                                    continue;
+                                }
+                                let at = |n: &String| atoms[n.as_str()].0;
+                                let (pp, pidx) = atoms[p.as_str()];
+                                if done.contains(&pidx) {
+                                    continue;
+                                }
+                                let ppos = st.atom(pp).xyz;
+                                if hv.iter().chain(hs.iter()).any(|n| st.atom(at(n)).xyz.dist(ppos) > 2.4) {
+                                    continue;
+                                }
+                                done.insert(pidx);
+                                let (refn, swap) = if k == 2 { ([&hv[0], &hv[1], &hs[0]], (&hs[0], &hs[1])) } else { ([&hs[0], &hs[1], &hv[0]], (&hs[1], &hs[2])) };
+                                let v_ideal = chiral_volume(sites[p], sites[refn[0]], sites[refn[1]], sites[refn[2]]);
+                                let v_model = chiral_volume(ppos, st.atom(at(refn[0])).xyz, st.atom(at(refn[1])).xyz, st.atom(at(refn[2])).xyz);
+                                if v_ideal.abs() < 0.5 || v_model.abs() < 0.5 {
+                                    continue;
+                                }
+                                if (v_ideal > 0.0) != (v_model > 0.0) {
+                                    // lookups use the names from before any swap, so
+                                    // the swaps can wait for the end of the residue
+                                    swaps.push((at(swap.0), at(swap.1)));
+                                }
+                            }
+                            continue;
+                        }
+                        // the sites for this residue name and these atom names
+                        let mut h = rustc_hash::FxHasher::default();
+                        ag0.resname.hash(&mut h);
+                        for m in &members {
+                            atom_of(m).name.hash(&mut h);
+                        }
+                        let key = h.finish();
+                        let same = |t: &ProchiralTemplate| t.resname == ag0.resname && t.names.len() == members.len()
+                            && t.names.iter().zip(&members).all(|(n, m)| *n == atom_of(m).name);
+                        let ti = match buckets.get(&key).and_then(|b| b.iter().copied().find(|&ti| same(&templates[ti]))) {
+                            Some(ti) => ti,
+                            None => {
+                                let names: Vec<&str> = members.iter().map(|m| atom_of(m).name.trim()).collect();
+                                templates.push(ProchiralTemplate {
+                                    resname: ag0.resname.clone(),
+                                    names: members.iter().map(|m| atom_of(m).name.clone()).collect(),
+                                    sites: prochiral_sites(refs, &names),
+                                });
+                                buckets.entry(key).or_default().push(templates.len() - 1);
+                                templates.len() - 1
+                            }
+                        };
+                        let xyz = |k: usize| atom_of(&members[k]).xyz;
+                        for site in &templates[ti].sites {
+                            let pidx = members[site.parent].2;
                             if done.contains(&pidx) {
                                 continue;
                             }
-                            let ppos = st.atom(pp).xyz;
-                            if hv.iter().chain(hs.iter()).any(|n| st.atom(at(n)).xyz.dist(ppos) > 2.4) {
+                            let ppos = xyz(site.parent);
+                            if site.near.iter().any(|&k| xyz(k).dist(ppos) > 2.4) {
                                 continue;
                             }
                             done.insert(pidx);
-                            let (refn, swap) = if k == 2 { ([&hv[0], &hv[1], &hs[0]], (&hs[0], &hs[1])) } else { ([&hs[0], &hs[1], &hv[0]], (&hs[1], &hs[2])) };
-                            let v_ideal = chiral_volume(sites[p], sites[refn[0]], sites[refn[1]], sites[refn[2]]);
-                            let v_model = chiral_volume(ppos, st.atom(at(refn[0])).xyz, st.atom(at(refn[1])).xyz, st.atom(at(refn[2])).xyz);
-                            if v_ideal.abs() < 0.5 || v_model.abs() < 0.5 {
+                            let v_model = chiral_volume(ppos, xyz(site.refs[0]), xyz(site.refs[1]), xyz(site.refs[2]));
+                            if site.v_ideal.abs() < 0.5 || v_model.abs() < 0.5 {
                                 continue;
                             }
-                            if (v_ideal > 0.0) != (v_model > 0.0) {
-                                // lookups use the names from before any swap, so
-                                // the swaps can wait for the end of the residue
-                                swaps.push((at(swap.0), at(swap.1)));
+                            if (site.v_ideal > 0.0) != (v_model > 0.0) {
+                                let (m0, m1) = (members[site.swap[0]], members[site.swap[1]]);
+                                swaps.push((path(m0.0, m0.1), path(m1.0, m1.1)));
                             }
                         }
                     }
@@ -1286,6 +1514,7 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
                     }
                 }
             }
+            chain_first += chain_atoms;
         }
     }
 }
@@ -1295,14 +1524,26 @@ fn name_prochiral_h(st: &mut Structure, ml: &MonLib, w: &Work, kinds: &[usize], 
 fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp,
     coefs: &mut [Option<riding::RidingCoef>], compat: bool) -> Vec<(String, String)> {
     let n = w.flat.pos.len();
-    // live bond proxies in cctbx order (sorted by i, then j)
-    let mut live: Vec<(u32, u32, f64, u16)> = it
-        .bonds
-        .iter()
-        .filter(|b| !w.removed[b.i as usize] && !w.removed[b.j as usize])
-        .map(|b| (b.i, b.j, b.ideal, b.origin))
-        .collect();
-    live.sort_unstable_by_key(|x| (x.0, x.1));
+    // live bond proxies in cctbx order (sorted by i, then j; each pair occurs
+    // once): a counting sort on i, then a sort on j within each i
+    let is_live = |b: &&interp::BondProxy| !w.removed[b.i as usize] && !w.removed[b.j as usize];
+    let mut at_i = vec![0u32; n + 1];
+    for b in it.bonds.iter().filter(is_live) {
+        at_i[b.i as usize + 1] += 1;
+    }
+    for k in 0..n {
+        at_i[k + 1] += at_i[k];
+    }
+    let mut live: Vec<(u32, u32, f64, u16)> = vec![(0, 0, 0.0, 0); at_i[n] as usize];
+    for b in it.bonds.iter().filter(is_live) {
+        live[at_i[b.i as usize] as usize] = (b.i, b.j, b.ideal, b.origin);
+        at_i[b.i as usize] += 1;
+    }
+    let mut from = 0;
+    for &to in &at_i[..n] {
+        live[from..to as usize].sort_unstable_by_key(|x| x.1);
+        from = to as usize;
+    }
     // then the bonds to symmetry copies (cctbx's asu proxies)
     let n_simple = live.len();
     live.extend(
@@ -1359,11 +1600,14 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
     }
     let name = |st: &Structure, k: u32| name_of(st, &w.flat.path, k).to_string();
     let resname = |st: &Structure, k: u32| resname_of(st, &w.flat.path, k).to_string();
-    let his_exception = |st: &Structure, h: u32, parent: u32| -> bool {
-        if !w.flat.is_h[h as usize] || resname_of(st, &w.flat.path, h) != "HIS" {
+    // the atoms and whether each is in a HIS group, in flat order
+    let atoms = st.atom_refs();
+    let in_his = per_atom_of_group(st, |ag| ag.resname.trim() == "HIS");
+    let his_exception = |h: u32, parent: u32| -> bool {
+        if !w.flat.is_h[h as usize] || !in_his[h as usize] {
             return false;
         }
-        if !["HD1", "DD1", "HE2", "DE2"].contains(&name_of(st, &w.flat.path, h)) {
+        if !["HD1", "DD1", "HE2", "DE2"].contains(&atoms[h as usize].name.trim()) {
             return false;
         }
         exclusion[parent as usize] == 0 || exclusion[parent as usize] == interp::ORIGIN_METAL
@@ -1374,7 +1618,7 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
     let mut bond_len: FxHashMap<u32, f64> = FxHashMap::default();
     let mut removed_why: FxHashMap<u32, String> = FxHashMap::default();
     for &(i, j, ideal, _) in &live {
-        if his_exception(st, i, j) || his_exception(st, j, i) {
+        if his_exception(i, j) || his_exception(j, i) {
             continue;
         }
         for (h, x) in [(i, j), (j, i)] {
@@ -1389,7 +1633,7 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
     }
     // tertiary amide H
     for &nn in &key_order {
-        if name_of(st, &w.flat.path, nn) != "N" {
+        if atoms[nn as usize].name.trim() != "N" {
             continue;
         }
         let cls = resclass::get_class(resname_of(st, &w.flat.path, nn));
@@ -1526,7 +1770,7 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
             let hn = name(st, h);
             if ["H1", "H2", "H3", "D1", "D2", "D3"].contains(&hn.as_str()) {
                 let el = w.flat.element[h as usize].clone();
-                st.atom_mut(w.flat.path[h as usize]).name = format!(" {:<3}", el);
+                st.atom_mut(w.flat.path[h as usize]).name = format!(" {:<3}", el).into();
             }
         }
     }
@@ -1577,28 +1821,24 @@ fn bond_order(
 }
 
 /// `exclude_H_on_esterified_O`: an O with two heavy neighbours loses its H.
-fn exclude_h_on_esterified_o(w: &mut Work, it: &Interp) {
-    let mut h_on: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    let mut heavy_on: FxHashMap<u32, FxHashSet<u32>> = FxHashMap::default();
-    for b in &it.bonds {
-        if w.removed[b.i as usize] || w.removed[b.j as usize] {
+/// Bonds to removed atoms do not count.
+fn exclude_h_on_esterified_o(w: &mut Work, nbrs: &Adjacency) {
+    let mut heavy: Vec<u32> = Vec::new();
+    for o in 0..w.flat.pos.len() {
+        if w.removed[o] || w.flat.element[o] != "O" {
             continue;
         }
-        for (o, other) in [(b.i, b.j), (b.j, b.i)] {
-            if w.flat.element[o as usize] != "O" {
-                continue;
-            }
-            if w.flat.is_h[other as usize] {
-                h_on.entry(o).or_default().push(other);
-            } else {
-                heavy_on.entry(o).or_default().insert(other);
+        heavy.clear();
+        for &x in nbrs.of(o as u32) {
+            if !w.removed[x as usize] && !w.flat.is_h[x as usize] && !heavy.contains(&x) {
+                heavy.push(x);
             }
         }
-    }
-    for (o, hs) in h_on {
-        if heavy_on.get(&o).map(|s| s.len()).unwrap_or(0) > 1 {
-            for h in hs {
-                w.removed[h as usize] = true;
+        if heavy.len() > 1 {
+            for &x in nbrs.of(o as u32) {
+                if !w.removed[x as usize] && w.flat.is_h[x as usize] {
+                    w.removed[x as usize] = true;
+                }
             }
         }
     }

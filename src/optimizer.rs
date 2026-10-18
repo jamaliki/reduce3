@@ -9,7 +9,7 @@
 //! are processed in parallel.
 
 use crate::geom::*;
-use crate::movers::{self, Mover, MoverKind, SingleHOptions};
+use crate::movers::{self, in_state, Mover, MoverKind, SingleHOptions};
 use crate::probe::*;
 use crate::resclass::ResClass;
 use crate::world::World;
@@ -40,6 +40,10 @@ pub struct OptParams {
     pub flip_states: String,
     pub verbosity: i32,
     pub compat: bool,
+    /// Build the report text. Without it the optimizer skips the scores and
+    /// strings that only the report shows; the chosen states, deletions and
+    /// fix-ups stay the same.
+    pub report: bool,
 }
 
 impl Default for OptParams {
@@ -60,6 +64,7 @@ impl Default for OptParams {
             flip_states: String::new(),
             verbosity: 2,
             compat: false,
+            report: true,
         }
     }
 }
@@ -192,8 +197,9 @@ pub fn atoms_within_n_bonds(w: &World, atom: u32, probe_rad: f64, n: usize, non_
     let n = if w.info[atom as usize].is_dummy_hydrogen { 1 } else { n };
     let mut set: Vec<u32> = vec![atom];
     for i in 0..n {
-        let current = set.clone();
-        for a in current {
+        // the atoms found before this round
+        for k in 0..set.len() {
+            let a = set[k];
             for &nb in &w.bonded[a as usize] {
                 if i < non_h_n || atom_is_h || w.is_h(nb) {
                     if w.compatible(atom, nb) {
@@ -214,8 +220,8 @@ pub fn atoms_within_n_bonds(w: &World, atom: u32, probe_rad: f64, n: usize, non_
 fn fixup_explicit_donors(w: &mut World, atoms: &[u32]) {
     for &a in atoms {
         if w.is_h(a) {
-            let nbs = w.bonded[a as usize].clone();
-            for n in nbs {
+            for k in 0..w.bonded[a as usize].len() {
+                let n = w.bonded[a as usize][k];
                 let e = w.elem(n);
                 if e == "N" || e == "O" || e == "S" {
                     w.info[a as usize].is_donor = true;
@@ -245,6 +251,8 @@ pub fn is_aromatic_acceptor(resname: &str, atom_name: &str) -> bool {
 /// queries can miss them.
 struct NeighborIndex {
     loose: Option<SpatialGrid>,
+    /// Fixed mode: the atoms added after `loose` was built (phantoms).
+    late: Option<SpatialGrid>,
     margin: f64,
     reg: Option<RegGrid>,
 }
@@ -266,10 +274,19 @@ impl NeighborIndex {
                     cells[c].push(a);
                 }
             }
-            NeighborIndex { loose: None, margin: 0.0, reg: Some(RegGrid { geom, cells }) }
+            NeighborIndex { loose: None, late: None, margin: 0.0, reg: Some(RegGrid { geom, cells }) }
         } else {
             let pts: Vec<(u32, Vec3)> = atoms.iter().map(|&a| (a, w.pos[a as usize])).collect();
-            NeighborIndex { loose: Some(SpatialGrid::new(&pts, 3.0)), margin: 2.5, reg: None }
+            NeighborIndex { loose: Some(SpatialGrid::new(&pts, 3.0)), late: None, margin: 2.5, reg: None }
+        }
+    }
+
+    /// Fixed mode: add atoms `ids` to the index, as a rebuild over all atoms
+    /// would. No atom may have moved since the index was built.
+    fn add_late(&mut self, w: &World, ids: &[u32]) {
+        if self.loose.is_some() && !ids.is_empty() {
+            let pts: Vec<(u32, Vec3)> = ids.iter().map(|&a| (a, w.pos[a as usize])).collect();
+            self.late = Some(SpatialGrid::new(&pts, 3.0));
         }
     }
 
@@ -313,16 +330,17 @@ impl NeighborIndex {
                     }
                 }
             }
-        } else if let Some(g) = &self.loose {
-            g.for_each_within(p, 0.0, max_d + self.margin, |id, _, _| {
-                if removed.contains(&id) {
-                    return;
-                }
-                let d2 = w.pos[id as usize].dist_sq(p);
-                if d2 >= min2 && d2 <= max2 {
-                    out.push(id);
-                }
-            });
+        } else {
+            // the distance test first: it is cheaper than the set lookup and
+            // rejects most of the grid's candidates
+            for g in self.loose.iter().chain(&self.late) {
+                g.for_each_within(p, 0.0, max_d + self.margin, |id, _, _| {
+                    let d2 = w.pos[id as usize].dist_sq(p);
+                    if d2 >= min2 && d2 <= max2 && !removed.contains(&id) {
+                        out.push(id);
+                    }
+                });
+            }
         }
         out.sort_unstable();
         out.dedup();
@@ -393,9 +411,10 @@ struct Ctx<'a> {
     dot_reach: FxHashMap<u32, f64>,
     /// Per Mover atom: the static atoms near any of its positions that can
     /// be its targets (not excluded, occupied), in grid order with their
-    /// info (center, radius covered, entries), filtered per state instead of
-    /// querying the grid for each.
-    near: FxHashMap<u32, (Vec3, f64, Vec<(Vec3, AtomInfo)>)>,
+    /// info (center, radius covered, range of `near_entries`), filtered per
+    /// state instead of querying the grid for each.
+    near: FxHashMap<u32, (Vec3, f64, u32, u32)>,
+    near_entries: Vec<(Vec3, AtomInfo)>,
     max_vdw: f64,
     /// Local index of each mover inside its clique.
     local: Vec<u32>,
@@ -438,13 +457,13 @@ impl<'a> Ctx<'a> {
         let mv = &self.movers[m as usize];
         match cfg {
             Cfg::Coarse(c) => mv.coarse_pos[c as usize][slot],
-            Cfg::Fine(c, f) => mv.fine_pos[c as usize][f as usize][slot],
+            Cfg::Fine(c, f) => mv.fine.pos(c as usize, f as usize)[slot],
         }
     }
 
     #[inline]
     fn mover_atom_deleted(&self, m: u32, slot: usize, cfg: Cfg) -> bool {
-        let d = &self.movers[m as usize].coarse_del[cfg.coarse()];
+        let d = in_state(&self.movers[m as usize].coarse_del, cfg.coarse());
         slot < d.len() && d[slot]
     }
 
@@ -453,7 +472,7 @@ impl<'a> Ctx<'a> {
         if let Some(s) = &self.snapshot {
             return s[a as usize];
         }
-        let inf = &self.movers[m as usize].coarse_info[cfg.coarse()];
+        let inf = in_state(&self.movers[m as usize].coarse_info, cfg.coarse());
         if slot < inf.len() { inf[slot] } else { self.w.info[a as usize] }
     }
 
@@ -487,10 +506,10 @@ impl<'a> Ctx<'a> {
     #[inline]
     fn static_targets(&self, a: u32, pa: Vec3, ia: &AtomInfo, nearby: f64, excl: &[u32], out: &mut Vec<Target>) {
         let pr = self.p.probe.probe_radius;
-        if let Some((c, r, entries)) = self.near.get(&a) {
-            if pa.dist(*c) + nearby + NEAR_MARGIN <= *r {
+        if let Some(&(c, r, lo, hi)) = self.near.get(&a) {
+            if pa.dist(c) + nearby + NEAR_MARGIN <= r {
                 let (min2, max2) = (1e-5 * 1e-5, nearby * nearby);
-                for &(pb, ib) in entries {
+                for &(pb, ib) in &self.near_entries[lo as usize..hi as usize] {
                     let d2 = pb.dist_sq(pa);
                     if d2 >= min2 && d2 <= max2 && d2.sqrt() <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
                         out.push(Target { pos: pb, info: ib });
@@ -509,6 +528,111 @@ impl<'a> Ctx<'a> {
                 out.push(Target { pos: pb, info: ib });
             }
         });
+    }
+
+    /// One evaluation of the dots of Mover atom `slot` of the Mover at local
+    /// index `i` for all of its fine poses in coarse state `c`, with the rest
+    /// of the clique as in `st`. None unless the atom keeps its place and info
+    /// in every pose and its own Mover offers it no targets.
+    fn fine_shared(&self, st: &CliqueState, i: usize, c: usize, slot: usize, buf: &mut ScoreBuf) -> Option<FineShared> {
+        let (w, p) = (self.w, self.p);
+        let m = st.movers[i];
+        let mv = &self.movers[m as usize];
+        let a = mv.atoms[slot];
+        let nf = mv.fine.count();
+        let coarse = Cfg::Coarse(c as u16);
+        if nf < 2 || p.compat || w.occ[a as usize] < p.min_occupancy || self.mover_atom_deleted(m, slot, coarse) {
+            return None;
+        }
+        let ia = self.mover_atom_info(m, slot, coarse, a);
+        if ia.is_ion && self.scorer.ignore_ions {
+            return None;
+        }
+        let pa0 = mv.fine.pos(c, 0)[slot];
+        if (0..nf).any(|f| mv.fine.pos(c, f)[slot].dist_sq(pa0) > SHARE_TOL * SHARE_TOL) {
+            return None;
+        }
+        let pa: Vec<Vec3> = (0..nf).map(|f| mv.fine.pos(c, f)[slot]).collect();
+        let pr = p.probe.probe_radius;
+        let nearby = self.max_vdw + w.info[a as usize].vdw_radius + 2.0 * pr;
+        let excl: &[u32] = self.exclude.get(&a).map(|v| v.as_slice()).unwrap_or(&[]);
+        let min_occ = p.min_occupancy;
+        // the own Mover's other atoms must be no target in any pose
+        for oslot in 0..mv.n_moved {
+            let b = mv.atoms[oslot];
+            if b == a || self.mover_atom_deleted(m, oslot, coarse) || excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
+                continue;
+            }
+            let ib = self.mover_atom_info(m, oslot, coarse, b);
+            if (0..nf).any(|f| {
+                let d = mv.fine.pos(c, f)[oslot].dist(pa[f]);
+                (1e-5..=nearby).contains(&d) && d <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr
+            }) {
+                return None;
+            }
+        }
+        // excluded atoms: the own Mover's per pose, the others once
+        let reach = self.dot_reach.get(&a).copied().unwrap_or(f64::INFINITY) + EXCLUSION_MARGIN;
+        let covers = |pa: Vec3, pe: Vec3, re: f64| pe.dist_sq(pa) < (reach + re) * (reach + re);
+        buf.excl.clear();
+        let mut trims = vec![Vec::new(); nf];
+        for &e in excl {
+            match self.dyn_of.get(&e) {
+                Some(&(em, eslot)) if em == m => {
+                    if self.mover_atom_deleted(m, eslot as usize, coarse) {
+                        continue;
+                    }
+                    let re = self.mover_atom_info(m, eslot as usize, coarse, e).vdw_radius;
+                    for (f, tr) in trims.iter_mut().enumerate() {
+                        let pe = mv.fine.pos(c, f)[eslot as usize];
+                        if covers(pa[f], pe, re) {
+                            tr.push((pe, re));
+                        }
+                    }
+                }
+                _ => {
+                    let (pe, deleted, ie) = self.atom_state(st, e);
+                    if !deleted && covers(pa[0], pe, ie.vdw_radius) {
+                        buf.excl.push((pe, ie.vdw_radius));
+                    }
+                }
+            }
+        }
+        // targets: static, then the other clique Movers' (as in score_atom_ext)
+        buf.targets.clear();
+        self.static_targets(a, pa[0], &ia, nearby, excl, &mut buf.targets);
+        for &om in self.atom_movers.get(&a).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let li = self.local[om as usize];
+            if om == m || li == NONE || st.movers.get(li as usize) != Some(&om) {
+                continue;
+            }
+            let cfg = st.cfg[li as usize];
+            let omv = &self.movers[om as usize];
+            for oslot in 0..omv.n_moved {
+                let b = omv.atoms[oslot];
+                if b == a || self.mover_atom_deleted(om, oslot, cfg) {
+                    continue;
+                }
+                let pb = self.mover_atom_pos(om, oslot, cfg);
+                let d = pb.dist(pa[0]);
+                if d < 1e-5 || d > nearby || excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
+                    continue;
+                }
+                let ib = self.mover_atom_info(om, oslot, cfg, b);
+                if d <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
+                    buf.targets.push(Target { pos: pb, info: ib });
+                }
+            }
+        }
+        let s = &self.scorer;
+        prepare_targets(s, &ia, pa[0], &buf.targets, pr, &mut buf.prepared);
+        let mut adds = Vec::new();
+        fold_dot_lanes(s, &ia, pa[0], &self.dots_soa[&a], &buf.excl, &buf.prepared, &mut buf.lanes, |k, r| {
+            if let Some((kind, val)) = dot_addend(s, r) {
+                adds.push(DotAdd { k: k as u32, kind, val });
+            }
+        });
+        Some(FineShared { adds, pa, trims })
     }
 
     /// Score one Mover atom under the clique state (`OptimizerC::scoreAtom`).
@@ -596,7 +720,7 @@ impl<'a> Ctx<'a> {
                 return ret;
             }
             prepare_targets(s, &ia, pa, &buf.targets, pr, &mut buf.prepared);
-            score_dot_lanes(s, &ia, pa, &self.dots_soa[&a], &buf.excl, &buf.prepared, &mut buf.lane_targets, &mut ret);
+            score_dot_lanes(s, &ia, pa, &self.dots_soa[&a], &buf.excl, &buf.prepared, &mut buf.lanes, &mut ret);
             let density = self.p.probe.density;
             ret.bump /= density;
             ret.hbond /= density;
@@ -643,15 +767,32 @@ impl<'a> Ctx<'a> {
 
     /// Sum of the scores of a Mover's scored atoms under the clique state.
     fn score_mover_atoms(&self, st: &CliqueState, m: u32, buf: &mut ScoreBuf, skip_deleted: bool) -> (f64, bool) {
+        self.score_mover_atoms_in(st, m, buf, skip_deleted, &[], 0)
+    }
+
+    /// `score_mover_atoms` in fine pose `f`, with each atom scored from its
+    /// shared evaluation `shared[slot]` when present.
+    fn score_mover_atoms_in(&self, st: &CliqueState, m: u32, buf: &mut ScoreBuf, skip_deleted: bool, shared: &[Option<FineShared>], f: usize) -> (f64, bool) {
         let mv = &self.movers[m as usize];
         let cfg = self.cfg_of(st, m);
+        let density = self.p.probe.density;
         let mut tot = 0.0;
         let mut bad = false;
         for slot in 0..mv.n_moved {
             if skip_deleted && self.mover_atom_deleted(m, slot, cfg) {
                 continue;
             }
-            let r = self.score_atom(st, mv.atoms[slot], buf);
+            let a = mv.atoms[slot];
+            let r = match shared.get(slot).and_then(Option::as_ref) {
+                Some(sh) => {
+                    let mut r = sum_addends(&sh.adds, &self.dots_soa[&a], sh.pa[f], &sh.trims[f]);
+                    r.bump /= density;
+                    r.hbond /= density;
+                    r.attract /= density;
+                    r
+                }
+                None => self.score_atom_ext(st, a, buf, None),
+            };
             tot += r.total();
             bad |= r.has_bad_bump;
         }
@@ -663,7 +804,7 @@ impl<'a> Ctx<'a> {
         self.p.preference_magnitude
             * match cfg {
                 Cfg::Coarse(c) => mv.coarse_pref[c as usize],
-                Cfg::Fine(c, f) => mv.fine_pref[c as usize][f as usize],
+                Cfg::Fine(c, f) => mv.fine.pref(c as usize, f as usize),
             }
     }
 }
@@ -751,33 +892,50 @@ impl DotFold {
     #[inline]
     fn finish(&self, s: &DotScorer, src: &AtomInfo, dot_abs: Vec3) -> Option<(OverlapType, f64, f64, bool)> {
         let b = self.best?;
-        let mut gap = self.best_gap;
-        let overlap;
-        let mut ot;
-        if gap > 0.0 {
-            overlap = 0.0;
-            ot = if s.weak_hbonds && self.is_hbond { OverlapType::HydrogenBond } else { OverlapType::NoOverlap };
-        } else if self.is_hbond {
-            if self.too_close {
-                gap += self.hb_min;
-                overlap = -0.5 * gap;
-                ot = OverlapType::Clash;
-            } else {
-                overlap = -0.5 * gap;
-                ot = OverlapType::HydrogenBond;
-            }
-        } else {
+        Some(finish_dot(s, src, self.best_gap, self.is_hbond, self.too_close, self.hb_min, self.cause_dummy, &b, dot_abs))
+    }
+}
+
+/// The end of `check_dot` for a dot whose nearest target is `b`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn finish_dot(
+    s: &DotScorer,
+    src: &AtomInfo,
+    best_gap: f64,
+    is_hbond: bool,
+    too_close: bool,
+    hb_min: f64,
+    cause_dummy: bool,
+    b: &PTarget,
+    dot_abs: Vec3,
+) -> (OverlapType, f64, f64, bool) {
+    let mut gap = best_gap;
+    let overlap;
+    let mut ot;
+    if gap > 0.0 {
+        overlap = 0.0;
+        ot = if s.weak_hbonds && is_hbond { OverlapType::HydrogenBond } else { OverlapType::NoOverlap };
+    } else if is_hbond {
+        if too_close {
+            gap += hb_min;
             overlap = -0.5 * gap;
             ot = OverlapType::Clash;
+        } else {
+            overlap = -0.5 * gap;
+            ot = OverlapType::HydrogenBond;
         }
-        // annularDots: dot2srcCenter > kissEdge2bullsEye
-        let d2s = (b.surface - dot_abs).length();
-        let annular = d2s > b.kiss;
-        if (src.is_dummy_hydrogen || self.cause_dummy) && (self.too_close || ot != OverlapType::HydrogenBond) {
-            ot = OverlapType::Ignore;
-        }
-        Some((ot, gap, overlap, annular))
+    } else {
+        overlap = -0.5 * gap;
+        ot = OverlapType::Clash;
     }
+    // annularDots: dot2srcCenter > kissEdge2bullsEye
+    let d2s = (b.surface - dot_abs).length();
+    let annular = d2s > b.kiss;
+    if (src.is_dummy_hydrogen || cause_dummy) && (too_close || ot != OverlapType::HydrogenBond) {
+        ot = OverlapType::Ignore;
+    }
+    (ot, gap, overlap, annular)
 }
 
 /// `DotScorer::check_dot` with a precomputed probe location.
@@ -802,6 +960,109 @@ struct DotsSoa {
     /// Per chunk: center and radius of a sphere holding its dot offsets, and
     /// of one holding its probe offsets.
     bounds: Vec<(Vec3, f64, Vec3, f64)>,
+    /// The probe spheres of `bounds` as coordinate arrays and radii.
+    probe_bounds: ChunkSpheres,
+    /// The dot spheres of `bounds` as coordinate arrays and radii.
+    dot_bounds: ChunkSpheres,
+}
+
+/// One bounding sphere per chunk, as coordinate arrays and radii.
+struct ChunkSpheres {
+    c: [Vec<f64>; 3],
+    r: Vec<f64>,
+}
+
+impl ChunkSpheres {
+    fn new(spheres: impl Iterator<Item = (Vec3, f64)>) -> ChunkSpheres {
+        let mut out = ChunkSpheres { c: [Vec::new(), Vec::new(), Vec::new()], r: Vec::new() };
+        for (c, r) in spheres {
+            out.c[0].push(c.x);
+            out.c[1].push(c.y);
+            out.c[2].push(c.z);
+            out.r.push(r);
+        }
+        out
+    }
+
+    /// Set bit `bit` of word `word` (of `nw` per chunk) in `masks` for each
+    /// chunk whose sphere comes within `r` of `q`, a point given relative to
+    /// the atom center. The spheres carry `CHUNK_MARGIN`, which keeps this a
+    /// superset of the chunks that an exact test of their dots can pass.
+    #[inline]
+    fn mark(&self, q: Vec3, r: f64, masks: &mut [u64], nw: usize, word: usize, bit: u32) {
+        let [cx, cy, cz] = &self.c;
+        let n = self.r.len();
+        let (cx, cy, cz, cr) = (&cx[..n], &cy[..n], &cz[..n], &self.r[..n]);
+        if nw == 1 {
+            let masks = &mut masks[..n];
+            for c in 0..n {
+                let (x, y, z) = (cx[c] - q.x, cy[c] - q.y, cz[c] - q.z);
+                let reach = r + cr[c];
+                masks[c] |= ((x * x + y * y + z * z <= reach * reach) as u64) << bit;
+            }
+        } else {
+            for c in 0..n {
+                let (x, y, z) = (cx[c] - q.x, cy[c] - q.y, cz[c] - q.z);
+                let reach = r + cr[c];
+                masks[c * nw + word] |= ((x * x + y * y + z * z <= reach * reach) as u64) << bit;
+            }
+        }
+    }
+}
+
+/// Bit masks of chunk spheres reached: `nw` words of 64 bits per chunk, bit
+/// `i` for item `i`.
+#[derive(Default)]
+struct ChunkMasks {
+    nw: usize,
+    bits: Vec<u64>,
+}
+
+impl ChunkMasks {
+    fn reset(&mut self, nc: usize, items: usize) {
+        self.nw = items.div_ceil(64).max(1);
+        self.bits.clear();
+        self.bits.resize(nc * self.nw, 0);
+    }
+
+    #[inline]
+    fn mark(&mut self, spheres: &ChunkSpheres, q: Vec3, r: f64, item: usize) {
+        spheres.mark(q, r, &mut self.bits, self.nw, item / 64, (item % 64) as u32);
+    }
+
+    #[inline(always)]
+    fn chunk(&self, c: usize) -> &[u64] {
+        &self.bits[c * self.nw..(c + 1) * self.nw]
+    }
+}
+
+/// Call `f` with each item whose bit is set in `words`, in order.
+#[inline(always)]
+fn for_bits(words: &[u64], mut f: impl FnMut(usize)) {
+    for (wi, &w) in words.iter().enumerate() {
+        let mut bits = w;
+        while bits != 0 {
+            f(wi * 64 + bits.trailing_zeros() as usize);
+            bits &= bits - 1;
+        }
+    }
+}
+
+/// The debugging switches read from the environment: REDUCE3_ATOMWISE
+/// (score atoms one state at a time) and REDUCE3_DEBUG_ATOM (print the
+/// coarse state scores of the singleton Mover of one atom). They are read
+/// once.
+struct DebugSwitches {
+    atomwise: bool,
+    debug_atom: Option<String>,
+}
+
+fn debug_switches() -> &'static DebugSwitches {
+    static SWITCHES: std::sync::OnceLock<DebugSwitches> = std::sync::OnceLock::new();
+    SWITCHES.get_or_init(|| DebugSwitches {
+        atomwise: std::env::var_os("REDUCE3_ATOMWISE").is_some(),
+        debug_atom: std::env::var("REDUCE3_DEBUG_ATOM").ok(),
+    })
 }
 
 /// Slack on the chunk bounds (far above rounding error).
@@ -819,7 +1080,7 @@ impl DotsSoa {
             let c = pts.iter().fold(Vec3::ZERO, |a, &q| a + q) / pts.len() as f64;
             (c, pts.iter().map(|q| q.dist(c)).fold(0.0, f64::max))
         };
-        let bounds = dots
+        let bounds: Vec<(Vec3, f64, Vec3, f64)> = dots
             .chunks(LANES)
             .map(|ch| {
                 let (cd, rd) = sphere(&ch.iter().map(|x| x.d).collect::<Vec<_>>());
@@ -827,12 +1088,20 @@ impl DotsSoa {
                 (cd, rd + CHUNK_MARGIN, cp, rp + CHUNK_MARGIN)
             })
             .collect();
+        let probe_bounds = ChunkSpheres::new(bounds.iter().map(|b| (b.2, b.3)));
+        let dot_bounds = ChunkSpheres::new(bounds.iter().map(|b| (b.0, b.1)));
         DotsSoa {
             n: dots.len(),
             d: [col(&|x| x.d.x), col(&|x| x.d.y), col(&|x| x.d.z)],
             p: [col(&|x| x.probe.x), col(&|x| x.probe.y), col(&|x| x.probe.z)],
             bounds,
+            probe_bounds,
+            dot_bounds,
         }
+    }
+
+    fn dot(&self, k: usize) -> DotPair {
+        DotPair { d: v3(self.d[0][k], self.d[1][k], self.d[2][k]), probe: v3(self.p[0][k], self.p[1][k], self.p[2][k]) }
     }
 }
 
@@ -852,26 +1121,25 @@ struct LaneTarget {
 
 const LANE_NO_TARGET: u64 = u64::MAX;
 
-/// Score the dots of one atom state against `targets` in order, as
-/// `check_dot` and `accumulate_dot` do one dot at a time: dots inside an atom
-/// of `excl` are skipped and the rest accumulate into `ret` in dot order.
-/// Dots go through in chunks of `LANES`, each test over a chunk at once (the
-/// compiler vectorizes the fixed-size loops) with the scalar arithmetic, so
-/// the results are the same bits; each dot's fold keeps the target order.
-// `!(d2 < r2)` keeps the scalar test's form (`if d2 < r2 { skip }`) exactly
-#[allow(clippy::too_many_arguments, clippy::neg_cmp_op_on_partial_ord)]
-fn score_dot_lanes(
-    s: &DotScorer,
-    src: &AtomInfo,
-    pa: Vec3,
-    dots: &DotsSoa,
-    excl: &[(Vec3, f64)],
-    targets: &[PTarget],
-    lt: &mut Vec<LaneTarget>,
-    ret: &mut ScoreDotsResult,
-) {
-    // per-target constants of `DotFold::step`; a target the step leaves
-    // alone for every dot is dropped
+/// Scratch space of `score_dot_lanes`, kept between calls.
+#[derive(Default)]
+struct LaneBufs {
+    targets: Vec<LaneTarget>,
+    /// Per chunk, the targets that can reach its probes.
+    hits: ChunkMasks,
+}
+
+/// Fill `hits` with the chunks each of `lt` can reach from the atom at `pa`.
+fn target_hits(dots: &DotsSoa, pa: Vec3, lt: &[LaneTarget], hits: &mut ChunkMasks) {
+    hits.reset(dots.bounds.len(), lt.len());
+    for (ti, t) in lt.iter().enumerate() {
+        hits.mark(&dots.probe_bounds, t.pos - pa, t.prb, ti);
+    }
+}
+
+/// The per-target constants of `DotFold::step` for `src`, in order; a target
+/// the step leaves alone for every dot is dropped.
+fn lane_targets(s: &DotScorer, src: &AtomInfo, targets: &[PTarget], lt: &mut Vec<LaneTarget>) {
     lt.clear();
     let cs = src.charge as i32;
     for (t, b) in targets.iter().enumerate() {
@@ -888,119 +1156,384 @@ fn score_dot_lanes(
         let base = ((t as u64) << 8) | hb as u64 | ((bi.is_dummy_hydrogen as u64) << 2);
         lt.push(LaneTarget { pos: b.pos, prb2: b.prb2, prb: b.prb2.sqrt(), vdw: bi.vdw_radius, hb, hbm, base });
     }
-    let [dx, dy, dz] = &dots.d;
-    let [px, py, pz] = &dots.p;
-    // a chunk with no target in reach of its probes cannot score, and only
-    // excluded atoms near its dots can remove one
-    let mut near_t: Vec<LaneTarget> = Vec::with_capacity(lt.len());
-    let mut near_e: Vec<(Vec3, f64)> = Vec::with_capacity(excl.len());
-    let mut start = 0;
-    for &(cd, rd, cp, rp) in &dots.bounds {
-        let m = (dots.n - start).min(LANES);
-        let pc = pa + cp;
-        near_t.clear();
-        near_t.extend(lt.iter().filter(|t| {
-            let reach = t.prb + rp;
-            pc.dist_sq(t.pos) <= reach * reach
-        }));
-        if near_t.is_empty() {
-            start += LANES;
-            continue;
+}
+
+/// The dots and probes of one chunk with the atom at `pa`.
+struct Chunk {
+    a: [[f64; LANES]; 3],
+    q: [[f64; LANES]; 3],
+}
+
+impl Chunk {
+    #[inline(always)]
+    fn at(pa: Vec3, dots: &DotsSoa, start: usize) -> Chunk {
+        let mut c = Chunk { a: [[0.0; LANES]; 3], q: [[0.0; LANES]; 3] };
+        let pc = [pa.x, pa.y, pa.z];
+        for ax in 0..3 {
+            for l in 0..LANES {
+                c.a[ax][l] = pc[ax] + dots.d[ax][start + l];
+                c.q[ax][l] = pc[ax] + dots.p[ax][start + l];
+            }
         }
-        let dc = pa + cd;
-        near_e.clear();
-        near_e.extend(excl.iter().filter(|&&(pe, re)| {
-            let reach = re + rd;
-            dc.dist_sq(pe) < reach * reach
-        }));
-        let (mut ax, mut ay, mut az) = ([0.0f64; LANES], [0.0f64; LANES], [0.0f64; LANES]);
-        let (mut qx, mut qy, mut qz) = ([0.0f64; LANES], [0.0f64; LANES], [0.0f64; LANES]);
-        for l in 0..LANES {
-            ax[l] = pa.x + dx[start + l];
-            ay[l] = pa.y + dy[start + l];
-            az[l] = pa.z + dz[start + l];
-            qx[l] = pa.x + px[start + l];
-            qy[l] = pa.y + py[start + l];
-            qz[l] = pa.z + pz[start + l];
+        c
+    }
+
+    /// Lanes whose dot lies within (strictly) `r2` of `c`.
+    #[inline(always)]
+    fn dot_within(&self, c: Vec3, r2: f64) -> [bool; LANES] {
+        let mut out = [false; LANES];
+        for (l, o) in out.iter_mut().enumerate() {
+            let (x, y, z) = (self.a[0][l] - c.x, self.a[1][l] - c.y, self.a[2][l] - c.z);
+            *o = x * x + y * y + z * z < r2;
         }
+        out
+    }
+
+    /// Lanes whose probe lies within `r2` of `c`.
+    #[inline(always)]
+    fn probe_within(&self, c: Vec3, r2: f64) -> [bool; LANES] {
+        let mut out = [false; LANES];
+        for (l, o) in out.iter_mut().enumerate() {
+            let (x, y, z) = (self.q[0][l] - c.x, self.q[1][l] - c.y, self.q[2][l] - c.z);
+            *o = x * x + y * y + z * z <= r2;
+        }
+        out
+    }
+
+    /// Live lanes of the first `m`: those outside every atom of `excl`. Only
+    /// atoms that reach the chunk's dot sphere (center `dc`, radius `rd`) can
+    /// remove one.
+    #[inline(always)]
+    fn live(&self, m: usize, excl: &[(Vec3, f64)], dc: Vec3, rd: f64) -> [bool; LANES] {
         let mut live = [false; LANES];
         for (l, v) in live.iter_mut().enumerate() {
             *v = l < m;
         }
-        for &(pe, re) in &near_e {
-            let r2 = re * re;
-            for l in 0..LANES {
-                let (ex, ey, ez) = (ax[l] - pe.x, ay[l] - pe.y, az[l] - pe.z);
-                live[l] &= !(ex * ex + ey * ey + ez * ez < r2);
+        for &(pe, re) in excl {
+            let reach = re + rd;
+            if dc.dist_sq(pe) < reach * reach {
+                let inside = self.dot_within(pe, re * re);
+                for l in 0..LANES {
+                    live[l] &= !inside[l];
+                }
             }
         }
-        if !live.iter().any(|&x| x) {
-            start += LANES;
+        live
+    }
+
+    #[inline(always)]
+    fn dot(&self, l: usize) -> Vec3 {
+        v3(self.a[0][l], self.a[1][l], self.a[2][l])
+    }
+}
+
+/// `DotFold` of each lane of a chunk, as the target index and state bits of
+/// `LaneTarget::base`.
+#[derive(Clone, Copy)]
+struct LaneFold {
+    bg: [f64; LANES],
+    st: [u64; LANES],
+    hm: [f64; LANES],
+}
+
+impl LaneFold {
+    const START: LaneFold = LaneFold { bg: [1e100; LANES], st: [LANE_NO_TARGET; LANES], hm: [0.0; LANES] };
+
+    /// `DotFold::step` on the live lanes.
+    #[inline(always)]
+    fn step(&mut self, c: &Chunk, live: &[bool; LANES], t: &LaneTarget) {
+        let mut within = c.probe_within(t.pos, t.prb2);
+        for l in 0..LANES {
+            within[l] &= live[l];
+        }
+        if !within.iter().any(|&x| x) {
+            return;
+        }
+        let neg_hbm = -t.hbm;
+        for l in 0..LANES {
+            let (rx, ry, rz) = (c.a[0][l] - t.pos.x, c.a[1][l] - t.pos.y, c.a[2][l] - t.pos.z);
+            let gap = (rx * rx + ry * ry + rz * rz).sqrt() - t.vdw;
+            let upd = within[l] & (gap < self.bg[l]);
+            let new_state = t.base | (((t.hb & (gap < neg_hbm)) as u64) << 1);
+            self.bg[l] = if upd { gap } else { self.bg[l] };
+            self.st[l] = if upd { new_state } else { self.st[l] };
+            self.hm[l] = if upd & t.hb { t.hbm } else { self.hm[l] };
+        }
+    }
+
+    /// `DotFold::finish` for lane `l`, which has a target (`targets` as
+    /// indexed by `base`).
+    #[inline(always)]
+    fn finish(&self, l: usize, s: &DotScorer, src: &AtomInfo, targets: &[PTarget], dot_abs: Vec3) -> (OverlapType, f64, f64, bool) {
+        let st = self.st[l];
+        let b = &targets[(st >> 8) as usize];
+        finish_dot(s, src, self.bg[l], st & 1 != 0, st & 2 != 0, self.hm[l], st & 4 != 0, b, dot_abs)
+    }
+
+    /// The `DotFold` of lane `l` (`targets` as indexed by `base`).
+    #[inline(always)]
+    fn fold(&self, l: usize, targets: &[PTarget]) -> DotFold {
+        let st = self.st[l];
+        if st == LANE_NO_TARGET {
+            return DotFold::START;
+        }
+        DotFold {
+            best_gap: self.bg[l],
+            best: Some(targets[(st >> 8) as usize]),
+            is_hbond: st & 1 != 0,
+            too_close: st & 2 != 0,
+            hb_min: self.hm[l],
+            cause_dummy: st & 4 != 0,
+        }
+    }
+}
+
+/// Score the dots of one atom state against `targets` in order, as
+/// `check_dot` and `accumulate_dot` do one dot at a time: dots inside an atom
+/// of `excl` are skipped and the rest accumulate into `ret` in dot order.
+/// Dots go through in chunks of `LANES`, each test over a chunk at once (the
+/// compiler vectorizes the fixed-size loops) with the scalar arithmetic, so
+/// the results are the same bits; each dot's fold keeps the target order.
+#[allow(clippy::too_many_arguments)]
+fn score_dot_lanes(
+    s: &DotScorer,
+    src: &AtomInfo,
+    pa: Vec3,
+    dots: &DotsSoa,
+    excl: &[(Vec3, f64)],
+    targets: &[PTarget],
+    lanes: &mut LaneBufs,
+    ret: &mut ScoreDotsResult,
+) {
+    fold_dot_lanes(s, src, pa, dots, excl, targets, lanes, |_, r| accumulate_dot(s, r, ret));
+}
+
+/// The chunked fold of `score_dot_lanes`, handing each dot that finds a
+/// target to `emit` (dot index and result), in dot order.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn fold_dot_lanes(
+    s: &DotScorer,
+    src: &AtomInfo,
+    pa: Vec3,
+    dots: &DotsSoa,
+    excl: &[(Vec3, f64)],
+    targets: &[PTarget],
+    lanes: &mut LaneBufs,
+    mut emit: impl FnMut(usize, Option<(OverlapType, f64, f64, bool)>),
+) {
+    let LaneBufs { targets: lt, hits } = lanes;
+    lane_targets(s, src, targets, lt);
+    if lt.is_empty() {
+        return;
+    }
+    // a chunk with no target in reach of its probes cannot score
+    target_hits(dots, pa, lt, hits);
+    for (ci, &(cd, rd, _, _)) in dots.bounds.iter().enumerate() {
+        let near_t = hits.chunk(ci);
+        if near_t.iter().all(|&w| w == 0) {
             continue;
         }
-        let mut bg = [1e100f64; LANES];
-        let mut st = [LANE_NO_TARGET; LANES];
-        let mut hm = [0.0f64; LANES];
-        for t in near_t.iter() {
-            let mut within = [false; LANES];
-            for l in 0..LANES {
-                let (rx, ry, rz) = (qx[l] - t.pos.x, qy[l] - t.pos.y, qz[l] - t.pos.z);
-                within[l] = live[l] & (rx * rx + ry * ry + rz * rz <= t.prb2);
-            }
-            if !within.iter().any(|&x| x) {
-                continue;
-            }
-            let neg_hbm = -t.hbm;
-            for l in 0..LANES {
-                let (rx, ry, rz) = (ax[l] - t.pos.x, ay[l] - t.pos.y, az[l] - t.pos.z);
-                let gap = (rx * rx + ry * ry + rz * rz).sqrt() - t.vdw;
-                let upd = within[l] & (gap < bg[l]);
-                let new_state = t.base | (((t.hb & (gap < neg_hbm)) as u64) << 1);
-                bg[l] = if upd { gap } else { bg[l] };
-                st[l] = if upd { new_state } else { st[l] };
-                hm[l] = if upd & t.hb { t.hbm } else { hm[l] };
-            }
+        let start = ci * LANES;
+        let m = (dots.n - start).min(LANES);
+        let c = Chunk::at(pa, dots, start);
+        let live = c.live(m, excl, pa + cd, rd);
+        if !live.iter().any(|&x| x) {
+            continue;
         }
+        let mut f = LaneFold::START;
+        for_bits(near_t, |ti| f.step(&c, &live, &lt[ti]));
         // finish and accumulate in dot order
         for l in 0..m {
-            if !live[l] || st[l] == LANE_NO_TARGET {
-                continue;
+            if live[l] && f.st[l] != LANE_NO_TARGET {
+                emit(start + l, Some(f.finish(l, s, src, targets, c.dot(l))));
             }
-            let fold = DotFold {
-                best_gap: bg[l],
-                best: Some(targets[(st[l] >> 8) as usize]),
-                is_hbond: st[l] & 1 != 0,
-                too_close: st[l] & 2 != 0,
-                hb_min: hm[l],
-                cause_dummy: st[l] & 4 != 0,
-            };
-            accumulate_dot(s, fold.finish(s, src, v3(ax[l], ay[l], az[l])), ret);
         }
-        start += LANES;
     }
 }
 
 /// Add one dot's result to the running sums (the body of `score_dots`).
 #[inline]
 fn accumulate_dot(s: &DotScorer, r: Option<(OverlapType, f64, f64, bool)>, ret: &mut ScoreDotsResult) {
-    if let Some((ot, gap, overlap, annular)) = r {
-        let it = s.interaction_type(ot, gap, true);
-        match it {
-            InteractionType::Invalid => {}
-            InteractionType::WideContact | InteractionType::CloseContact | InteractionType::WeakHydrogenBond => {
-                if !annular {
-                    let sg = gap / s.gap_scale;
-                    ret.attract += (-sg * sg).exp();
-                }
+    if let Some((kind, val)) = dot_addend(s, r) {
+        add_to(ret, kind, val);
+    }
+}
+
+/// Which sum of `ScoreDotsResult` a dot adds to.
+const ADD_ATTRACT: u8 = 0;
+const ADD_BUMP: u8 = 1;
+/// A bump that also sets `has_bad_bump`.
+const ADD_BAD_BUMP: u8 = 2;
+const ADD_HBOND: u8 = 3;
+
+/// The sum one dot's result adds to and the amount, as `accumulate_dot`
+/// adds it, or None when it adds nothing.
+#[inline]
+fn dot_addend(s: &DotScorer, r: Option<(OverlapType, f64, f64, bool)>) -> Option<(u8, f64)> {
+    let (ot, gap, overlap, annular) = r?;
+    match s.interaction_type(ot, gap, true) {
+        InteractionType::Invalid => None,
+        InteractionType::WideContact | InteractionType::CloseContact | InteractionType::WeakHydrogenBond => {
+            if annular {
+                return None;
             }
-            InteractionType::SmallOverlap | InteractionType::Bump | InteractionType::BadBump => {
-                ret.bump += -s.bump_weight * overlap;
-                if it == InteractionType::BadBump {
-                    ret.has_bad_bump = true;
-                }
+            let sg = gap / s.gap_scale;
+            Some((ADD_ATTRACT, (-sg * sg).exp()))
+        }
+        InteractionType::SmallOverlap | InteractionType::Bump => Some((ADD_BUMP, -s.bump_weight * overlap)),
+        InteractionType::BadBump => Some((ADD_BAD_BUMP, -s.bump_weight * overlap)),
+        InteractionType::StandardHydrogenBond => Some((ADD_HBOND, s.hbond_weight * overlap)),
+    }
+}
+
+#[inline]
+fn add_to(ret: &mut ScoreDotsResult, kind: u8, val: f64) {
+    match kind {
+        ADD_ATTRACT => ret.attract += val,
+        ADD_HBOND => ret.hbond += val,
+        _ => {
+            ret.bump += val;
+            ret.has_bad_bump |= kind == ADD_BAD_BUMP;
+        }
+    }
+}
+
+/// A Mover atom's dots evaluated once for all of its fine poses: the addends
+/// of the dots that find a target, and per pose the atom's place and the own
+/// Mover's excluded atoms that can trim them.
+struct FineShared {
+    adds: Vec<DotAdd>,
+    pa: Vec<Vec3>,
+    trims: Vec<Vec<(Vec3, f64)>>,
+}
+
+/// One dot's addend to an atom score: dot index, sum and amount.
+#[derive(Clone, Copy)]
+struct DotAdd {
+    k: u32,
+    kind: u8,
+    val: f64,
+}
+
+/// An atom's score at `pa` from its dot addends, leaving out the dots inside
+/// an atom of `trim`, added in dot order as `score_dot_lanes` adds them.
+fn sum_addends(adds: &[DotAdd], dots: &DotsSoa, pa: Vec3, trim: &[(Vec3, f64)]) -> ScoreDotsResult {
+    let mut ret = ScoreDotsResult::default();
+    let [dx, dy, dz] = &dots.d;
+    for ad in adds {
+        let k = ad.k as usize;
+        let q = v3(pa.x + dx[k], pa.y + dy[k], pa.z + dz[k]);
+        if !trim.iter().any(|&(pe, re)| q.dist_sq(pe) < re * re) {
+            add_to(&mut ret, ad.kind, ad.val);
+        }
+    }
+    ret
+}
+
+/// Largest distance between an atom's positions in several poses for one
+/// evaluation of its dots to serve them all: far above the rounding error of
+/// a pose that should leave the atom in place, and far below any distance
+/// that moves a score by more than rounding.
+const SHARE_TOL: f64 = 1e-9;
+
+/// A sphere through which another Mover of the clique reaches a dot: one of
+/// its excluded atoms in some state, tested on the dot (`probe` false, strict
+/// test), or one of its targets in some state, tested on the dot's probe.
+#[derive(Clone, Copy)]
+struct DepSphere {
+    /// Bit of the Mover in the atom's list of other Movers.
+    k: u32,
+    probe: bool,
+    c: Vec3,
+    r: f64,
+    r2: f64,
+}
+
+/// Scratch space of `classify_dots`, kept between calls.
+#[derive(Default)]
+struct ClassifyBufs {
+    lanes: LaneBufs,
+    /// Per chunk, the spheres that can reach it.
+    shits: ChunkMasks,
+}
+
+/// Sort the dots of one atom state for `atom_factors_dotwise`, in dot order,
+/// with the chunked tests of `fold_dot_lanes`. `targets` holds the static
+/// targets (the first `n_static`) and then the own Mover's. A dot inside an
+/// atom of `excl` drops out. A dot that no sphere of `spheres` reaches goes
+/// to `base` with its result over all of `targets`; any other goes to `group`
+/// with the bits (`DepSphere::k`) of the Movers that reach it and its fold
+/// over the static targets alone.
+#[allow(clippy::too_many_arguments)]
+fn classify_dots(
+    s: &DotScorer,
+    src: &AtomInfo,
+    pa: Vec3,
+    dots: &DotsSoa,
+    excl: &[(Vec3, f64)],
+    targets: &[PTarget],
+    n_static: usize,
+    spheres: &[DepSphere],
+    bufs: &mut ClassifyBufs,
+    mut base: impl FnMut(usize, Option<(OverlapType, f64, f64, bool)>),
+    mut group: impl FnMut(u64, usize, DotFold),
+) {
+    let ClassifyBufs { lanes: LaneBufs { targets: lt, hits }, shits } = bufs;
+    lane_targets(s, src, targets, lt);
+    // the chunks each target and each sphere can reach
+    target_hits(dots, pa, lt, hits);
+    shits.reset(dots.bounds.len(), spheres.len());
+    for (si, sp) in spheres.iter().enumerate() {
+        let b = if sp.probe { &dots.probe_bounds } else { &dots.dot_bounds };
+        shits.mark(b, sp.c - pa, sp.r, si);
+    }
+    for (ci, &(cd, rd, _, _)) in dots.bounds.iter().enumerate() {
+        // a chunk that meets neither a target nor another Mover adds nothing
+        let (near_t, near_s) = (hits.chunk(ci), shits.chunk(ci));
+        if near_t.iter().chain(near_s).all(|&w| w == 0) {
+            continue;
+        }
+        let start = ci * LANES;
+        let m = (dots.n - start).min(LANES);
+        let c = Chunk::at(pa, dots, start);
+        let live = c.live(m, excl, pa + cd, rd);
+        if !live.iter().any(|&x| x) {
+            continue;
+        }
+        let mut dep = [0u64; LANES];
+        for_bits(near_s, |si| {
+            let sp = &spheres[si];
+            let hit = if sp.probe { c.probe_within(sp.c, sp.r2) } else { c.dot_within(sp.c, sp.r2) };
+            for l in 0..LANES {
+                dep[l] |= ((hit[l] & live[l]) as u64) << sp.k;
             }
-            InteractionType::StandardHydrogenBond => {
-                ret.hbond += s.hbond_weight * overlap;
+        });
+        // the static targets, then the own Mover's
+        let mut f = LaneFold::START;
+        let mut static_fold = f;
+        let mut own_started = false;
+        for_bits(near_t, |ti| {
+            let t = &lt[ti];
+            if !own_started && (t.base >> 8) as usize >= n_static {
+                static_fold = f;
+                own_started = true;
+            }
+            f.step(&c, &live, t);
+        });
+        if !own_started {
+            static_fold = f;
+        }
+        for l in 0..m {
+            if !live[l] {
+                continue;
+            }
+            if dep[l] == 0 {
+                if f.st[l] != LANE_NO_TARGET {
+                    base(start + l, Some(f.finish(l, s, src, targets, c.dot(l))));
+                }
+            } else {
+                group(dep[l], start + l, static_fold.fold(l, targets));
             }
         }
     }
@@ -1010,7 +1543,7 @@ fn accumulate_dot(s: &DotScorer, r: Option<(OverlapType, f64, f64, bool)>, ret: 
 struct ScoreBuf {
     targets: Vec<Target>,
     prepared: Vec<PTarget>,
-    lane_targets: Vec<LaneTarget>,
+    lanes: LaneBufs,
     excl: Vec<(Vec3, f64)>,
     dots: Vec<DotPair>,
 }
@@ -1160,8 +1693,12 @@ pub fn optimize_debug(
     let flip_states = parse_flip_states(&p.flip_states, p.compat);
     let mut all_deletes: FxHashSet<u32> = FxHashSet::default();
     for mi in models {
-        let initial_pos: Vec<(u32, Vec3, AtomInfo)> =
-            mi.model_atoms.iter().map(|&a| (a, w.pos[a as usize], w.info[a as usize])).collect();
+        // only a later alternate starts again from these
+        let initial_pos: Vec<(u32, Vec3, AtomInfo)> = if mi.alts.len() > 1 {
+            mi.model_atoms.iter().map(|&a| (a, w.pos[a as usize], w.info[a as usize])).collect()
+        } else {
+            Vec::new()
+        };
         let mut first = true;
         let mut model_deletes: FxHashSet<u32> = FxHashSet::default();
         for (alt, conf_atoms) in &mi.alts {
@@ -1175,7 +1712,7 @@ pub fn optimize_debug(
                 }
             }
             first = false;
-            let all_bonds = if p.compat { None } else { Some(keep_bonds_within(w, conf_atoms)) };
+            let old_bonds = if p.compat { Vec::new() } else { keep_bonds_within(w, conf_atoms) };
             let dels = run_one(w, p, mi.report_model, alt, conf_atoms.clone(), rotatable_h, &flip_states, n_models, &mut out, debug.as_deref_mut());
             if p.compat {
                 model_deletes = dels;
@@ -1189,8 +1726,8 @@ pub fn optimize_debug(
                 model_deletes.extend(dels);
             }
             w.clear_phantoms();
-            if let Some(bonds) = all_bonds {
-                w.bonded = bonds;
+            for (a, bonds) in old_bonds {
+                w.bonded[a as usize] = bonds;
             }
         }
         if p.compat {
@@ -1224,17 +1761,31 @@ pub fn optimize_debug(
 /// no rotator (nor do the methyls of an alternate threonine or valine, or the
 /// ring of a histidine split at CG). A neighbor with no alternate in the
 /// conformer stays (an HG kept in the main conformation of a serine whose only
-/// OG is labeled A).
-fn keep_bonds_within(w: &mut World, conf_atoms: &[u32]) -> Vec<Vec<u32>> {
+/// OG is labeled A). Returns the lists it changed, with their old contents.
+fn keep_bonds_within(w: &mut World, conf_atoms: &[u32]) -> Vec<(u32, Vec<u32>)> {
     let mut inside = vec![false; w.len()];
-    let mut present: FxHashSet<(u32, &str)> = FxHashSet::default();
     for &a in conf_atoms {
         inside[a as usize] = true;
-        present.insert((w.labels[a as usize].rg, w.labels[a as usize].name.as_str()));
+    }
+    // a neighbor can be replaced only in a residue group with atoms outside
+    // the conformer
+    let split: FxHashSet<u32> = w.labels.iter().zip(&inside).filter(|x| !*x.1).map(|x| x.0.rg).collect();
+    let mut present: FxHashSet<(u32, &str)> = FxHashSet::default();
+    for &a in conf_atoms {
+        let l = &w.labels[a as usize];
+        if split.contains(&l.rg) {
+            present.insert((l.rg, l.name.as_str()));
+        }
     }
     let replaced = |m: u32| !inside[m as usize] && present.contains(&(w.labels[m as usize].rg, w.labels[m as usize].name.as_str()));
-    let within: Vec<Vec<u32>> = w.bonded.iter().map(|l| l.iter().copied().filter(|&m| !replaced(m)).collect()).collect();
-    std::mem::replace(&mut w.bonded, within)
+    let within: Vec<(u32, Vec<u32>)> = w
+        .bonded
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.iter().any(|&m| replaced(m)))
+        .map(|(a, l)| (a as u32, l.iter().copied().filter(|&m| !replaced(m)).collect()))
+        .collect();
+    within.into_iter().map(|(a, l)| (a, std::mem::replace(&mut w.bonded[a as usize], l))).collect()
 }
 
 /// Phantom hydrogens for a water oxygen (`getPhantomHydrogensFor`).
@@ -1387,6 +1938,7 @@ fn run_one(
         }
         removed.extend(set);
     }
+    let first_phantom = atoms.len();
     if !phantoms.is_empty() {
         let orig = atoms.len();
         for (pp, parent) in &phantoms {
@@ -1404,8 +1956,9 @@ fn run_one(
 
     // ---------------- Mover placement
     if !p.compat {
-        // include the phantoms (they count as potential touches)
-        nidx = NeighborIndex::new(w, &atoms, false);
+        // include the phantoms (they count as potential touches); no atom has
+        // moved, and the removed waters are in `removed`
+        nidx.add_late(w, &atoms[first_phantom..]);
     }
     let mut placement = Placement {
         movers: Vec::new(),
@@ -1445,21 +1998,11 @@ fn run_one(
             }
         }
     }
-    let all_pos: Vec<Vec<Vec<Vec3>>> = movers
-        .iter()
-        .map(|mv| {
-            let mut v: Vec<Vec<Vec3>> = mv.coarse_pos.clone();
-            for f in &mv.fine_pos {
-                v.extend(f.iter().cloned());
-            }
-            v
-        })
-        .collect();
     let mut bbox: Vec<(Vec3, Vec3)> = Vec::with_capacity(nm);
-    for (mi, mv) in movers.iter().enumerate() {
+    for mv in &movers {
         let mut lo = v3(1e10, 1e10, 1e10);
         let mut hi = v3(-1e10, -1e10, -1e10);
-        for ps in &all_pos[mi] {
+        for ps in mv.all_poses() {
             for (k, pt) in ps.iter().enumerate() {
                 let r = pr + w.info[mv.atoms[k] as usize].vdw_radius;
                 lo = v3(lo.x.min(pt.x - r), lo.y.min(pt.y - r), lo.z.min(pt.z - r));
@@ -1468,6 +2011,29 @@ fn run_one(
         }
         bbox.push((lo, hi));
     }
+    // per Mover atom, a sphere holding it in every pose (None when no pose
+    // has it); two atoms whose spheres lie farther apart than their reach
+    // meet in no pose
+    let pose_spheres: Vec<Vec<Option<(Vec3, f64)>>> = movers
+        .iter()
+        .map(|mv| {
+            (0..mv.atoms.len())
+                .map(|k| {
+                    let mut lo = v3(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+                    let mut hi = -lo;
+                    for q in mv.all_poses().filter_map(|ps| ps.get(k)) {
+                        lo = v3(lo.x.min(q.x), lo.y.min(q.y), lo.z.min(q.z));
+                        hi = v3(hi.x.max(q.x), hi.y.max(q.y), hi.z.max(q.z));
+                    }
+                    if lo.x > hi.x {
+                        return None;
+                    }
+                    let c = (lo + hi) * 0.5;
+                    Some((c, mv.all_poses().filter_map(|ps| ps.get(k)).map(|q| q.dist(c)).fold(0.0, f64::max)))
+                })
+                .collect()
+        })
+        .collect();
     let mut edges: Vec<(usize, usize)> = Vec::new();
     {
         // candidate pairs by bounding-box overlap using a sweep on x
@@ -1494,17 +2060,27 @@ fn run_one(
                 let rj: Vec<f64> = mj.atoms.iter().map(|&a| w.info[a as usize].vdw_radius).collect();
                 let mut hit_i = vec![false; mi.atoms.len()];
                 let mut hit_j = vec![false; mj.atoms.len()];
-                for p1 in &all_pos[i] {
-                    for (a1, x1) in p1.iter().enumerate() {
-                        let lim1 = 2.0 * pr + ri[a1];
-                        for p2 in &all_pos[j] {
-                            for (a2, x2) in p2.iter().enumerate() {
-                                let lim = lim1 + rj[a2];
-                                if x1.dist_sq(*x2) <= lim * lim {
-                                    hit_i[a1] = true;
-                                    hit_j[a2] = true;
-                                }
-                            }
+                // whether any poses bring the two atoms within reach; a pair
+                // already counted for both atoms, or whose pose spheres keep
+                // it out of reach, needs no search
+                for a1 in 0..mi.atoms.len() {
+                    let lim1 = 2.0 * pr + ri[a1];
+                    for a2 in 0..mj.atoms.len() {
+                        if hit_i[a1] && hit_j[a2] {
+                            continue;
+                        }
+                        let lim = lim1 + rj[a2];
+                        let (Some((c1, r1)), Some((c2, r2))) = (pose_spheres[i][a1], pose_spheres[j][a2]) else { continue };
+                        let apart = r1 + r2 + lim + POSE_SPHERE_SLACK;
+                        if c1.dist_sq(c2) > apart * apart {
+                            continue;
+                        }
+                        let hit = mi.all_poses().filter_map(|p1| p1.get(a1)).any(|x1| {
+                            mj.all_poses().filter_map(|p2| p2.get(a2)).any(|x2| x1.dist_sq(*x2) <= lim * lim)
+                        });
+                        if hit {
+                            hit_i[a1] = true;
+                            hit_j[a2] = true;
                         }
                     }
                 }
@@ -1658,26 +2234,29 @@ fn run_one(
     // static grid entries near each Mover atom over all of its positions;
     // fixed mode only: compat's grid files atoms by another position than it
     // measures (Reduce2's query misses some), so a filtered superset differs
-    let mut near: FxHashMap<u32, (Vec3, f64, Vec<(Vec3, AtomInfo)>)> = FxHashMap::default();
+    let mut near: FxHashMap<u32, (Vec3, f64, u32, u32)> = FxHashMap::default();
+    let mut near_entries: Vec<(Vec3, AtomInfo)> = Vec::new();
     for mv in movers.iter().filter(|_| !p.compat) {
         for slot in 0..mv.n_moved {
-            let mut ps: Vec<Vec3> = mv.coarse_pos.iter().filter_map(|c| c.get(slot).copied()).collect();
-            ps.extend(mv.fine_pos.iter().flatten().filter_map(|f| f.get(slot).copied()));
-            if ps.is_empty() {
+            // the atom's positions over all coarse and fine poses
+            let poses = || mv.coarse_pos.iter().filter_map(move |c| c.get(slot)).chain(mv.fine.iter().filter_map(move |f| f.get(slot)));
+            let (sum, n) = poses().fold((Vec3::ZERO, 0usize), |(acc, n), &q| (acc + q, n + 1));
+            if n == 0 {
                 continue;
             }
             let a = mv.atoms[slot];
-            let c = ps.iter().fold(Vec3::ZERO, |acc, &q| acc + q) / ps.len() as f64;
-            let spread = ps.iter().map(|q| q.dist(c)).fold(0.0, f64::max);
+            let c = sum / n as f64;
+            // the root of the largest square is the largest distance
+            let spread = poses().map(|q| q.dist_sq(c)).fold(0.0, f64::max).sqrt();
             let r = max_vdw + w.info[a as usize].vdw_radius + 2.0 * p.probe.probe_radius + spread + NEAR_MARGIN;
             let excl: &[u32] = exclude.get(&a).map(|v| v.as_slice()).unwrap_or(&[]);
-            let mut entries = Vec::new();
+            let lo = near_entries.len() as u32;
             grid.for_each_within(c, 0.0, r, |b, pb, _| {
                 if !excl.contains(&b) && w.occ[b as usize].abs() >= p.min_occupancy {
-                    entries.push((pb, w.info[b as usize]));
+                    near_entries.push((pb, w.info[b as usize]));
                 }
             });
-            near.insert(a, (c, r, entries));
+            near.insert(a, (c, r, lo, near_entries.len() as u32));
         }
     }
 
@@ -1695,6 +2274,7 @@ fn run_one(
         dots_soa,
         dot_reach,
         near,
+        near_entries,
         max_vdw,
         local,
     };
@@ -1709,17 +2289,17 @@ fn run_one(
     };
 
     // initial scores into mover info
-    for (ci, comp) in components.iter().enumerate() {
+    for (ci, comp) in components.iter().enumerate().filter(|_| p.report) {
         for (k, &m) in comp.iter().enumerate() {
             mover_info[m as usize] += &format!(" Initial score: {:.2}", comp_results[ci].initial[k]);
         }
     }
-    for &ci in &singles {
+    for &ci in singles.iter().filter(|_| p.report) {
         info += &comp_results[ci].coarse_info;
         info += &vcheck(v, 1, &format!("Singleton optimized with score {:.2}\n", comp_results[ci].coarse_best));
     }
     info += &tm.report("optimize singletons (coarse)");
-    for &ci in &groups {
+    for &ci in groups.iter().filter(|_| p.report) {
         info += &comp_results[ci].coarse_info;
         info += &vcheck(v, 1, &format!("Clique optimized with score {:.2}\n", comp_results[ci].coarse_best));
     }
@@ -1727,7 +2307,7 @@ fn run_one(
     info += &vcheck(v, 1, "Fine optimization on all Movers\n");
     // fine-phase messages in global Mover order
     let mut fine_msgs: Vec<(u32, String)> = Vec::new();
-    for r in &comp_results {
+    for r in comp_results.iter().filter(|_| p.report) {
         fine_msgs.extend(r.fine_info.iter().cloned());
     }
     fine_msgs.sort_by_key(|x| x.0);
@@ -1744,48 +2324,52 @@ fn run_one(
         for (k, &m) in comp.iter().enumerate() {
             final_cfg[m as usize] = comp_results[ci].cfg[k];
             high[m as usize] = comp_results[ci].high[k];
-            pose_suffix[m as usize] = comp_results[ci].annot[k].clone();
-        }
-    }
-    let describe = |m: usize| -> String {
-        let mv = &movers[m];
-        let cfg = final_cfg[m];
-        let fine = match cfg {
-            Cfg::Fine(_, f) => Some(f as usize),
-            Cfg::Coarse(_) => None,
-        };
-        let mut d = mv.pose_description(cfg.coarse(), fine, !p.skip_bond_fixup);
-        d += &pose_suffix[m];
-        format!("  {} final score: {:.2} pose {}\n", mover_info[m], high[m], d)
-    };
-    info += &vcheck(v, 1, &format!("BEGIN REPORT: Model {} Alt '{}':\n", report_model, alt));
-    let mut sorted_groups = groups.clone();
-    sorted_groups.sort_by(|&a, &b| components[b].len().cmp(&components[a].len()));
-    for &ci in &sorted_groups {
-        let comp = &components[ci];
-        info += &vcheck(v, 1, &format!(" Set of {} Movers:", comp.len()));
-        let mut initial = 0.0;
-        let mut fin = 0.0;
-        for (k, &m) in comp.iter().enumerate() {
-            if p.compat {
-                // The original re-parses the printed (rounded) initial score.
-                initial += format!("{:.2}", comp_results[ci].initial[k]).parse::<f64>().unwrap();
-            } else {
-                initial += comp_results[ci].initial[k];
+            if let Some(a) = comp_results[ci].annot.get(k) {
+                pose_suffix[m as usize] = a.clone();
             }
-            fin += high[m as usize];
-        }
-        info += &vcheck(v, 1, &format!(" Totals: initial score {:.2}, final score {:.2}\n", initial, fin));
-        for &m in comp {
-            info += &vcheck(v, 1, &describe(m as usize));
         }
     }
-    info += &vcheck(v, 1, " Singleton Movers:\n");
-    for &ci in &singles {
-        let m = components[ci][0] as usize;
-        info += &vcheck(v, 1, &describe(m));
+    if p.report {
+        let describe = |m: usize| -> String {
+            let mv = &movers[m];
+            let cfg = final_cfg[m];
+            let fine = match cfg {
+                Cfg::Fine(_, f) => Some(f as usize),
+                Cfg::Coarse(_) => None,
+            };
+            let mut d = mv.pose_description(cfg.coarse(), fine, !p.skip_bond_fixup);
+            d += &pose_suffix[m];
+            format!("  {} final score: {:.2} pose {}\n", mover_info[m], high[m], d)
+        };
+        info += &vcheck(v, 1, &format!("BEGIN REPORT: Model {} Alt '{}':\n", report_model, alt));
+        let mut sorted_groups = groups.clone();
+        sorted_groups.sort_by(|&a, &b| components[b].len().cmp(&components[a].len()));
+        for &ci in &sorted_groups {
+            let comp = &components[ci];
+            info += &vcheck(v, 1, &format!(" Set of {} Movers:", comp.len()));
+            let mut initial = 0.0;
+            let mut fin = 0.0;
+            for (k, &m) in comp.iter().enumerate() {
+                if p.compat {
+                    // The original re-parses the printed (rounded) initial score.
+                    initial += format!("{:.2}", comp_results[ci].initial[k]).parse::<f64>().unwrap();
+                } else {
+                    initial += comp_results[ci].initial[k];
+                }
+                fin += high[m as usize];
+            }
+            info += &vcheck(v, 1, &format!(" Totals: initial score {:.2}, final score {:.2}\n", initial, fin));
+            for &m in comp {
+                info += &vcheck(v, 1, &describe(m as usize));
+            }
+        }
+        info += &vcheck(v, 1, " Singleton Movers:\n");
+        for &ci in &singles {
+            let m = components[ci][0] as usize;
+            info += &vcheck(v, 1, &describe(m));
+        }
+        info += &vcheck(v, 1, "END REPORT\n");
     }
-    info += &vcheck(v, 1, "END REPORT\n");
 
     // ---------------- apply final states and fix-ups to the world
     let mut deletes: FxHashSet<u32> = placement_deletes.clone();
@@ -1796,13 +2380,13 @@ fn run_one(
             let a = mv.atoms[slot];
             w.pos[a as usize] = match cfg {
                 Cfg::Coarse(c) => mv.coarse_pos[c as usize][slot],
-                Cfg::Fine(c, f) => mv.fine_pos[c as usize][f as usize][slot],
+                Cfg::Fine(c, f) => mv.fine.pos(c as usize, f as usize)[slot],
             };
         }
-        for (slot, inf) in mv.coarse_info[c].iter().enumerate() {
+        for (slot, inf) in in_state(&mv.coarse_info, c).iter().enumerate() {
             w.info[mv.atoms[slot] as usize] = *inf;
         }
-        for (slot, &d) in mv.coarse_del[c].iter().enumerate() {
+        for (slot, &d) in in_state(&mv.coarse_del, c).iter().enumerate() {
             if d {
                 deletes.insert(mv.atoms[slot]);
             } else {
@@ -1815,14 +2399,16 @@ fn run_one(
         info += &vcheck(v, 1, "FixUp on all Movers\n");
         for (m, mv) in movers.iter().enumerate() {
             let loc = final_cfg[m].coarse();
-            info += &vcheck(v, 3, &format!("FixUp on {} coarse location {}\n", mover_info[m], loc));
-            for (i, &pp) in mv.fixup_pos[loc].iter().enumerate() {
+            if p.report {
+                info += &vcheck(v, 3, &format!("FixUp on {} coarse location {}\n", mover_info[m], loc));
+            }
+            for (i, &pp) in in_state(&mv.fixup_pos, loc).iter().enumerate() {
                 w.pos[mv.atoms[i] as usize] = pp;
             }
-            for (i, inf) in mv.fixup_info[loc].iter().enumerate() {
+            for (i, inf) in in_state(&mv.fixup_info, loc).iter().enumerate() {
                 w.info[mv.atoms[i] as usize] = *inf;
             }
-            for (i, &d) in mv.fixup_del[loc].iter().enumerate() {
+            for (i, &d) in in_state(&mv.fixup_del, loc).iter().enumerate() {
                 if d {
                     deletes.insert(mv.atoms[i]);
                 } else {
@@ -1863,10 +2449,10 @@ fn apply_coarse(w: &mut World, mv: &Mover, c: usize, deleted: &mut FxHashMap<u32
     for slot in 0..mv.n_moved {
         w.pos[mv.atoms[slot] as usize] = mv.coarse_pos[c][slot];
     }
-    for (slot, inf) in mv.coarse_info[c].iter().enumerate() {
+    for (slot, inf) in in_state(&mv.coarse_info, c).iter().enumerate() {
         w.info[mv.atoms[slot] as usize] = *inf;
     }
-    for (slot, &d) in mv.coarse_del[c].iter().enumerate() {
+    for (slot, &d) in in_state(&mv.coarse_del, c).iter().enumerate() {
         deleted.insert(mv.atoms[slot], d);
     }
 }
@@ -1907,9 +2493,15 @@ const DOT_GROUP_STATES_LIMIT: usize = 1 << 17;
 /// may take; past it the clique is optimized by coordinate ascent.
 const ATOM_DOT_WORK_LIMIT: usize = 1 << 23;
 const ELIMINATION_TABLE_LIMIT: usize = 1 << 22;
+/// Slack on the pose spheres of the interaction graph (far above rounding
+/// error).
+const POSE_SPHERE_SLACK: f64 = 1e-6;
 
 /// The atom's score factors, or None when a group of its dots depends on more
-/// joint states than `DOT_GROUP_STATES_LIMIT`.
+/// joint states than `DOT_GROUP_STATES_LIMIT`. When the atom keeps its place
+/// and info in every own state and its own Mover offers it no targets, its
+/// dots are sorted and scored once, and each own state only drops the dots
+/// inside the own Mover's excluded atoms in that state.
 fn atom_factors_dotwise(
     ctx: &Ctx,
     comp: &[u32],
@@ -1918,7 +2510,88 @@ fn atom_factors_dotwise(
     slot: usize,
     abandoned: &std::sync::atomic::AtomicBool,
 ) -> Option<(Vec<Factor>, usize, usize)> {
+    thread_local! {
+        static BUFS: std::cell::RefCell<DotwiseBufs> = std::cell::RefCell::new(DotwiseBufs::default());
+    }
+    BUFS.with_borrow_mut(|bufs| atom_factors_dotwise_in(ctx, comp, doms, i, slot, abandoned, bufs))
+}
+
+/// The table of dependency set `dep` among `tables`, added as `size` zeros
+/// when new.
+fn table_for<'t>(tables: &'t mut Vec<(Vec<usize>, Vec<f64>)>, dep: &[usize], size: usize) -> &'t mut Vec<f64> {
+    let k = match tables.iter().position(|t| t.0 == dep) {
+        Some(k) => k,
+        None => {
+            tables.push((dep.to_vec(), vec![0.0; size]));
+            tables.len() - 1
+        }
+    };
+    &mut tables[k].1
+}
+
+/// Scratch space of `atom_factors_dotwise`, kept per thread between calls.
+/// Each call clears what it uses, so nothing carries over.
+#[derive(Default)]
+struct DotwiseBufs {
+    seq: Vec<(u32, Option<usize>)>,
+    others: Vec<usize>,
+    live: Vec<(usize, Vec3, AtomInfo)>,
+    excl_fixed: Vec<(Vec3, f64)>,
+    excl_dyn: Vec<Vec<Vec<(Vec3, f64)>>>,
+    static_t: Vec<Target>,
+    static_p: Vec<PTarget>,
+    own_p: Vec<PTarget>,
+    lane_list: Vec<PTarget>,
+    seg_targets: Vec<Vec<Vec<Target>>>,
+    seg_prepared: Vec<Vec<Vec<PTarget>>>,
+    spheres: Vec<DepSphere>,
+    cbufs: ClassifyBufs,
+    own_t: Vec<Target>,
+    trims: Vec<Vec<(Vec3, f64)>>,
+    base_adds: Vec<(DotAdd, u64)>,
+    adds: Vec<DotAdd>,
+}
+
+/// Shape `v` as one empty list per state for each entry of `dims`, keeping
+/// the space of lists already there.
+fn shape_lists<T>(v: &mut Vec<Vec<Vec<T>>>, dims: impl ExactSizeIterator<Item = usize>) {
+    v.resize_with(dims.len(), Vec::new);
+    for (per_state, d) in v.iter_mut().zip(dims) {
+        per_state.resize_with(d, Vec::new);
+        per_state.iter_mut().for_each(Vec::clear);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn atom_factors_dotwise_in(
+    ctx: &Ctx,
+    comp: &[u32],
+    doms: &[usize],
+    i: usize,
+    slot: usize,
+    abandoned: &std::sync::atomic::AtomicBool,
+    bufs: &mut DotwiseBufs,
+) -> Option<(Vec<Factor>, usize, usize)> {
     use std::sync::atomic::Ordering::Relaxed;
+    let DotwiseBufs {
+        seq,
+        others,
+        live,
+        excl_fixed,
+        excl_dyn,
+        static_t,
+        static_p,
+        own_p,
+        lane_list,
+        seg_targets,
+        seg_prepared,
+        spheres,
+        cbufs,
+        own_t,
+        trims,
+        base_adds,
+        adds,
+    } = bufs;
     if abandoned.load(Relaxed) {
         return None;
     }
@@ -1937,10 +2610,11 @@ fn atom_factors_dotwise(
     let r_live = w.info[a as usize].vdw_radius;
     let nearby = ctx.max_vdw + r_live + 2.0 * pr;
     let excl: &[u32] = ctx.exclude.get(&a).map(|v| v.as_slice()).unwrap_or(&[]);
-    let dots_all = &ctx.dots[&a];
+    let soa: &DotsSoa = &ctx.dots_soa[&a];
+    let [dx, dy, dz] = &soa.d;
     // Movers of the clique that can touch the atom, in `atom_movers` order;
     // `None` marks the atom's own Mover
-    let mut seq: Vec<(u32, Option<usize>)> = Vec::new();
+    seq.clear();
     if let Some(ms) = ctx.atom_movers.get(&a) {
         for &om in ms {
             let li = ctx.local[om as usize];
@@ -1950,15 +2624,22 @@ fn atom_factors_dotwise(
             seq.push((om, if li as usize == i { None } else { Some(li as usize) }));
         }
     }
-    let others: Vec<usize> = {
-        let mut v: Vec<usize> = seq.iter().filter_map(|x| x.1).collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
+    others.clear();
+    others.extend(seq.iter().filter_map(|x| x.1));
+    others.sort_unstable();
+    others.dedup();
+    let (seq, others) = (&seq[..], &others[..]);
+    if others.len() > 64 {
+        // the dot sorting keeps the reaching Movers as bits of a u64; an atom
+        // within reach of more Movers settles the clique for coordinate ascent
+        abandoned.store(true, Relaxed);
+        return None;
+    }
     let kidx = |o: usize| others.iter().position(|&x| x == o).unwrap();
+    let dep_of = |mask: u64| -> Vec<usize> { others.iter().enumerate().filter(|&(k, _)| mask >> k & 1 != 0).map(|(_, &o)| o).collect() };
+    let joint_others = others.iter().fold(1usize, |acc, &o| acc.saturating_mul(doms[o]));
     // tables by dependency set (local indices of other Movers, sorted)
-    let mut tables: FxHashMap<Vec<usize>, Vec<f64>> = FxHashMap::default();
+    let mut tables: Vec<(Vec<usize>, Vec<f64>)> = Vec::new();
     let scope_of = |dep: &[usize]| -> Vec<usize> {
         let mut sc: Vec<usize> = dep.to_vec();
         sc.push(i);
@@ -1968,8 +2649,8 @@ fn atom_factors_dotwise(
     let mut st = CliqueState { movers: comp, cfg: vec![Cfg::Coarse(0); comp.len()] };
     let (mut evaluated, mut stand_for) = (0usize, 0usize);
     let mut dot_work = 0usize;
-    let mut lane_list: Vec<PTarget> = Vec::new();
-    let mut lane_targets: Vec<LaneTarget> = Vec::new();
+    // the own states in which the atom scores, with its position and info
+    live.clear();
     for own in 0..doms[i] {
         let own_cfg = Cfg::Coarse(own as u16);
         if ctx.mover_atom_deleted(m, slot, own_cfg) {
@@ -1977,23 +2658,49 @@ fn atom_factors_dotwise(
         }
         st.cfg[i] = own_cfg;
         let (pa, _, ia) = ctx.atom_state(&st, a);
-        if ia.is_ion && sc.ignore_ions {
-            continue;
+        if !(ia.is_ion && sc.ignore_ions) {
+            live.push((own, pa, ia));
         }
-        // excluded atoms: fixed ones (static, own Mover, Movers outside the
-        // clique) and, per other Mover and state, the dynamic ones
-        let mut excl_fixed: Vec<(Vec3, f64)> = Vec::new();
-        let mut excl_dyn: Vec<Vec<Vec<(Vec3, f64)>>> = others.iter().map(|&o| vec![Vec::new(); doms[o]]).collect();
-        // one farther than the dots reach plus its radius cannot cover a dot
-        let reach = ctx.dot_reach.get(&a).copied().unwrap_or(f64::INFINITY) + EXCLUSION_MARGIN;
-        let covers = |pe: Vec3, re: f64| pe.dist_sq(pa) < (reach + re) * (reach + re);
+    }
+    // Mover `om`'s atoms in state `cfg` that are targets of the atom at `pa`
+    let mover_targets = |om: u32, cfg: Cfg, pa: Vec3, ia: &AtomInfo, v: &mut Vec<Target>| {
+        let omv = &ctx.movers[om as usize];
+        v.clear();
+        for oslot in 0..omv.n_moved {
+            let b = omv.atoms[oslot];
+            if b == a || ctx.mover_atom_deleted(om, oslot, cfg) {
+                continue;
+            }
+            let pb = ctx.mover_atom_pos(om, oslot, cfg);
+            let d = pb.dist(pa);
+            if d < 1e-5 || d > nearby || excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
+                continue;
+            }
+            let ib = ctx.mover_atom_info(om, oslot, cfg, b);
+            if d <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
+                v.push(Target { pos: pb, info: ib });
+            }
+        }
+    };
+    // the clique Mover an excluded atom moves with: (local index, Mover, slot)
+    let owner_of = |e: u32| {
+        ctx.dyn_of.get(&e).and_then(|&(em, eslot)| {
+            let li = ctx.local[em as usize];
+            if li != NONE && comp.get(li as usize) == Some(&em) { Some((li as usize, em, eslot as usize)) } else { None }
+        })
+    };
+    // one farther than the dots reach plus its radius cannot cover a dot
+    let reach = ctx.dot_reach.get(&a).copied().unwrap_or(f64::INFINITY) + EXCLUSION_MARGIN;
+    let covers = |pa: Vec3, pe: Vec3, re: f64| pe.dist_sq(pa) < (reach + re) * (reach + re);
+    // excluded atoms that can cover a dot at `pa`: fixed ones (static, Movers
+    // outside the clique, and the own Mover unless `own_apart`) and, per
+    // other Mover and state, the dynamic ones
+    let fill_excl = |st: &CliqueState, pa: Vec3, own_apart: bool, fixed: &mut Vec<(Vec3, f64)>, dynm: &mut Vec<Vec<Vec<(Vec3, f64)>>>| {
+        fixed.clear();
+        dynm.iter_mut().flatten().for_each(Vec::clear);
         for &e in excl {
-            let owner = ctx.dyn_of.get(&e).and_then(|&(em, eslot)| {
-                let li = ctx.local[em as usize];
-                if li != NONE && li as usize != i && comp.get(li as usize) == Some(&em) { Some((li as usize, em, eslot as usize)) } else { None }
-            });
-            match owner {
-                Some((o, em, eslot)) => {
+            match owner_of(e) {
+                Some((o, em, eslot)) if o != i => {
                     let k = kidx(o);
                     for sidx in 0..doms[o] {
                         let cfg = Cfg::Coarse(sidx as u16);
@@ -2002,221 +2709,375 @@ fn atom_factors_dotwise(
                         }
                         let pe = ctx.mover_atom_pos(em, eslot, cfg);
                         let ie = ctx.mover_atom_info(em, eslot, cfg, e);
-                        if covers(pe, ie.vdw_radius) {
-                            excl_dyn[k][sidx].push((pe, ie.vdw_radius));
+                        if covers(pa, pe, ie.vdw_radius) {
+                            dynm[k][sidx].push((pe, ie.vdw_radius));
                         }
                     }
                 }
-                None => {
-                    let (pe, deleted, ie) = ctx.atom_state(&st, e);
-                    if deleted || !covers(pe, ie.vdw_radius) {
-                        continue;
+                Some(_) if own_apart => {}
+                _ => {
+                    let (pe, deleted, ie) = ctx.atom_state(st, e);
+                    if !deleted && covers(pa, pe, ie.vdw_radius) {
+                        fixed.push((pe, ie.vdw_radius));
                     }
-                    excl_fixed.push((pe, ie.vdw_radius));
                 }
             }
         }
-        // static targets (same filters and order as score_atom)
-        let mut static_t: Vec<Target> = Vec::new();
-        ctx.static_targets(a, pa, &ia, nearby, excl, &mut static_t);
-        // Mover targets: own Mover fixed, others per state
-        let mover_targets = |om: u32, cfg: Cfg| -> Vec<Target> {
-            let omv = &ctx.movers[om as usize];
-            let mut v = Vec::new();
-            for oslot in 0..omv.n_moved {
-                let b = omv.atoms[oslot];
-                if b == a || ctx.mover_atom_deleted(om, oslot, cfg) {
-                    continue;
-                }
-                let pb = ctx.mover_atom_pos(om, oslot, cfg);
-                let d = pb.dist(pa);
-                if d < 1e-5 || d > nearby || excl.contains(&b) || w.occ[b as usize].abs() < min_occ {
-                    continue;
-                }
-                let ib = ctx.mover_atom_info(om, oslot, cfg, b);
-                if d <= ia.vdw_radius + ib.vdw_radius + 2.0 * pr {
-                    v.push(Target { pos: pb, info: ib });
+    };
+    // the own Mover's excluded atoms that can cover a dot at `pa`
+    let own_trims = |st: &CliqueState, pa: Vec3, out: &mut Vec<(Vec3, f64)>| {
+        out.clear();
+        for &e in excl {
+            if matches!(owner_of(e), Some((o, _, _)) if o == i) {
+                let (pe, deleted, ie) = ctx.atom_state(st, e);
+                if !deleted && covers(pa, pe, ie.vdw_radius) {
+                    out.push((pe, ie.vdw_radius));
                 }
             }
-            v
-        };
-        let seg_targets: Vec<Vec<Vec<Target>>> = seq
-            .iter()
-            .map(|&(om, o)| match o {
-                None => vec![mover_targets(om, own_cfg)],
-                Some(o) => (0..doms[o]).map(|sidx| mover_targets(om, Cfg::Coarse(sidx as u16))).collect(),
-            })
-            .collect();
+        }
+    };
+    // scratch, of the same shape for every state
+    let states = |o: Option<usize>| o.map_or(1, |o| doms[o]);
+    shape_lists(excl_dyn, others.iter().map(|&o| doms[o]));
+    shape_lists(seg_targets, seq.iter().map(|&(_, o)| states(o)));
+    shape_lists(seg_prepared, seq.iter().map(|&(_, o)| states(o)));
+    // static targets, Mover targets (own Mover in `own_cfg`, others per
+    // state), all prepared, and the own Mover's prepared targets in `own_p`
+    let fill_targets = |pa: Vec3,
+                            ia: &AtomInfo,
+                            own_cfg: Cfg,
+                            static_t: &mut Vec<Target>,
+                            static_p: &mut Vec<PTarget>,
+                            own_p: &mut Vec<PTarget>,
+                            seg_targets: &mut Vec<Vec<Vec<Target>>>,
+                            seg_prepared: &mut Vec<Vec<Vec<PTarget>>>| {
+        // static targets (same filters and order as score_atom)
+        static_t.clear();
+        ctx.static_targets(a, pa, ia, nearby, excl, static_t);
+        for (&(om, o), per_state) in seq.iter().zip(seg_targets.iter_mut()) {
+            match o {
+                None => mover_targets(om, own_cfg, pa, ia, &mut per_state[0]),
+                Some(_) => {
+                    for (sidx, v) in per_state.iter_mut().enumerate() {
+                        mover_targets(om, Cfg::Coarse(sidx as u16), pa, ia, v)
+                    }
+                }
+            }
+        }
         // the folds use prepared targets; the reach test keeps the raw lists
-        let mut static_p: Vec<PTarget> = Vec::with_capacity(static_t.len());
-        prepare_targets(sc, &ia, pa, &static_t, pr, &mut static_p);
-        let seg_prepared: Vec<Vec<Vec<PTarget>>> = seg_targets
-            .iter()
-            .map(|per_state| {
-                per_state
-                    .iter()
-                    .map(|ts| {
-                        let mut v = Vec::with_capacity(ts.len());
-                        prepare_targets(sc, &ia, pa, ts, pr, &mut v);
-                        v
+        prepare_targets(sc, ia, pa, static_t, pr, static_p);
+        for (ts, vs) in seg_targets.iter().flatten().zip(seg_prepared.iter_mut().flatten()) {
+            prepare_targets(sc, ia, pa, ts, pr, vs);
+        }
+        own_p.clear();
+        for (q, &(_, so)) in seq.iter().enumerate() {
+            if so.is_none() {
+                own_p.extend_from_slice(&seg_prepared[q][0]);
+            }
+        }
+    };
+    // spheres through which each other Mover reaches a dot
+    let fill_spheres = |excl_dyn: &[Vec<Vec<(Vec3, f64)>>], seg_targets: &[Vec<Vec<Target>>], out: &mut Vec<DepSphere>| {
+        out.clear();
+        for (k, &o) in others.iter().enumerate() {
+            for &(c, r) in excl_dyn[k].iter().flatten() {
+                out.push(DepSphere { k: k as u32, probe: false, c, r, r2: r * r });
+            }
+            for (q, &(_, so)) in seq.iter().enumerate() {
+                if so == Some(o) {
+                    for b in seg_targets[q].iter().flatten() {
+                        let r = b.info.vdw_radius + pr;
+                        out.push(DepSphere { k: k as u32, probe: true, c: b.pos, r, r2: r * r });
+                    }
+                }
+            }
+        }
+    };
+    // the shape of a group's table: scope, dims, strides, position of the own
+    // Mover in the scope and of each dependency
+    struct Shape {
+        size: usize,
+        strides: Vec<usize>,
+        own_pos: usize,
+        dep_pos: Vec<usize>,
+        ddims: Vec<usize>,
+        ks: Vec<usize>,
+        ncombo: usize,
+    }
+    let shape_of = |dep: &[usize]| {
+        let scope = scope_of(dep);
+        let dims: Vec<usize> = scope.iter().map(|&x| doms[x]).collect();
+        let mut strides = vec![0usize; scope.len()];
+        let mut acc_s = 1usize;
+        for q in (0..scope.len()).rev() {
+            strides[q] = acc_s;
+            acc_s = acc_s.saturating_mul(dims[q]);
+        }
+        let ddims: Vec<usize> = dep.iter().map(|&o| doms[o]).collect();
+        Shape {
+            size: dims.iter().product(),
+            own_pos: scope.iter().position(|&x| x == i).unwrap(),
+            dep_pos: dep.iter().map(|o| scope.iter().position(|x| x == o).unwrap()).collect(),
+            ks: dep.iter().map(|&o| kidx(o)).collect(),
+            ncombo: ddims.iter().fold(1usize, |a, &b| a.saturating_mul(b)),
+            ddims,
+            strides,
+        }
+    };
+    // the fold of a grouped dot over the Mover targets with the Movers of
+    // `dep` in states `sv`, or None when one of them trims it
+    let group_dot = |pa: Vec3, ia: &AtomInfo, k: usize, start: DotFold, dep: &[usize], sh: &Shape, sv: &[usize], excl_dyn: &[Vec<Vec<(Vec3, f64)>>], seg_prepared: &[Vec<Vec<PTarget>>]| {
+        let dp = soa.dot(k);
+        let dot_abs = pa + dp.d;
+        let probe_loc = pa + dp.probe;
+        for (q, &kk) in sh.ks.iter().enumerate() {
+            for &(pe, re) in &excl_dyn[kk][sv[q]] {
+                if dot_abs.dist_sq(pe) < re * re {
+                    return None;
+                }
+            }
+        }
+        let mut fold = start;
+        for (qq, &(_, so)) in seq.iter().enumerate() {
+            let ts: &[PTarget] = match so {
+                None => &seg_prepared[qq][0],
+                Some(o) => match dep.iter().position(|&x| x == o) {
+                    Some(q) => &seg_prepared[qq][sv[q]],
+                    None => continue,
+                },
+            };
+            for b in ts {
+                fold.step(sc, ia, dot_abs, probe_loc, b);
+            }
+        }
+        Some(fold.finish(sc, ia, dot_abs))
+    };
+    let decode = |mut r: usize, ddims: &[usize], sv: &mut [usize]| {
+        for q in (0..ddims.len()).rev() {
+            sv[q] = r % ddims[q];
+            r /= ddims[q];
+        }
+    };
+    let shared = live.len() > 1 && live.len() <= 64 && {
+        let (_, p0, i0) = live[0];
+        live.iter().all(|&(_, q, inf)| inf == i0 && q.dist_sq(p0) <= SHARE_TOL * SHARE_TOL)
+            && seq.iter().all(|&(om, so)| {
+                so.is_some()
+                    || live.iter().all(|&(own, pa, ia)| {
+                        mover_targets(om, Cfg::Coarse(own as u16), pa, &ia, own_t);
+                        own_t.is_empty()
                     })
-                    .collect()
             })
-            .collect();
-        // classify dots
-        let mut base = ScoreDotsResult::default();
-        let mut groups: FxHashMap<Vec<usize>, Vec<(usize, DotFold)>> = FxHashMap::default();
+    };
+    if shared {
+        // one evaluation at the first live state's place
+        let (own0, pa, ia) = live[0];
+        st.cfg[i] = Cfg::Coarse(own0 as u16);
+        fill_excl(&st, pa, true, excl_fixed, excl_dyn);
+        fill_targets(pa, &ia, st.cfg[i], static_t, static_p, own_p, seg_targets, seg_prepared);
+        trims.resize_with(live.len(), Vec::new);
+        for (&(own, pa_s, _), v) in live.iter().zip(trims.iter_mut()) {
+            st.cfg[i] = Cfg::Coarse(own as u16);
+            own_trims(&st, pa_s, v);
+        }
+        let trims = &trims[..live.len()];
+        // the live states (bits) in which dot `k` stays out of the own trims
+        let mask_of = |k: usize| -> u64 {
+            let mut mask = 0u64;
+            for (q, (&(_, pa_s, _), tr)) in live.iter().zip(trims).enumerate() {
+                let d = v3(pa_s.x + dx[k], pa_s.y + dy[k], pa_s.z + dz[k]);
+                if !tr.iter().any(|&(pe, re)| d.dist_sq(pe) < re * re) {
+                    mask |= 1 << q;
+                }
+            }
+            mask
+        };
+        let total = |r: &ScoreDotsResult| r.bump / density + r.hbond / density + r.attract / density;
+        base_adds.clear();
+        let mut sgroups: Vec<(u64, Vec<(u32, DotFold, u64)>)> = Vec::new();
         if others.is_empty() {
-            // no other Mover reaches a dot: each dot folds the static targets
-            // and then its own Mover's, which the chunked kernel scores
+            adds.clear();
+            fold_dot_lanes(sc, &ia, pa, soa, &excl_fixed, &static_p, &mut cbufs.lanes, |k, r| {
+                if let Some((kind, val)) = dot_addend(sc, r) {
+                    adds.push(DotAdd { k: k as u32, kind, val });
+                }
+            });
+            let t = table_for(&mut tables, &[], doms[i]);
+            for (&(own, pa_s, _), tr) in live.iter().zip(trims) {
+                t[own] += total(&sum_addends(adds, soa, pa_s, tr));
+                evaluated += 1;
+            }
+        } else {
+            fill_spheres(&excl_dyn, &seg_targets, spheres);
             lane_list.clear();
             lane_list.extend_from_slice(&static_p);
-            for (q, &(_, so)) in seq.iter().enumerate() {
-                if so.is_none() {
-                    lane_list.extend_from_slice(&seg_prepared[q][0]);
+            lane_list.extend_from_slice(&own_p);
+            let mut last = usize::MAX;
+            classify_dots(
+                sc,
+                &ia,
+                pa,
+                soa,
+                &excl_fixed,
+                &lane_list,
+                static_p.len(),
+                &spheres,
+                cbufs,
+                |k, r| {
+                    if let Some((kind, val)) = dot_addend(sc, r) {
+                        base_adds.push((DotAdd { k: k as u32, kind, val }, mask_of(k)));
+                    }
+                },
+                |dep, k, fold| {
+                    if sgroups.get(last).is_none_or(|g| g.0 != dep) {
+                        last = sgroups.iter().position(|g| g.0 == dep).unwrap_or_else(|| {
+                            sgroups.push((dep, Vec::new()));
+                            sgroups.len() - 1
+                        });
+                    }
+                    sgroups[last].1.push((k as u32, fold, mask_of(k)));
+                },
+            );
+            let t = table_for(&mut tables, &[], doms[i]);
+            for (q, &(own, _, _)) in live.iter().enumerate() {
+                let mut r = ScoreDotsResult::default();
+                for &(ad, mask) in base_adds.iter() {
+                    if mask >> q & 1 != 0 {
+                        add_to(&mut r, ad.kind, ad.val);
+                    }
                 }
+                t[own] += total(&r);
+                evaluated += 1;
             }
-            score_dot_lanes(sc, &ia, pa, &ctx.dots_soa[&a], &excl_fixed, &lane_list, &mut lane_targets, &mut base);
-        } else {
-            'dot: for (di, dp) in dots_all.iter().enumerate() {
-                let dot_abs = pa + dp.d;
-                let probe_loc = pa + dp.probe;
-                for &(pe, re) in &excl_fixed {
-                    if dot_abs.dist_sq(pe) < re * re {
-                        continue 'dot;
-                    }
+            // each group exists in the states that keep one of its dots;
+            // count its work as the per-state search would
+            let mut work: Vec<(Vec<usize>, Vec<(u32, DotFold, u64)>, Vec<usize>, Shape)> = Vec::new();
+            for (mask, members) in sgroups {
+                let dep = dep_of(mask);
+                let counts: Vec<usize> = (0..live.len()).map(|q| members.iter().filter(|x| x.2 >> q & 1 != 0).count()).collect();
+                if counts.iter().all(|&c| c == 0) {
+                    continue;
                 }
-                let mut fold = DotFold::START;
-                for b in &static_p {
-                    fold.step(sc, &ia, dot_abs, probe_loc, b);
+                let sh = shape_of(&dep);
+                for &c in counts.iter().filter(|&&c| c > 0) {
+                    dot_work = dot_work.saturating_add(sh.ncombo.saturating_mul(c));
+                    evaluated += sh.ncombo;
                 }
-                let mut dep: Vec<usize> = Vec::new();
-                for (k, &o) in others.iter().enumerate() {
-                    let mut reach = false;
-                    'st: for sidx in 0..doms[o] {
-                        for &(pe, re) in &excl_dyn[k][sidx] {
-                            if dot_abs.dist_sq(pe) < re * re {
-                                reach = true;
-                                break 'st;
-                            }
-                        }
-                    }
-                    if !reach {
-                        'st2: for (q, &(_, so)) in seq.iter().enumerate() {
-                            if so != Some(o) {
-                                continue;
-                            }
-                            for ts in &seg_targets[q] {
-                                for b in ts {
-                                    let prb = b.info.vdw_radius + pr;
-                                    if probe_loc.dist_sq(b.pos) <= prb * prb {
-                                        reach = true;
-                                        break 'st2;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if reach {
-                        dep.push(o);
-                    }
+                if sh.ncombo > DOT_GROUP_STATES_LIMIT {
+                    dot_work = usize::MAX;
                 }
-                if dep.is_empty() {
-                    for (q, &(_, so)) in seq.iter().enumerate() {
-                        if so.is_none() {
-                            for b in &seg_prepared[q][0] {
-                                fold.step(sc, &ia, dot_abs, probe_loc, b);
-                            }
-                        }
-                    }
-                    accumulate_dot(sc, fold.finish(sc, &ia, dot_abs), &mut base);
-                } else {
-                    groups.entry(dep).or_default().push((di, fold));
-                }
+                work.push((dep, members, counts, sh));
             }
-        }
-        // the dots that no other Mover reaches
-        {
-            let t = tables.entry(Vec::new()).or_insert_with(|| vec![0.0; doms[i]]);
-            t[own] += base.bump / density + base.hbond / density + base.attract / density;
-            evaluated += 1;
-        }
-        // the others, per group, over the states of the Movers that reach them
-        for (dep, dots) in groups {
-            let scope = scope_of(&dep);
-            let dims: Vec<usize> = scope.iter().map(|&x| doms[x]).collect();
-            let size: usize = dims.iter().product();
-            let ks: Vec<usize> = dep.iter().map(|&o| kidx(o)).collect();
-            let ddims: Vec<usize> = dep.iter().map(|&o| doms[o]).collect();
-            let ncombo: usize = ddims.iter().fold(1usize, |a, &b| a.saturating_mul(b));
-            dot_work = dot_work.saturating_add(ncombo.saturating_mul(dots.len()));
-            if ncombo > DOT_GROUP_STATES_LIMIT || dot_work > ATOM_DOT_WORK_LIMIT || abandoned.load(Relaxed) {
+            if dot_work > ATOM_DOT_WORK_LIMIT || abandoned.load(Relaxed) {
                 // one atom past the budget settles it for the whole clique
                 abandoned.store(true, Relaxed);
                 return None;
             }
-            let mut sv = vec![0usize; dep.len()];
-            let mut vals = vec![0.0f64; ncombo];
-            for (combo, val) in vals.iter_mut().enumerate() {
-                let mut r = combo;
-                for q in (0..dep.len()).rev() {
-                    sv[q] = r % ddims[q];
-                    r /= ddims[q];
-                }
-                let mut acc = ScoreDotsResult::default();
-                'gdot: for &(di, start) in &dots {
-                    let dp = &dots_all[di];
-                    let dot_abs = pa + dp.d;
-                    let probe_loc = pa + dp.probe;
-                    for (q, &k) in ks.iter().enumerate() {
-                        for &(pe, re) in &excl_dyn[k][sv[q]] {
-                            if dot_abs.dist_sq(pe) < re * re {
-                                continue 'gdot;
+            let mut accs = vec![ScoreDotsResult::default(); live.len()];
+            for (dep, members, counts, sh) in work {
+                let mut sv = vec![0usize; dep.len()];
+                let t = table_for(&mut tables, &dep, sh.size);
+                for combo in 0..sh.ncombo {
+                    decode(combo, &sh.ddims, &mut sv);
+                    accs.iter_mut().for_each(|r| *r = ScoreDotsResult::default());
+                    for &(k, start, mask) in &members {
+                        if mask == 0 {
+                            continue;
+                        }
+                        let Some(r) = group_dot(pa, &ia, k as usize, start, &dep, &sh, &sv, &excl_dyn, &seg_prepared) else { continue };
+                        if let Some((kind, val)) = dot_addend(sc, r) {
+                            let mut bits = mask;
+                            while bits != 0 {
+                                add_to(&mut accs[bits.trailing_zeros() as usize], kind, val);
+                                bits &= bits - 1;
                             }
                         }
                     }
-                    let mut fold = start;
-                    for (qq, &(_, so)) in seq.iter().enumerate() {
-                        let ts: &[PTarget] = match so {
-                            None => &seg_prepared[qq][0],
-                            Some(o) => match dep.iter().position(|&x| x == o) {
-                                Some(q) => &seg_prepared[qq][sv[q]],
-                                None => continue,
-                            },
-                        };
-                        for b in ts {
-                            fold.step(sc, &ia, dot_abs, probe_loc, b);
+                    let idx_dep: usize = sv.iter().zip(&sh.dep_pos).map(|(&s, &pos)| s * sh.strides[pos]).sum();
+                    for (q, &(own, _, _)) in live.iter().enumerate() {
+                        if counts[q] > 0 {
+                            t[own * sh.strides[sh.own_pos] + idx_dep] = total(&accs[q]);
                         }
                     }
-                    accumulate_dot(sc, fold.finish(sc, &ia, dot_abs), &mut acc);
                 }
-                *val = acc.bump / density + acc.hbond / density + acc.attract / density;
-            }
-            evaluated += ncombo;
-            let t = tables.entry(dep.clone()).or_insert_with(|| vec![0.0; size]);
-            // write the own-state slice of the table
-            let own_pos = scope.iter().position(|&x| x == i).unwrap();
-            let mut strides = vec![0usize; scope.len()];
-            let mut acc_s = 1usize;
-            for q in (0..scope.len()).rev() {
-                strides[q] = acc_s;
-                acc_s *= dims[q];
-            }
-            for (combo, &val) in vals.iter().enumerate() {
-                let mut r = combo;
-                let mut idx = own * strides[own_pos];
-                for q in (0..dep.len()).rev() {
-                    let sq = r % ddims[q];
-                    r /= ddims[q];
-                    let pos = scope.iter().position(|&x| x == dep[q]).unwrap();
-                    idx += sq * strides[pos];
-                }
-                t[idx] = val;
             }
         }
-        stand_for = stand_for.saturating_add(others.iter().fold(1usize, |a, &o| a.saturating_mul(doms[o])));
+        stand_for = stand_for.saturating_add(joint_others.saturating_mul(live.len()));
+    } else {
+        let mut groups: Vec<(u64, Vec<(u32, DotFold)>)> = Vec::new();
+        for &(own, pa, ia) in live.iter() {
+            let own_cfg = Cfg::Coarse(own as u16);
+            st.cfg[i] = own_cfg;
+            fill_excl(&st, pa, false, excl_fixed, excl_dyn);
+            fill_targets(pa, &ia, own_cfg, static_t, static_p, own_p, seg_targets, seg_prepared);
+            let mut base = ScoreDotsResult::default();
+            lane_list.clear();
+            lane_list.extend_from_slice(&static_p);
+            lane_list.extend_from_slice(&own_p);
+            if others.is_empty() {
+                // no other Mover reaches a dot: each dot folds the static
+                // targets and then its own Mover's
+                score_dot_lanes(sc, &ia, pa, soa, &excl_fixed, &lane_list, &mut cbufs.lanes, &mut base);
+            } else {
+                fill_spheres(&excl_dyn, &seg_targets, spheres);
+                let mut last = usize::MAX;
+                classify_dots(
+                    sc,
+                    &ia,
+                    pa,
+                    soa,
+                    &excl_fixed,
+                    &lane_list,
+                    static_p.len(),
+                    &spheres,
+                    cbufs,
+                    |_, r| accumulate_dot(sc, r, &mut base),
+                    |dep, k, fold| {
+                        if groups.get(last).is_none_or(|g| g.0 != dep) {
+                            last = groups.iter().position(|g| g.0 == dep).unwrap_or_else(|| {
+                                groups.push((dep, Vec::new()));
+                                groups.len() - 1
+                            });
+                        }
+                        groups[last].1.push((k as u32, fold));
+                    },
+                );
+            }
+            // the dots that no other Mover reaches
+            {
+                let t = table_for(&mut tables, &[], doms[i]);
+                t[own] += base.bump / density + base.hbond / density + base.attract / density;
+                evaluated += 1;
+            }
+            // the others, per group, over the states of the Movers that reach them
+            for (mask, dots) in groups.drain(..) {
+                let dep = dep_of(mask);
+                let sh = shape_of(&dep);
+                dot_work = dot_work.saturating_add(sh.ncombo.saturating_mul(dots.len()));
+                if sh.ncombo > DOT_GROUP_STATES_LIMIT || dot_work > ATOM_DOT_WORK_LIMIT || abandoned.load(Relaxed) {
+                    // one atom past the budget settles it for the whole clique
+                    abandoned.store(true, Relaxed);
+                    return None;
+                }
+                let mut sv = vec![0usize; dep.len()];
+                let t = table_for(&mut tables, &dep, sh.size);
+                for combo in 0..sh.ncombo {
+                    decode(combo, &sh.ddims, &mut sv);
+                    let mut acc = ScoreDotsResult::default();
+                    for &(k, start) in &dots {
+                        if let Some(r) = group_dot(pa, &ia, k as usize, start, &dep, &sh, &sv, &excl_dyn, &seg_prepared) {
+                            accumulate_dot(sc, r, &mut acc);
+                        }
+                    }
+                    let idx_dep: usize = sv.iter().zip(&sh.dep_pos).map(|(&s, &pos)| s * sh.strides[pos]).sum();
+                    t[own * sh.strides[sh.own_pos] + idx_dep] = acc.bump / density + acc.hbond / density + acc.attract / density;
+                }
+                evaluated += sh.ncombo;
+            }
+            stand_for = stand_for.saturating_add(joint_others);
+        }
     }
-    let mut out: Vec<(Vec<usize>, Vec<f64>)> = tables.into_iter().collect();
+    let mut out = tables;
     out.sort_by(|x, y| x.0.cmp(&y.0));
     let factors = out
         .into_iter()
@@ -2522,14 +3383,18 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     let v = p.verbosity;
     let k = comp.len();
     let mut st = CliqueState { movers: comp, cfg: vec![Cfg::Coarse(0); k] };
-    let mut buf = ScoreBuf::default();
+    // scratch space kept per thread from clique to clique; every use clears it
+    thread_local! {
+        static CLIQUE_BUF: std::cell::Cell<ScoreBuf> = std::cell::Cell::new(ScoreBuf::default());
+    }
+    let mut buf = CLIQUE_BUF.take();
     let mut calculated = 0usize;
     let mut cached = 0usize;
 
-    // initial scores (all at coarse 0); a lone Mover's come from its atom
-    // factors below
-    let mut initial = vec![0.0; k];
-    if k > 1 {
+    // initial scores (all at coarse 0), for the report; a lone Mover's come
+    // from its atom factors below
+    let mut initial = if p.report { vec![0.0; k] } else { Vec::new() };
+    if k > 1 && p.report {
         for (i, &m) in comp.iter().enumerate() {
             let (s, _) = ctx.score_mover_atoms(&st, m, &mut buf, true);
             calculated += ctx.movers[m as usize].n_moved;
@@ -2539,8 +3404,9 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
 
     // ---------- coarse optimization
     let doms: Vec<usize> = comp.iter().map(|&m| ctx.movers[m as usize].num_coarse()).collect();
+    // the factors of variable elimination (a lone Mover needs none)
     let mut factors: Vec<Factor> = Vec::new();
-    for (i, &m) in comp.iter().enumerate() {
+    for (i, &m) in comp.iter().enumerate().filter(|_| k > 1) {
         factors.push(Factor {
             scope: vec![i],
             dims: vec![doms[i]],
@@ -2549,14 +3415,16 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     }
     // a clique whose Mover contact graph alone needs too large a table is not
     // searched exactly (the atom factors only add to it)
-    let touching = touching_movers(ctx, comp);
-    let pairs: Vec<Vec<usize>> = (0..k).flat_map(|i| touching[i].iter().filter(move |&&j| j > i).map(move |&j| vec![i, j])).collect();
-    let dense = k > 1 && largest_elimination_table(k, &doms, pairs) > ELIMINATION_TABLE_LIMIT;
+    let dense = k > 1 && {
+        let touching = touching_movers(ctx, comp);
+        let pairs: Vec<Vec<usize>> = (0..k).flat_map(|i| touching[i].iter().filter(move |&&j| j > i).map(move |&j| vec![i, j])).collect();
+        largest_elimination_table(k, &doms, pairs) > ELIMINATION_TABLE_LIMIT
+    };
     // per-atom factors (kept for final per-Mover scores), built in parallel
     let tasks: Vec<(usize, usize)> = if dense { Vec::new() } else {
         comp.iter().enumerate().flat_map(|(i, &m)| (0..ctx.movers[m as usize].n_moved).map(move |slot| (i, slot))).collect()
     };
-    let dotwise = std::env::var_os("REDUCE3_ATOMWISE").is_none();
+    let dotwise = !debug_switches().atomwise;
     let abandoned = std::sync::atomic::AtomicBool::new(false);
     let built: Vec<Option<(usize, usize, Vec<Factor>, usize, usize)>> = crate::par::map_collect(&tasks, |&(i, slot)| {
             if dotwise {
@@ -2569,9 +3437,10 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
         });
     let mut atom_factors: Vec<(usize, Factor)> = Vec::with_capacity(built.len());
     let mut exact = !dense && built.iter().all(|b| b.is_some());
-    // a lone Mover's initial score: its atoms' coarse-0 values in slot order,
-    // as score_mover_atoms sums them (one factor per atom, no other Movers)
-    let mut lone_initial = 0.0;
+    // a lone Mover's atom scores per coarse state: its atoms' values in slot
+    // order, as score_mover_atoms sums them (one factor per atom, no other
+    // Movers)
+    let mut lone = vec![0.0; if k == 1 { doms[0] } else { 0 }];
     for (i, slot, fs, c, h) in built.into_iter().flatten() {
         // the partial work of an abandoned search depends on thread timing
         if exact {
@@ -2579,16 +3448,20 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
             cached += h;
         }
         for f in fs {
-            if k == 1 && !ctx.mover_atom_deleted(comp[0], slot, Cfg::Coarse(0)) {
-                lone_initial += f.table[0];
+            for (s, l) in lone.iter_mut().enumerate() {
+                if !ctx.mover_atom_deleted(comp[0], slot, Cfg::Coarse(s as u16)) {
+                    *l += f.table[s];
+                }
             }
-            factors.push(Factor { scope: f.scope.clone(), dims: f.dims.clone(), table: f.table.clone() });
+            if k > 1 {
+                factors.push(Factor { scope: f.scope.clone(), dims: f.dims.clone(), table: f.table.clone() });
+            }
             atom_factors.push((i, f));
         }
     }
-    if k == 1 {
+    if k == 1 && p.report {
         initial[0] = if exact {
-            ctx.pref(comp[0], Cfg::Coarse(0)) + lone_initial
+            ctx.pref(comp[0], Cfg::Coarse(0)) + lone[0]
         } else {
             calculated += ctx.movers[comp[0] as usize].n_moved;
             ctx.pref(comp[0], Cfg::Coarse(0)) + ctx.score_mover_atoms(&st, comp[0], &mut buf, true).0
@@ -2598,7 +3471,7 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
         let scopes: Vec<Vec<usize>> = factors.iter().map(|f| f.scope.clone()).collect();
         exact = largest_elimination_table(k, &doms, scopes) <= ELIMINATION_TABLE_LIMIT;
     }
-    let dbg = std::env::var("REDUCE3_DEBUG_ATOM").ok().map(|t| {
+    let dbg = debug_switches().debug_atom.as_deref().map(|t| {
         let a0 = ctx.movers[comp[0] as usize].atoms[0] as usize;
         let l = &ctx.w.labels[a0];
         format!("{} {} {} {}", l.chain, l.resname, l.resseq, l.name) == t
@@ -2648,7 +3521,8 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
         for (i, f) in &atom_factors {
             high[*i] += f.table[table_index(&f.scope, &f.dims, &best)];
         }
-    } else {
+    } else if p.report || p.compat {
+        // fixed mode reads these scores only in the report
         for i in 0..k {
             high[i] += ctx.score_mover_atoms(&st, comp[i], &mut buf, true).0;
             calculated += ctx.movers[comp[i] as usize].n_moved;
@@ -2656,10 +3530,10 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     }
     let coarse_best: f64 = high.iter().sum();
     let mut coarse_info = String::new();
-    if !exact {
+    if !exact && p.report {
         let _ = writeln!(coarse_info, "   Clique of {} Movers is too dense for exact search; optimized by coordinate ascent", k);
     }
-    if v >= 3 {
+    if v >= 3 && p.report {
         for i in 0..k {
             let _ = write!(
                 coarse_info,
@@ -2678,16 +3552,19 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
         let m = comp[i];
         let mv = &ctx.movers[m as usize];
         let c = st.cfg[i].coarse();
-        let (initial_score, _) = ctx.score_mover_atoms(&st, m, &mut buf, true);
+        let initial_score = if k == 1 && exact { lone[c] } else { ctx.score_mover_atoms(&st, m, &mut buf, true).0 };
         calculated += mv.n_moved;
-        let nf = mv.fine_pos[c].len();
+        let nf = mv.fine.count();
         let mut msg = String::new();
         if nf > 0 {
             let mut best_f = 0usize;
             let mut best_s = f64::NEG_INFINITY;
+            // the fine poses lie close together: each atom scores only the
+            // dots that can meet a target in one of them
+            let shared: Vec<Option<FineShared>> = (0..mv.n_moved).map(|slot| ctx.fine_shared(&st, i, c, slot, &mut buf)).collect();
             for f in 0..nf {
                 st.cfg[i] = Cfg::Fine(c as u16, f as u16);
-                let (s, _) = ctx.score_mover_atoms(&st, m, &mut buf, true);
+                let (s, _) = ctx.score_mover_atoms_in(&st, m, &mut buf, true, &shared, f);
                 calculated += mv.n_moved;
                 let s = s + ctx.pref(m, st.cfg[i]);
                 if f == 0 || s > best_s {
@@ -2697,7 +3574,7 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
             }
             let compare = if p.compat { high[i] } else { initial_score + ctx.pref(m, Cfg::Coarse(c as u16)) };
             if best_s > compare {
-                if v >= 3 {
+                if v >= 3 && p.report {
                     msg += &format!(
                         "   Setting Mover to fine orientation {}, max score = {:.2} (coarse score {:.2})\n",
                         best_f, best_s, initial_score
@@ -2707,7 +3584,7 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
                 high[i] = best_s;
             } else {
                 st.cfg[i] = Cfg::Coarse(c as u16);
-                if v >= 3 {
+                if v >= 3 && p.report {
                     msg += "   Leaving Mover at coarse orientation\n";
                 }
                 if !p.compat {
@@ -2717,9 +3594,11 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
         } else if !p.compat {
             high[i] = initial_score + ctx.pref(m, Cfg::Coarse(c as u16));
         }
-        fine_info.push((m, msg));
+        if p.report {
+            fine_info.push((m, msg));
+        }
     }
-    if !p.compat && k > 1 {
+    if !p.compat && k > 1 && p.report {
         // Report each Mover's score in the final configuration of its clique
         // (a lone Mover's is the score its fine search ended on).
         for i in 0..k {
@@ -2730,8 +3609,8 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
     }
 
     // ---------- flip annotations (BothClash / Uncertain)
-    let mut annot = vec![String::new(); k];
-    for i in 0..k {
+    let mut annot = if p.report { vec![String::new(); k] } else { Vec::new() };
+    for i in (0..k).filter(|_| p.report) {
         let m = comp[i];
         let mv = &ctx.movers[m as usize];
         if !mv.kind.is_flip() {
@@ -2764,6 +3643,7 @@ fn optimize_clique(ctx: &Ctx, comp: &[u32]) -> CliqueResult {
             " .".into()
         };
     }
+    CLIQUE_BUF.set(buf);
 
     CliqueResult {
         initial,
@@ -2811,29 +3691,47 @@ fn place_movers(
         if a as usize >= w.n_real {
             continue;
         }
-        let a_name = w.name(a).to_string();
-        let res_name = w.resname(a).to_string();
-        let rid = w.res_name_and_id(a);
-        let elem = w.elem(a).to_string();
-        let nb = w.bonded[a as usize].clone();
+        // the tests below on borrowed labels: an atom that passes none adds
+        // nothing; the labels stay the same while Movers move atoms, so the
+        // messages read them again
+        let (is_n, is_c, asx_glx, amide, his) = {
+            let (name, res, elem) = (w.name(a), w.resname(a), w.elem(a));
+            (
+                elem == "N",
+                elem == "C",
+                (name == "XD2" && res == "ASX") || (name == "XE2" && res == "GLX"),
+                (name == "ND2" && res == "ASN") || (name == "NE2" && res == "GLN"),
+                name == "NE2" && res == "HIS",
+            )
+        };
+        let four = w.bonded[a as usize].len() == 4;
+        if !((four && (is_n || is_c)) || (p.add_flip_movers && (asx_glx || amide)) || his) {
+            continue;
+        }
+        let rid = |w: &World| w.res_name_and_id(a);
+        let rep = p.report;
 
-        if elem == "N" && nb.len() == 4 {
-            let num_h = nb.iter().filter(|&&n| w.is_h(n)).count();
+        if is_n && four {
+            let num_h = w.bonded[a as usize].iter().filter(|&&n| w.is_h(n)).count();
             if num_h == 3 {
                 match movers::nh3_rotator(w, a, !p.compat) {
                     Ok(m) => {
                         pl.movers.push(m);
-                        pl.info += &vcheck(v, 1, &format!("Added MoverNH3Rotator {} to {}\n", pl.movers.len(), rid));
-                        pl.mover_info.push(format!("NH3Rotator at {} {}", rid, a_name));
+                        if rep {
+                            pl.info += &vcheck(v, 1, &format!("Added MoverNH3Rotator {} to {}\n", pl.movers.len(), rid(w)));
+                            pl.mover_info.push(format!("NH3Rotator at {} {}", rid(w), w.name(a)));
+                        } else {
+                            pl.mover_info.push(String::new());
+                        }
                     }
-                    Err(e) => pl.info += &vcheck(v, 0, &format!("Could not add MoverNH3Rotator to {}: {}\n", rid, e)),
+                    Err(e) => pl.info += &vcheck(v, 0, &format!("Could not add MoverNH3Rotator to {}: {}\n", rid(w), e)),
                 }
             }
         }
-        if elem == "C" && nb.len() == 4 {
+        if is_c && four {
             let mut num_h = 0;
             let mut neighbor = None;
-            for &n in &nb {
+            for &n in &w.bonded[a as usize] {
                 if w.is_h(n) {
                     num_h += 1;
                 } else {
@@ -2846,33 +3744,39 @@ fn place_movers(
                     match movers::aromatic_methyl_rotator(w, a, !p.compat) {
                         Ok(m) => {
                             pl.movers.push(m);
-                            pl.info += &vcheck(
-                                v,
-                                1,
-                                &format!("Added MoverAromaticMethylRotator {} to {} {}\n", pl.movers.len(), rid, a_name),
-                            );
-                            pl.mover_info.push(format!("AromaticMethylRotator at {} {}", rid, a_name));
+                            if rep {
+                                pl.info += &vcheck(
+                                    v,
+                                    1,
+                                    &format!("Added MoverAromaticMethylRotator {} to {} {}\n", pl.movers.len(), rid(w), w.name(a)),
+                                );
+                                pl.mover_info.push(format!("AromaticMethylRotator at {} {}", rid(w), w.name(a)));
+                            } else {
+                                pl.mover_info.push(String::new());
+                            }
                         }
                         Err(e) => {
-                            pl.info += &vcheck(v, 0, &format!("Could not add MoverAromaticMethylRotator to {} {}: {}\n", rid, a_name, e))
+                            pl.info += &vcheck(v, 0, &format!("Could not add MoverAromaticMethylRotator to {} {}: {}\n", rid(w), w.name(a), e))
                         }
                     }
                 } else {
                     match movers::stagger_tetrahedral_methyl(w, a, !p.compat) {
                         Ok(()) => {
-                            pl.info += &vcheck(v, 1, &format!("Used MoverTetrahedralMethylRotator to stagger {} {}\n", rid, a_name))
+                            if rep {
+                                pl.info += &vcheck(v, 1, &format!("Used MoverTetrahedralMethylRotator to stagger {} {}\n", rid(w), w.name(a)))
+                            }
                         }
                         Err(e) => {
-                            pl.info += &vcheck(v, 0, &format!("Could not add MoverTetrahedralMethylRotator to {} {}: {}\n", rid, a_name, e))
+                            pl.info += &vcheck(v, 0, &format!("Could not add MoverTetrahedralMethylRotator to {} {}: {}\n", rid(w), w.name(a), e))
                         }
                     }
                 }
             }
         }
-        if p.add_flip_movers && ((a_name == "XD2" && res_name == "ASX") || (a_name == "XE2" && res_name == "GLX")) {
-            pl.info += &vcheck(v, 1, &format!("Not attempting to adjust {} {}\n", rid, a_name));
+        if p.add_flip_movers && asx_glx && rep {
+            pl.info += &vcheck(v, 1, &format!("Not attempting to adjust {} {}\n", rid(w), w.name(a)));
         }
-        if p.add_flip_movers && ((a_name == "ND2" && res_name == "ASN") || (a_name == "NE2" && res_name == "GLN")) {
+        if p.add_flip_movers && amide {
             let mut found_ion = false;
             let mut oxygen = None;
             for &b in &w.bonded[a as usize] {
@@ -2924,12 +3828,12 @@ fn place_movers(
             if found_ion && lock_flipped {
                 match movers::amide_flip(w, a, "CA", p.non_flip_preference, clamp) {
                     Ok(flip) => {
-                        pl.info += &vcheck(v, 1, &format!("Locking MoverAmideFlip on {} flipped (ionic contact)\n", rid));
+                        pl.info += &vcheck(v, 1, &format!("Locking MoverAmideFlip on {} flipped (ionic contact)\n", rid(w)));
                         set_state_now(w, &flip, 1, q);
                         apply_fixup(w, &flip, 1, &mut pl.delete_atoms);
                         pl.amide_flips.push(FlippedMoverInfo { alt: alt.into(), base_atom: a });
                     }
-                    Err(e) => pl.info += &vcheck(v, 0, &format!("Did not add MoverAmideFlip to {}: {}\n", rid, e)),
+                    Err(e) => pl.info += &vcheck(v, 0, &format!("Did not add MoverAmideFlip to {}: {}\n", rid(w), e)),
                 }
             } else if !found_ion {
                 let fs = find_flip_state(w, a, flip_states, p.compat, n_models);
@@ -2941,7 +3845,7 @@ fn place_movers(
                                 1,
                                 &format!(
                                     "Setting MoverAmideFlip for {}: flipped = {}, angles adjusted = {}\n",
-                                    rid,
+                                    rid(w),
                                     if s.flipped { "True" } else { "False" },
                                     if s.fixed_up { "True" } else { "False" }
                                 ),
@@ -2956,21 +3860,29 @@ fn place_movers(
                             }
                         } else {
                             pl.movers.push(flip);
-                            pl.info += &vcheck(v, 1, &format!("Added MoverAmideFlip {} to {}\n", pl.movers.len(), rid));
-                            pl.mover_info.push(format!("AmideFlip at {} {}", rid, a_name));
+                            if rep {
+                                pl.info += &vcheck(v, 1, &format!("Added MoverAmideFlip {} to {}\n", pl.movers.len(), rid(w)));
+                                pl.mover_info.push(format!("AmideFlip at {} {}", rid(w), w.name(a)));
+                            } else {
+                                pl.mover_info.push(String::new());
+                            }
                         }
                     }
-                    Err(e) => pl.info += &vcheck(v, 0, &format!("Did not add MoverAmideFlip to {}: {}\n", rid, e)),
+                    Err(e) => pl.info += &vcheck(v, 0, &format!("Did not add MoverAmideFlip to {}: {}\n", rid(w), e)),
                 }
             }
         }
-        if a_name == "NE2" && res_name == "HIS" {
+        if his {
+            let rid = rid(w);
             place_his(w, p, a, &rid, flip_states, alt, max_vdw, q, removed, n_models, pl);
         }
     }
 
     // single-hydrogen rotators
-    let in_atoms: FxHashSet<u32> = atoms.iter().copied().collect();
+    let mut in_atoms = vec![false; w.len()];
+    for &a in atoms {
+        in_atoms[a as usize] = true;
+    }
     let opts = SingleHOptions {
         circular_angle_spacing: !p.compat,
         any_partner_valence: !p.compat,
@@ -2979,12 +3891,11 @@ fn place_movers(
         syn_preference: if p.compat { 0.0 } else { p.acid_syn_preference },
     };
     for &h in rotatable_h {
-        if !in_atoms.contains(&h) {
+        if !in_atoms.get(h as usize).copied().unwrap_or(false) {
             continue;
         }
-        let a_name = w.name(h).to_string();
-        let rid = w.res_name_and_id(h);
         let Some(&neighbor) = w.bonded[h as usize].first() else {
+            let (a_name, rid) = (w.name(h), w.res_name_and_id(h));
             pl.info += &vcheck(v, 0, &format!("Could not add MoverSingleHydrogenRotator to {} {}: list index out of range\n", rid, a_name));
             continue;
         };
@@ -3023,20 +3934,26 @@ fn place_movers(
         match movers::single_hydrogen_rotator(w, h, &acceptors, &touches, &opts) {
             Ok(m) => {
                 pl.movers.push(m);
-                pl.info += &vcheck(
-                    v,
-                    1,
-                    &format!(
-                        "Added MoverSingleHydrogenRotator {} to {} {} with {} potential nearby acceptors\n",
-                        pl.movers.len(),
-                        rid,
-                        a_name,
-                        acceptors.len()
-                    ),
-                );
-                pl.mover_info.push(format!("SingleHydrogenRotator at {} {}", rid, a_name));
+                if p.report {
+                    let (a_name, rid) = (w.name(h), w.res_name_and_id(h));
+                    pl.info += &vcheck(
+                        v,
+                        1,
+                        &format!(
+                            "Added MoverSingleHydrogenRotator {} to {} {} with {} potential nearby acceptors\n",
+                            pl.movers.len(),
+                            rid,
+                            a_name,
+                            acceptors.len()
+                        ),
+                    );
+                    pl.mover_info.push(format!("SingleHydrogenRotator at {} {}", rid, a_name));
+                } else {
+                    pl.mover_info.push(String::new());
+                }
             }
             Err(e) => {
+                let (a_name, rid) = (w.name(h), w.res_name_and_id(h));
                 pl.info += &vcheck(v, 0, &format!("Could not add MoverSingleHydrogenRotator to {} {}: {}\n", rid, a_name, e))
             }
         }
@@ -3052,10 +3969,10 @@ fn set_state_now(w: &mut World, mv: &Mover, c: usize, q: &mut NeighborIndex) {
         w.pos[a as usize] = mv.coarse_pos[c][slot];
         q.add(w, a);
     }
-    for (slot, inf) in mv.coarse_info[c].iter().enumerate() {
+    for (slot, inf) in in_state(&mv.coarse_info, c).iter().enumerate() {
         w.info[mv.atoms[slot] as usize] = *inf;
     }
-    for (slot, &d) in mv.coarse_del[c].iter().enumerate() {
+    for (slot, &d) in in_state(&mv.coarse_del, c).iter().enumerate() {
         if d {
             q.remove(w, mv.atoms[slot]);
         } else {
@@ -3065,13 +3982,13 @@ fn set_state_now(w: &mut World, mv: &Mover, c: usize, q: &mut NeighborIndex) {
 }
 
 fn apply_fixup(w: &mut World, mv: &Mover, c: usize, deletes: &mut Vec<u32>) {
-    for (i, &pp) in mv.fixup_pos[c].iter().enumerate() {
+    for (i, &pp) in in_state(&mv.fixup_pos, c).iter().enumerate() {
         w.pos[mv.atoms[i] as usize] = pp;
     }
-    for (i, inf) in mv.fixup_info[c].iter().enumerate() {
+    for (i, inf) in in_state(&mv.fixup_info, c).iter().enumerate() {
         w.info[mv.atoms[i] as usize] = *inf;
     }
-    for (i, &d) in mv.fixup_del[c].iter().enumerate() {
+    for (i, &d) in in_state(&mv.fixup_del, c).iter().enumerate() {
         if d && !deletes.contains(&mv.atoms[i]) {
             deletes.push(mv.atoms[i]);
         }
@@ -3288,7 +4205,7 @@ impl<'c, 'a> CompatOpt<'c, 'a> {
         let mv = &self.ctx.movers[m];
         let mut ret = 0.0;
         for slot in 0..mv.n_moved {
-            let d = &mv.coarse_del[index];
+            let d = in_state(&mv.coarse_del, index);
             if slot < d.len() && d[slot] {
                 continue;
             }
@@ -3534,10 +4451,10 @@ fn compat_optimize(ctx: &Ctx, components: &[Vec<u32>], edges: &[(usize, usize)],
         let mv = &ctx.movers[m];
         let c = co.coarse_loc[m];
         let initial_score = co.score_position(m, c, 0);
-        let nf = mv.fine_pos[c].len();
+        let nf = mv.fine.count();
         let mut msg = String::new();
         if nf > 0 {
-            let mut scores: Vec<f64> = mv.fine_pref[c].iter().map(|p| p * mag).collect();
+            let mut scores: Vec<f64> = mv.fine.prefs(c).iter().map(|p| p * mag).collect();
             for i in 0..nf {
                 co.st.cfg[m] = Cfg::Fine(c as u16, i as u16);
                 let mut s = 0.0;

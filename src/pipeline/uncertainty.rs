@@ -52,7 +52,7 @@ pub(super) struct Policy {
 }
 
 fn mapping(comp: &Comp, group: &AtomGroup) -> Vec<Option<String>> {
-    let names = group.atoms.iter().map(|atom| atom.name.clone()).collect::<Vec<_>>();
+    let names = group.atoms.iter().map(|atom| atom.name.to_string()).collect::<Vec<_>>();
     let is_na = comp.test_for_rna_dna().is_some() || resclass::get_class(&group.resname).is_rna_dna();
     names::map_atoms(comp, &names, None, is_na, None).ids
 }
@@ -139,7 +139,7 @@ impl Policy {
 
     fn observe(&mut self, group: &AtomGroup, ml: &MonLib) -> Result<(), String> {
         let heavy_names = group.atoms.iter().filter(|atom| !atom.is_hydrogen())
-            .map(|atom| atom.name.clone()).collect::<Vec<_>>();
+            .map(|atom| atom.name.to_string()).collect::<Vec<_>>();
         let Some(comp) = hplace::hydrogen_dictionary(ml, &group.resname, &heavy_names, false) else { return Ok(()) };
         let ids = mapping(&comp, group);
         let heavy = group.atoms.iter().zip(&ids).filter_map(|(atom, id)| {
@@ -178,7 +178,7 @@ impl Policy {
             let pth = *parents.get(&observed.parent_sources[0]).ok_or("An uncertain hydrogen parent disappeared during reduction")?;
             let group = st.atom_group(pth);
             let heavy_names = group.atoms.iter().filter(|atom| !atom.is_hydrogen())
-                .map(|atom| atom.name.clone()).collect::<Vec<_>>();
+                .map(|atom| atom.name.to_string()).collect::<Vec<_>>();
             let comp = hplace::hydrogen_dictionary(ml, &group.resname, &heavy_names, false)
                 .ok_or("An uncertain hydrogen parent lost its dictionary during reduction")?;
             let ids = mapping(&comp, group);

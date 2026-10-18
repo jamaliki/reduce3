@@ -21,7 +21,7 @@ fn atom(st: &Structure, component: &str, name: &str) -> AtomPath {
 fn heavy(st: &Structure) -> Vec<(u32, String, [u32; 3], u64, String)> {
     let mut rows: Vec<_> = st.atom_paths().into_iter().filter(|&p| !st.atom(p).is_hydrogen()).map(|p| {
         let a = st.atom(p);
-        (a.src, a.name.clone(), a.xyz.as_array().map(|v| (v as f32).to_bits()), a.b.to_bits(), a.charge.clone())
+        (a.src, a.name.to_string(), a.xyz.as_array().map(|v| (v as f32).to_bits()), a.b.to_bits(), a.charge.to_string())
     }).collect();
     rows.sort_by_key(|row| row.0);
     rows

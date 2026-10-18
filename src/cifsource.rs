@@ -45,6 +45,11 @@ pub trait CifTable {
             _ => None,
         }
     }
+    /// [`CifTable::missing`] and [`CifTable::cell`] of one value. Sources
+    /// that can read both with one lookup should override it.
+    fn cell_with_missing(&self, row: usize, column: usize) -> (Option<CifCell<'static>>, Cow<'_, str>) {
+        (self.missing(row, column), self.cell(row, column))
+    }
 }
 
 /// One parsed CIF data block.
@@ -73,6 +78,19 @@ pub enum CifCell<'a> {
     NotApplicable,
 }
 
+/// One value of a column sent with [`CifSink::source_column`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnValue {
+    /// The value in this row of the same column of the source table.
+    Source(usize),
+    /// The text in this byte range of the text sent with the column.
+    Made(usize, usize),
+    /// CIF unknown (`?`).
+    Unknown,
+    /// CIF not applicable (`.`).
+    NotApplicable,
+}
+
 /// Receives an output data block in order.
 pub trait CifSink {
     /// The data block code (`data_<code>`); called once, first.
@@ -91,6 +109,18 @@ pub trait CifSink {
     fn copy_category(&mut self, _category: &str) -> bool {
         false
     }
+    /// Start a loop that rewrites the loop of the source category `category`
+    /// and has its tags. If this returns `true`, the writer sends the loop
+    /// with one [`CifSink::source_column`] call per tag, in order, and then
+    /// calls [`CifSink::end_loop`]. The default returns `false`, and the
+    /// writer then sends [`CifSink::begin_loop`] and [`CifSink::row`] calls.
+    fn begin_source_loop(&mut self, _category: &str, _tags: &[&str], _rows: usize) -> bool {
+        false
+    }
+    /// The values of column `column` in row order, for a loop started with
+    /// [`CifSink::begin_source_loop`]. A [`ColumnValue::Source`] value names
+    /// a row of the same column of the source loop.
+    fn source_column(&mut self, _column: usize, _values: &[ColumnValue], _text: &str) {}
 }
 
 /// True when the text writer puts `value` in quotes: it is empty, starts with

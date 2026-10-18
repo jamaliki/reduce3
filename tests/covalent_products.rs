@@ -19,7 +19,7 @@ fn place(st: &mut Structure, library: &MonLib, compat: bool) -> hplace::Placed {
 fn heavy_sites(st: &Structure) -> Vec<(String, String, String, String, reduce3::geom::Vec3, String)> {
     let mut sites: Vec<_> = st.atom_paths().into_iter().filter(|&p| !st.atom(p).is_hydrogen()).map(|p| (
         st.chain(p).id.clone(), st.residue_group(p).resseq.trim().into(),
-        st.atom_group(p).resname.trim().into(), st.atom(p).name.trim().into(), st.atom(p).xyz, st.atom(p).charge.clone(),
+        st.atom_group(p).resname.trim().into(), st.atom(p).name.trim().into(), st.atom(p).xyz, st.atom(p).charge.to_string(),
     )).collect();
     sites.sort_by(|a, b| (&a.0, &a.1, &a.2, &a.3).cmp(&(&b.0, &b.1, &b.2, &b.3)));
     sites

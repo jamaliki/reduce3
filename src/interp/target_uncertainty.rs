@@ -1,7 +1,7 @@
 //! Report deposited bonds whose targets lack a supported chemical environment.
 
-use super::{FlatAtoms, ORIGIN_COVALENT};
-use crate::model::{Atom, AtomLabel, EndpointResolver, Structure};
+use super::ORIGIN_COVALENT;
+use crate::model::{Atom, AtomLabel, AtomPath, EndpointResolver, Structure};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Why a deposited bond cannot supply a full chemical-state target.
@@ -35,15 +35,29 @@ fn canonical(component: &str) -> bool {
      "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL"].contains(&component)
 }
 
-fn cysteine_sulfur(st: &Structure, flat: &FlatAtoms, index: u32) -> bool {
-    flat.element[index as usize] == "S" && flat.name[index as usize].trim() == "SG"
-        && st.atom_group(flat.path[index as usize]).resname.trim() == "CYS"
+/// False for every atom whose trimmed name is not OXT, without trimming.
+fn maybe_oxt(atom: &Atom) -> bool { atom.name.as_bytes().contains(&b'X') }
+
+// Atoms are addressed by their index in `paths`, the structure's atom order.
+fn atom<'a>(st: &'a Structure, paths: &[AtomPath], index: u32) -> &'a Atom {
+    st.atom(paths[index as usize])
 }
 
-fn peptide(st: &Structure, flat: &FlatAtoms, first: u32, second: u32) -> bool {
-    let names = (flat.name[first as usize].trim(), flat.name[second as usize].trim());
-    !same_residue(flat, first, second) && matches!(names, ("N", "C") | ("C", "N")) && [first, second].iter().all(|&index|
-        crate::resclass::get_class(st.atom_group(flat.path[index as usize]).resname.trim()).is_amino_acid())
+/// The trimmed atom name, and whether the upper-case element is `element`.
+fn name_and_element<'a>(st: &'a Structure, paths: &[AtomPath], index: u32, element: &str) -> (&'a str, bool) {
+    let atom = atom(st, paths, index);
+    (atom.name.trim(), atom.elem().eq_ignore_ascii_case(element))
+}
+
+fn cysteine_sulfur(st: &Structure, paths: &[AtomPath], index: u32) -> bool {
+    let (name, sulfur) = name_and_element(st, paths, index, "S");
+    sulfur && name == "SG" && st.atom_group(paths[index as usize]).resname.trim() == "CYS"
+}
+
+fn peptide(st: &Structure, paths: &[AtomPath], first: u32, second: u32) -> bool {
+    let names = (atom(st, paths, first).name.trim(), atom(st, paths, second).name.trim());
+    !same_residue(paths, first, second) && matches!(names, ("N", "C") | ("C", "N")) && [first, second].iter().all(|&index|
+        crate::resclass::get_class(st.atom_group(paths[index as usize]).resname.trim()).is_amino_acid())
 }
 
 fn peptide_origin(origin: Option<u16>) -> bool {
@@ -53,8 +67,8 @@ fn peptide_origin(origin: Option<u16>) -> bool {
 
 fn pair(a: u32, b: u32) -> (u32, u32) { (a.min(b), a.max(b)) }
 
-fn same_residue(flat: &FlatAtoms, a: u32, b: u32) -> bool {
-    let (a, b) = (flat.path[a as usize], flat.path[b as usize]);
+fn same_residue(paths: &[AtomPath], a: u32, b: u32) -> bool {
+    let (a, b) = (paths[a as usize], paths[b as usize]);
     (a.model, a.chain, a.rg) == (b.model, b.chain, b.rg)
 }
 
@@ -68,10 +82,11 @@ fn priority(reason: BondUncertaintyReason) -> u8 {
     }
 }
 
-fn add(result: &mut FxHashMap<u32, BondUncertainty>, st: &Structure, flat: &FlatAtoms,
+fn add(result: &mut FxHashMap<u32, BondUncertainty>, st: &Structure, paths: &[AtomPath],
        index: u32, hydrogens_unknown: bool, reason: BondUncertaintyReason) {
-    let parent_source = st.atom(flat.path[index as usize]).src;
-    if parent_source == Atom::NEW || flat.is_h[index as usize] { return; }
+    let parent = atom(st, paths, index);
+    let parent_source = parent.src;
+    if parent_source == Atom::NEW || parent.is_hydrogen() { return; }
     let entry = result.entry(parent_source).or_insert(BondUncertainty {
         parent_source, hydrogens_unknown, reason,
     });
@@ -79,23 +94,25 @@ fn add(result: &mut FxHashMap<u32, BondUncertainty>, st: &Structure, flat: &Flat
     if priority(reason) > priority(entry.reason) { entry.reason = reason; }
 }
 
-fn deposited_pairs(st: &Structure, flat: &FlatAtoms,
+fn deposited_pairs(st: &Structure, paths: &[AtomPath],
     result: &mut FxHashMap<u32, BondUncertainty>) -> FxHashSet<(u32, u32)> {
     let mut pairs = FxHashSet::default();
     if !st.links.iter().any(|link| matches!(link.kind.as_str(), "covale" | "disulf")) { return pairs; }
-    let resolver = EndpointResolver::new(st, &flat.path);
+    let labels = st.links.iter().filter(|link| matches!(link.kind.as_str(), "covale" | "disulf"))
+        .flat_map(|link| [&link.atom1, &link.atom2]);
+    let resolver = EndpointResolver::for_labels(st, paths, labels);
     let matches = |label: &AtomLabel| resolver.matching_indices(label).collect::<Vec<_>>();
     for link in st.links.iter().filter(|link| matches!(link.kind.as_str(), "covale" | "disulf")) {
         let (first, second) = (matches(&link.atom1), matches(&link.atom2));
         let ([a], [b]) = (&first[..], &second[..]) else {
             for &index in first.iter().chain(&second) {
-                add(result, st, flat, index, true, BondUncertaintyReason::AmbiguousEndpoint);
+                add(result, st, paths, index, true, BondUncertaintyReason::AmbiguousEndpoint);
             }
             continue;
         };
-        if a == b || flat.path[*a as usize].model != flat.path[*b as usize].model {
+        if a == b || paths[*a as usize].model != paths[*b as usize].model {
             for index in [*a, *b] {
-                add(result, st, flat, index, true, BondUncertaintyReason::AmbiguousEndpoint);
+                add(result, st, paths, index, true, BondUncertaintyReason::AmbiguousEndpoint);
             }
             continue;
         }
@@ -104,60 +121,53 @@ fn deposited_pairs(st: &Structure, flat: &FlatAtoms,
     pairs
 }
 
-fn multiple_sulfur_partners(st: &Structure, flat: &FlatAtoms,
+fn multiple_sulfur_partners(st: &Structure, paths: &[AtomPath],
     pairs: &FxHashSet<(u32, u32)>) -> FxHashSet<u32> {
     let mut counts: FxHashMap<u32, usize> = FxHashMap::default();
     for &(a, b) in pairs {
         for index in [a, b] {
-            if cysteine_sulfur(st, flat, index) { *counts.entry(index).or_default() += 1; }
+            if cysteine_sulfur(st, paths, index) { *counts.entry(index).or_default() += 1; }
         }
     }
     counts.into_iter().filter_map(|(index, count)| (count > 1).then_some(index)).collect()
 }
 
-fn hydrogen_parents(st: &Structure, flat: &FlatAtoms, bonds: &[(u32, u32, u16)]) -> FxHashMap<u32, bool> {
-    let mut parents = FxHashMap::default();
-    for &(a, b, _) in bonds {
-        for (parent, h) in [(a, b), (b, a)] {
-            if flat.is_h[h as usize] {
-                let generated = st.atom(flat.path[h as usize]).src == Atom::NEW;
-                *parents.entry(parent).or_default() |= generated;
-            }
-        }
-    }
-    parents
-}
 
-fn report_pair(st: &Structure, flat: &FlatAtoms, edge: (u32, u32), origin: Option<u16>,
+fn report_pair(st: &Structure, paths: &[AtomPath], edge: (u32, u32), origin: Option<u16>,
     multiple: &FxHashSet<u32>, h_parents: &FxHashMap<u32, bool>, result: &mut FxHashMap<u32, BondUncertainty>) {
     let (a, b) = edge;
     let reason = if multiple.contains(&a) || multiple.contains(&b) {
         Some(BondUncertaintyReason::MultipleSulfurPartners)
     } else if origin.is_none() { Some(BondUncertaintyReason::UninterpretedBond) } else { None };
     if let Some(reason) = reason {
-        for index in [a, b] { add(result, st, flat, index, true, reason); }
-    } else if !peptide_origin(origin) || !peptide(st, flat, a, b) {
+        for index in [a, b] { add(result, st, paths, index, true, reason); }
+    } else if !peptide_origin(origin) || !peptide(st, paths, a, b) {
         for index in [a, b] {
-            if canonical(st.atom_group(flat.path[index as usize]).resname.trim()) {
-                let sulfur = cysteine_sulfur(st, flat, index);
+            if canonical(st.atom_group(paths[index as usize]).resname.trim()) {
+                let sulfur = cysteine_sulfur(st, paths, index);
                 if !sulfur || h_parents.contains_key(&index) {
-                    add(result, st, flat, index, sulfur && h_parents[&index], BondUncertaintyReason::UnsupportedResidueEnvironment);
+                    add(result, st, paths, index, sulfur && h_parents[&index], BondUncertaintyReason::UnsupportedResidueEnvironment);
                 }
             }
         }
     }
 }
 
-fn terminal_oxygen(st: &Structure, flat: &FlatAtoms, intrinsic: &FxHashSet<(u32, u32)>,
+/// The (carbon, oxygen) orders of a bond that joins C to OXT in a canonical residue.
+fn terminal_oxygen_bond<'a>(st: &'a Structure, paths: &'a [AtomPath], a: u32, b: u32) -> impl Iterator<Item = (u32, u32)> + 'a {
+    [(a, b), (b, a)].into_iter().filter(move |&(carbon, oxygen)|
+        name_and_element(st, paths, carbon, "C") == ("C", true)
+            && name_and_element(st, paths, oxygen, "O") == ("OXT", true)
+            && canonical(st.atom_group(paths[carbon as usize]).resname.trim()))
+}
+
+fn terminal_oxygen(st: &Structure, paths: &[AtomPath], intrinsic: &[(u32, u32)],
     result: &mut FxHashMap<u32, BondUncertainty>) {
     for &(a, b) in intrinsic {
-        for (carbon, oxygen) in [(a, b), (b, a)] {
-            if flat.name[carbon as usize].trim() != "C" || flat.element[carbon as usize] != "C"
-                || flat.name[oxygen as usize].trim() != "OXT" || flat.element[oxygen as usize] != "O"
-                || !canonical(st.atom_group(flat.path[carbon as usize]).resname.trim()) { continue; }
-            let source = st.atom(flat.path[carbon as usize]).src;
+        for (carbon, oxygen) in terminal_oxygen_bond(st, paths, a, b) {
+            let source = atom(st, paths, carbon).src;
             if let Some(uncertainty) = result.get(&source).cloned() {
-                add(result, st, flat, oxygen, uncertainty.hydrogens_unknown, uncertainty.reason);
+                add(result, st, paths, oxygen, uncertainty.hydrogens_unknown, uncertainty.reason);
             }
         }
     }
@@ -167,19 +177,38 @@ fn terminal_oxygen(st: &Structure, flat: &FlatAtoms, intrinsic: &FxHashSet<(u32,
 /// This reports uncertainty; it never adds a bond or changes an atom.
 pub fn inspect(st: &Structure, bonds: &[(u32, u32, u16)]) -> Vec<BondUncertainty> {
     if !st.links.iter().any(|link| matches!(link.kind.as_str(), "covale" | "disulf")) { return Vec::new(); }
-    let flat = FlatAtoms::from_structure(st);
-    let graph: FxHashMap<_, _> = bonds.iter().map(|&(a, b, origin)| (pair(a, b), origin)).collect();
-    let intrinsic: FxHashSet<_> = graph.iter().filter_map(|(&(a, b), &origin)|
-        (origin == ORIGIN_COVALENT && same_residue(&flat, a, b)).then_some(pair(a, b))).collect();
+    let paths = st.atom_paths();
     let mut result = FxHashMap::default();
-    let mut pairs = deposited_pairs(st, &flat, &mut result);
-    pairs.retain(|edge| !intrinsic.contains(edge));
-    let multiple = multiple_sulfur_partners(st, &flat, &pairs);
-    let h_parents = hydrogen_parents(st, &flat, bonds);
-    for edge in pairs {
-        report_pair(st, &flat, edge, graph.get(&edge).copied(), &multiple, &h_parents, &mut result);
+    let mut pairs = deposited_pairs(st, &paths, &mut result);
+    // One pass over the bonds gathers what the deposited pairs and the C-OXT
+    // bonds need: the last origin given for each such pair, and whether each
+    // pair endpoint has an H, and a generated one.
+    let mut endpoint = vec![false; paths.len()];
+    for &(a, b) in &pairs { endpoint[a as usize] = true; endpoint[b as usize] = true; }
+    let mut origins: FxHashMap<(u32, u32), u16> = FxHashMap::default();
+    let mut terminal: FxHashMap<(u32, u32), u16> = FxHashMap::default();
+    let mut h_parents: FxHashMap<u32, bool> = FxHashMap::default();
+    let oxt: Vec<bool> = st.atom_refs().into_iter().map(maybe_oxt).collect();
+    for &(a, b, origin) in bonds {
+        let edge = pair(a, b);
+        if endpoint[a as usize] && endpoint[b as usize] && pairs.contains(&edge) { origins.insert(edge, origin); }
+        if (oxt[a as usize] || oxt[b as usize])
+            && terminal_oxygen_bond(st, &paths, a, b).next().is_some() { terminal.insert(edge, origin); }
+        for (parent, h) in [(a, b), (b, a)] {
+            if !endpoint[parent as usize] { continue; }
+            let h = atom(st, &paths, h);
+            if h.is_hydrogen() { *h_parents.entry(parent).or_default() |= h.src == Atom::NEW; }
+        }
     }
-    terminal_oxygen(st, &flat, &intrinsic, &mut result);
+    let intrinsic = |&(a, b): &(u32, u32), origin: u16| origin == ORIGIN_COVALENT && same_residue(&paths, a, b);
+    pairs.retain(|edge| !origins.get(edge).is_some_and(|&origin| intrinsic(edge, origin)));
+    let multiple = multiple_sulfur_partners(st, &paths, &pairs);
+    for edge in pairs {
+        report_pair(st, &paths, edge, origins.get(&edge).copied(), &multiple, &h_parents, &mut result);
+    }
+    let terminal: Vec<_> = terminal.into_iter().filter(|(edge, origin)| intrinsic(edge, *origin))
+        .map(|(edge, _)| edge).collect();
+    terminal_oxygen(st, &paths, &terminal, &mut result);
     let mut result: Vec<_> = result.into_values().collect();
     result.sort_by_key(|entry| entry.parent_source);
     result
@@ -189,16 +218,17 @@ pub fn inspect(st: &Structure, bonds: &[(u32, u32, u16)]) -> Vec<BondUncertainty
 /// Call this only after an explicit uncertainty policy encounters unplaced H.
 pub fn add_degenerate_heavy_bonds(st: &Structure, bonds: &[(u32, u32, u16)],
     reports: &mut Vec<BondUncertainty>) {
-    let flat = FlatAtoms::from_structure(st);
+    let paths = st.atom_paths();
+    let atoms = st.atom_refs();
     let mut result = reports.drain(..).map(|report| (report.parent_source, report)).collect();
     for &(a, b, _) in bonds {
-        if a == b || flat.is_h[a as usize] || flat.is_h[b as usize]
-            || flat.path[a as usize].model != flat.path[b as usize].model { continue; }
-        let (first, second) = (st.atom(flat.path[a as usize]), st.atom(flat.path[b as usize]));
+        let (first, second) = (atoms[a as usize], atoms[b as usize]);
+        if a == b || first.is_hydrogen() || second.is_hydrogen()
+            || paths[a as usize].model != paths[b as usize].model { continue; }
         if first.src == Atom::NEW || second.src == Atom::NEW || first.src == second.src
             || first.xyz != second.xyz || first.xyz.as_array().iter().any(|x| !x.is_finite()) { continue; }
         for index in [a, b] {
-            add(&mut result, st, &flat, index, true, BondUncertaintyReason::DegenerateHeavyBond);
+            add(&mut result, st, &paths, index, true, BondUncertaintyReason::DegenerateHeavyBond);
         }
     }
     *reports = result.into_values().collect();
@@ -217,7 +247,7 @@ mod endpoint_tests {
             "_atom_site.auth_asym_id\n_atom_site.auth_seq_id\n",
             "_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n",
             "_atom_site.occupancy\n_atom_site.B_iso_or_equiv\nS SG . CYS A 1 0 0 0 1 10\n")).unwrap();
-        let flat = FlatAtoms::from_structure(&st);
+        let paths = st.atom_paths();
         let expected: FxHashMap<_, _> = [(7, BondUncertainty { parent_source: 7,
             hydrogens_unknown: false, reason: BondUncertaintyReason::UninterpretedBond })].into_iter().collect();
         let label = AtomLabel { name: "SG".into(), resname: "CYS".into(), chain: "A".into(),
@@ -226,7 +256,7 @@ mod endpoint_tests {
             st.links = kind.into_iter().map(|kind| LinkRecord { atom1: label.clone(), atom2: label.clone(),
                 distance: None, order: None, kind: kind.into() }).collect();
             let mut result = expected.clone();
-            assert!(deposited_pairs(&st, &flat, &mut result).is_empty());
+            assert!(deposited_pairs(&st, &paths, &mut result).is_empty());
             assert_eq!(result, expected);
         }
     }
@@ -236,16 +266,16 @@ mod endpoint_tests {
 pub(crate) fn add_observed_sulfur_targets(st: &Structure, bonds: &[(u32, u32, u16)],
     observed: &FxHashSet<u32>, reports: &mut Vec<BondUncertainty>) {
     if observed.is_empty() { return; }
-    let flat = FlatAtoms::from_structure(st);
+    let paths = st.atom_paths();
     let graph: FxHashSet<_> = bonds.iter().map(|&(a, b, _)| pair(a, b)).collect();
     let mut result = reports.drain(..).map(|report| (report.parent_source, report)).collect();
-    for (a, b) in deposited_pairs(st, &flat, &mut FxHashMap::default()) {
-        if same_residue(&flat, a, b) || !graph.contains(&pair(a, b))
-            || [a, b].iter().any(|&index| flat.is_h[index as usize]
-                || st.atom(flat.path[index as usize]).src == Atom::NEW) { continue; }
+    for (a, b) in deposited_pairs(st, &paths, &mut FxHashMap::default()) {
+        if same_residue(&paths, a, b) || !graph.contains(&pair(a, b))
+            || [a, b].iter().any(|&index| atom(st, &paths, index).is_hydrogen()
+                || atom(st, &paths, index).src == Atom::NEW) { continue; }
         for index in [a, b] {
-            if observed.contains(&st.atom(flat.path[index as usize]).src) && cysteine_sulfur(st, &flat, index) {
-                add(&mut result, st, &flat, index, false, BondUncertaintyReason::UnsupportedResidueEnvironment);
+            if observed.contains(&atom(st, &paths, index).src) && cysteine_sulfur(st, &paths, index) {
+                add(&mut result, st, &paths, index, false, BondUncertaintyReason::UnsupportedResidueEnvironment);
             }
         }
     }

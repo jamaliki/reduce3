@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 pub(crate) fn declared_covalent_anchors(st: &Structure) -> FxHashSet<AtomPath> {
     if !st.links.iter().any(|link| link.kind == "covale") { return FxHashSet::default(); }
     let paths = st.atom_paths();
-    let resolver = EndpointResolver::new(st, &paths);
+    let labels = st.links.iter().filter(|link| link.kind == "covale").flat_map(|link| [&link.atom1, &link.atom2]);
+    let resolver = EndpointResolver::for_labels(st, &paths, labels);
     let mut anchors = FxHashSet::default();
     for link in &st.links {
         if link.kind != "covale" { continue; }

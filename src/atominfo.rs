@@ -2,7 +2,8 @@
 //! `mmtbx.probe.Helpers.getExtraAtomInfo` (van der Waals or ionic radius,
 //! donor/acceptor flags, charge, altloc), including its warning text.
 
-use crate::atomtypes::{is_aromatic_acceptor, is_special_amino_acid_carbonyl};
+use crate::atomtypes::is_aromatic_acceptor;
+use std::fmt::Write;
 use crate::interp::{EType, FlatAtoms};
 use crate::model::Structure;
 use crate::monlib::MonLib;
@@ -52,7 +53,20 @@ pub fn extra_atom_info(
     bonded: &[Vec<u32>],
     set_polar_hydrogen_radius: bool,
 ) -> ExtraInfo {
-    extra_atom_info_with_mode(st, flat, etype, ml, bonded, set_polar_hydrogen_radius, false)
+    extra_atom_info_with_mode(st, flat, etype, ml, bonded, set_polar_hydrogen_radius, false, true)
+}
+
+/// `extra_atom_info`, with the warning text built only when `report` is set.
+pub fn extra_atom_info_report(
+    st: &Structure,
+    flat: &FlatAtoms,
+    etype: &[EType],
+    ml: &MonLib,
+    bonded: &[Vec<u32>],
+    set_polar_hydrogen_radius: bool,
+    report: bool,
+) -> ExtraInfo {
+    extra_atom_info_with_mode(st, flat, etype, ml, bonded, set_polar_hydrogen_radius, false, report)
 }
 
 /// Probe validation typing with CCTBX's electron or neutron energy radii.
@@ -65,7 +79,7 @@ pub fn extra_atom_info_validation(
     bonded: &[Vec<u32>],
     nuclear: bool,
 ) -> ExtraInfo {
-    extra_atom_info_with_mode(st, flat, etype, ml, bonded, true, nuclear)
+    extra_atom_info_with_mode(st, flat, etype, ml, bonded, true, nuclear, true)
 }
 
 fn extra_atom_info_with_mode(
@@ -76,10 +90,19 @@ fn extra_atom_info_with_mode(
     bonded: &[Vec<u32>],
     set_polar_hydrogen_radius: bool,
     nuclear: bool,
+    report: bool,
 ) -> ExtraInfo {
     let n = flat.pos.len();
     let mut info = Vec::with_capacity(n);
     let mut w = String::new();
+    // The arguments are formatted only when the warning text is wanted.
+    macro_rules! note {
+        ($($arg:tt)*) => {
+            if report {
+                let _ = writeln!(w, $($arg)*);
+            }
+        };
+    }
     for k in 0..n {
         let pth = flat.path[k];
         let at = st.atom(pth);
@@ -97,7 +120,7 @@ fn extra_atom_info_with_mode(
         e.is_ion = resclass::element_is_ion(elem);
         // energy-type lookup; a failure takes the exception path of the original
         let entry = match &etype[k] {
-            EType::Typed(t) => ml.ener.get(t).ok_or_else(|| format!("'{}'", t)),
+            EType::Typed(t) => ml.ener.get(t.as_str()).ok_or_else(|| format!("'{}'", t)),
             EType::NoneType => Err("'None'".to_string()),
             EType::Unexpected => Err("'False'".to_string()),
             // cctbx's energy library has an all-empty entry for the empty type
@@ -109,7 +132,7 @@ fn extra_atom_info_with_mode(
                 match en.ion_radius {
                     Some(r) => {
                         e.vdw_radius = r;
-                        w += &format!("Using ionic radius for {}: {} (rather than {})\n", name, py_float(r), py_opt(vdw));
+                        note!( "Using ionic radius for {}: {} (rather than {})", name, py_float(r), py_opt(vdw));
                         Ok(())
                     }
                     None => Err(none_assignment_message()),
@@ -125,15 +148,15 @@ fn extra_atom_info_with_mode(
             }
         });
         if let Err(msg) = radius {
-            w += &format!(
-                "Warning: Could not find atom info for {} (perhaps interpretation was not run on the model?): keeping some default values: {}\n",
+            note!(
+                "Warning: Could not find atom info for {} (perhaps interpretation was not run on the model?): keeping some default values: {}",
                 full_name(),
                 msg
             );
             if e.vdw_radius <= 0.0 {
                 if let Some(r) = ml.ener.get(elem).and_then(|x| energy_radius(x, nuclear)).filter(|&r| r != 0.0) {
                     e.vdw_radius = r;
-                    w += &format!("Using element-based VDW radius for {}: {}\n", full_name(), py_float(r));
+                    note!( "Using element-based VDW radius for {}: {}", full_name(), py_float(r));
                 }
             }
             info.push(e);
@@ -142,21 +165,19 @@ fn extra_atom_info_with_mode(
         let en = entry.unwrap();
         if (elem == "C" || elem == "N") && is_aromatic_acceptor(&ag.resname, &at.name) {
             e.is_acceptor = true;
-            w += &format!("Marking {} as an aromatic-ring acceptor\n", name);
+            note!( "Marking {} as an aromatic-ring acceptor", name);
         }
-        if !ONE_LETTER_GIVEN_THREE_LETTER.iter().any(|(r, _)| *r == ag.resname) && elem == "N" {
+        if elem == "N" && !ONE_LETTER_GIVEN_THREE_LETTER.iter().any(|(r, _)| *r == ag.resname) {
             let has_h = bonded[k].iter().any(|&j| matches!(flat.element[j as usize].as_str(), "H" | "D"));
             if !has_h && !e.is_acceptor {
                 e.is_acceptor = true;
-                w += &format!("Marking {} {} as a non-Hydrogen HET acceptor\n", ag.resname.trim(), name);
+                note!( "Marking {} {} as a non-Hydrogen HET acceptor", ag.resname.trim(), name);
             }
         }
-        if name.to_ascii_uppercase() == "C"
-            || is_special_amino_acid_carbonyl(&ag.resname.trim().to_ascii_uppercase(), &at.name.to_ascii_uppercase(), true)
-        {
+        if name.eq_ignore_ascii_case("C") || special_carbonyl(&ag.resname, &at.name) {
             let expected = 1.65;
             if e.vdw_radius != expected {
-                w += &format!("Overriding radius for {}: {} (was {})\n", name, py_float(expected), py_float(e.vdw_radius));
+                note!( "Overriding radius for {}: {} (was {})", name, py_float(expected), py_float(e.vdw_radius));
                 e.vdw_radius = expected;
             }
         }
@@ -165,7 +186,7 @@ fn extra_atom_info_with_mode(
             && bonded[k].len() == 1
             && matches!(flat.element[bonded[k][0] as usize].as_str(), "N" | "O" | "S");
         if polar_h && e.vdw_radius != 1.05 {
-            w += &format!("Overriding radius for {}: 1.05 (was {})\n", name, py_float(e.vdw_radius));
+            note!( "Overriding radius for {}: 1.05 (was {})", name, py_float(e.vdw_radius));
             e.vdw_radius = 1.05;
         }
         let hb = en.hb_type.as_str();
@@ -177,11 +198,23 @@ fn extra_atom_info_with_mode(
                 e.is_donor = true;
             }
         } else {
-            w += &format!("Warning: Unrecognized specific H bond type for {}, got {}: keeping default value\n", full_name(), hb);
+            note!( "Warning: Unrecognized specific H bond type for {}, got {}: keeping default value", full_name(), hb);
         }
         info.push(e);
     }
     ExtraInfo { info, warnings: w }
+}
+
+/// `is_special_amino_acid_carbonyl(resname.trim() upper-cased, atom name upper-cased, true)`,
+/// compared without copying either name.
+fn special_carbonyl(resname: &str, atom_name: &str) -> bool {
+    let residues: &[&str] = match atom_name.trim_end() {
+        name if name.eq_ignore_ascii_case(" CG") => &["ASP", "ASN", "ASX"],
+        name if name.eq_ignore_ascii_case(" CD") => &["GLU", "GLN", "GLX"],
+        _ => return false,
+    };
+    let resname = resname.trim();
+    residues.iter().any(|value| resname.eq_ignore_ascii_case(value))
 }
 
 fn energy_radius(entry: &crate::monlib::EnerAtom, nuclear: bool) -> Option<f64> {

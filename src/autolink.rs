@@ -147,20 +147,25 @@ impl Classes {
 }
 
 #[derive(Clone, Debug)]
-struct Ag {
+struct Ag<'a> {
     model: u32,
     chain: u32,
     rg: u32,
-    atoms: Vec<u32>,
-    /// All atoms of the residue group (every altloc).
-    rg_atoms: Vec<u32>,
-    resname: String,
-    altloc: String,
+    /// The flat indices of the atoms, which are consecutive.
+    atoms: std::ops::Range<u32>,
+    /// All atoms of the residue group (every altloc), also consecutive.
+    rg_atoms: std::ops::Range<u32>,
+    resname: &'a str,
+    altloc: &'a str,
 }
 
 pub struct AutoLinkParams {
     pub compat: bool,
 }
+
+/// Maps a residue name and a flag for groups of more than one atom to a
+/// class and a saccharide flag.
+type GroupClassCache<'a> = FxHashMap<(&'a str, bool), (&'static str, bool)>;
 
 struct Ctx<'a> {
     st: &'a Structure,
@@ -168,11 +173,14 @@ struct Ctx<'a> {
     ml: &'a MonLib,
     p: &'a AutoLinkParams,
     ag_of: Vec<u32>,
-    ags: Vec<Ag>,
+    ags: Vec<Ag<'a>>,
     /// 0 or 1 for atoms in the first or last residue group of a chain.
     first_last: Vec<i8>,
     type_cache: RefCell<FxHashMap<String, Option<String>>>,
     class_cache: RefCell<FxHashMap<u32, (&'static str, bool, bool)>>,
+    /// The class and saccharide flag of `classes` by residue name and
+    /// whether the atom group has more than one atom, on which they depend.
+    group_class_cache: RefCell<GroupClassCache<'a>>,
     /// interned residue-pair key part and raw atom name per atom (u32::MAX: not yet)
     key_id: RefCell<Vec<u32>>,
     name_id: RefCell<Vec<u32>>,
@@ -184,52 +192,46 @@ impl<'a> Ctx<'a> {
     fn new(st: &'a Structure, flat: &'a FlatAtoms, ml: &'a MonLib, p: &'a AutoLinkParams) -> Ctx<'a> {
         let n = flat.pos.len();
         let mut ag_of = vec![0u32; n];
-        let mut ags: Vec<Ag> = Vec::new();
+        let mut first_last = vec![-1i8; n];
+        let mut ags: Vec<Ag<'a>> = Vec::new();
         let mut last: Option<(u32, u32, u32, u32)> = None;
+        // `first_last` of the atoms of the current atom group
+        let mut fl = -1i8;
         for (k, pth) in flat.path.iter().enumerate() {
             let key = (pth.model, pth.chain, pth.rg, pth.ag);
             if last != Some(key) {
                 let g = st.atom_group(*pth);
+                let nrg = st.chain(*pth).residue_groups.len() as u32;
+                fl = if nrg == 0 { -1 } else if pth.rg == nrg - 1 { 1 } else if pth.rg == 0 { 0 } else { -1 };
                 ags.push(Ag {
                     model: pth.model,
                     chain: pth.chain,
                     rg: pth.rg,
-                    atoms: Vec::new(),
-                    rg_atoms: Vec::new(),
-                    resname: g.resname.clone(),
-                    altloc: g.altloc.clone(),
+                    atoms: k as u32..k as u32,
+                    rg_atoms: 0..0,
+                    resname: &g.resname,
+                    altloc: &g.altloc,
                 });
                 last = Some(key);
             }
             let gi = ags.len() - 1;
-            ags[gi].atoms.push(k as u32);
+            ags[gi].atoms.end = k as u32 + 1;
             ag_of[k] = gi as u32;
+            first_last[k] = fl;
         }
-        // residue-group atom lists
+        // residue-group atom ranges: consecutive atom groups of one residue
+        // group hold consecutive atoms
         let mut s = 0;
         while s < ags.len() {
             let mut e = s;
             while e < ags.len() && (ags[e].model, ags[e].chain, ags[e].rg) == (ags[s].model, ags[s].chain, ags[s].rg) {
                 e += 1;
             }
-            let all: Vec<u32> = ags[s..e].iter().flat_map(|g| g.atoms.iter().copied()).collect();
+            let all = ags[s].atoms.start..ags[e - 1].atoms.end;
             for g in &mut ags[s..e] {
                 g.rg_atoms = all.clone();
             }
             s = e;
-        }
-        let mut first_last = vec![-1i8; n];
-        for (k, pth) in flat.path.iter().enumerate() {
-            let c = st.chain(*pth);
-            let nrg = c.residue_groups.len() as u32;
-            if nrg == 0 {
-                continue;
-            }
-            if pth.rg == nrg - 1 {
-                first_last[k] = 1;
-            } else if pth.rg == 0 {
-                first_last[k] = 0;
-            }
         }
         Ctx {
             st,
@@ -241,6 +243,7 @@ impl<'a> Ctx<'a> {
             first_last,
             type_cache: RefCell::new(FxHashMap::default()),
             class_cache: RefCell::new(FxHashMap::default()),
+            group_class_cache: RefCell::new(FxHashMap::default()),
             key_id: RefCell::new(vec![u32::MAX; n]),
             name_id: RefCell::new(vec![u32::MAX; n]),
             interner: RefCell::new(FxHashMap::default()),
@@ -254,7 +257,7 @@ impl<'a> Ctx<'a> {
     fn elem(&self, a: u32) -> &str {
         &self.flat.element[a as usize]
     }
-    fn ag(&self, a: u32) -> &Ag {
+    fn ag(&self, a: u32) -> &Ag<'a> {
         &self.ags[self.ag_of[a as usize] as usize]
     }
     fn pos(&self, a: u32) -> Vec3 {
@@ -378,6 +381,32 @@ impl<'a> Ctx<'a> {
         self.ccd_type(resname).map_or(false, |t| SUGAR_TYPES.contains(&t.as_str()))
     }
 
+    /// The class of an atom group's residue for `classes`, before metals,
+    /// and whether `classes` counts it as a saccharide.
+    fn group_class(&self, gi: u32) -> (&'static str, bool) {
+        let g = &self.ags[gi as usize];
+        let consider = g.atoms.len() != 1;
+        if let Some(&v) = self.group_class_cache.borrow().get(&(g.resname, consider)) {
+            return v;
+        }
+        let mut gc = resclass::get_class_ext(g.resname, consider).name();
+        if g.resname == "UNK" {
+            gc = "common_amino_acid";
+        }
+        if gc == "modified_amino_acid" || gc == "modified_rna_dna" {
+            gc = "other";
+        }
+        let sacch = if ONE_LETTER_GIVEN_THREE_LETTER.iter().any(|(n, _)| *n == g.resname) || g.resname == "HOH" {
+            false
+        } else if gc == "common_saccharide" {
+            true
+        } else {
+            self.is_sugar_type(g.resname)
+        };
+        self.group_class_cache.borrow_mut().insert((g.resname, consider), (gc, sacch));
+        (gc, sacch)
+    }
+
     /// `linking_utils.get_classes(atom)`.
     fn classes(&self, a: u32) -> Classes {
         let gi = self.ag_of[a as usize];
@@ -386,25 +415,11 @@ impl<'a> Ctx<'a> {
             Some(v) => v,
             None => {
                 let g = &self.ags[gi as usize];
-                let consider = g.atoms.len() != 1;
-                let mut gc = resclass::get_class_ext(&g.resname, consider).name();
-                if g.resname == "UNK" {
-                    gc = "common_amino_acid";
-                }
-                if gc == "modified_amino_acid" || gc == "modified_rna_dna" {
-                    gc = "other";
-                }
-                let sacch = if ONE_LETTER_GIVEN_THREE_LETTER.iter().any(|(n, _)| *n == g.resname) || g.resname == "HOH" {
-                    false
-                } else if gc == "common_saccharide" {
-                    true
-                } else {
-                    self.is_sugar_type(&g.resname)
-                };
+                let (gc, sacch) = self.group_class(gi);
                 let bb = g
                     .rg_atoms
-                    .iter()
-                    .filter(|&&x| matches!(self.name(x).trim(), "C" | "CA" | "N" | "O" | "OXT"))
+                    .clone()
+                    .filter(|&x| matches!(self.name(x).trim(), "C" | "CA" | "N" | "O" | "OXT"))
                     .count();
                 let v = (gc, sacch, bb >= 4);
                 self.class_cache.borrow_mut().insert(gi, v);
@@ -456,11 +471,11 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             let rg = &c.residue_groups[g.rg as usize];
-            if &rg.resseq != resseq || &g.resname != resname {
+            if &rg.resseq != resseq || g.resname != resname {
                 continue;
             }
             let mut out = Vec::new();
-            for &x in &g.atoms {
+            for x in g.atoms.clone() {
                 if self.name(x) == self.name(a) {
                     continue;
                 }
@@ -481,7 +496,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Sum the present, compatible dictionary bonds of a carbon in half units.
-    fn carbon_valence(&self, it: &Interp, initial: &[Vec<u32>], a: u32, partner: u32) -> Option<u8> {
+    fn carbon_valence(&self, it: &Interp, initial: &Initial, a: u32, partner: u32) -> Option<u8> {
         if self.elem(a) != "C" { return None; }
         let info = &it.dict[a as usize];
         let (Some(comp), Some(id)) = (&info.comp, &info.dict_id) else { return None };
@@ -490,20 +505,20 @@ impl<'a> Ctx<'a> {
         let mut seen = FxHashSet::default();
         let mut names = FxHashSet::default();
         let mut value = 0u8;
-        for &other in &initial[a as usize] {
+        for &other in initial.of(a) {
             let group = self.ag(other);
             let parent = self.ag(a);
             if (group.model, group.chain, group.rg) != (parent.model, parent.chain, parent.rg)
                 || (!alt.is_empty() && !group.altloc.is_empty() && alt != &group.altloc) { continue; }
             let info = &it.dict[other as usize];
             let (Some(source), Some(other_id)) = (&info.comp, &info.dict_id) else { return None };
-            if !Arc::ptr_eq(source, comp) { return None; }
-            if !seen.insert((other_id.as_str(), group.altloc.as_str())) { return None; }
+            if !Arc::ptr_eq(source, comp) || it.dict[other as usize].instance != it.dict[a as usize].instance { return None; }
+            if !seen.insert((other_id.as_str(), group.altloc)) { return None; }
             if !names.insert(other_id.as_str()) { continue; }
             let bonds: Vec<_> = comp.bonds.iter().filter(|b|
                 (&b.a1 == id && &b.a2 == other_id) || (&b.a2 == id && &b.a1 == other_id)).collect();
             let [bond] = bonds[..] else { return None };
-            value = value.checked_add(crate::interp::source_bond_order(self.ml, comp, bond, &parent.resname)?)?;
+            value = value.checked_add(crate::interp::source_bond_order(self.ml, comp, bond, parent.resname)?)?;
         }
         Some(value)
     }
@@ -651,7 +666,7 @@ impl<'a> Ctx<'a> {
 
     fn find_by_name(&self, g: u32, name: &str) -> Option<u32> {
         let n = name.trim();
-        self.ags[g as usize].atoms.iter().copied().find(|&x| self.name(x).trim() == n)
+        self.ags[g as usize].atoms.clone().find(|&x| self.name(x).trim() == n)
     }
 
     fn peptide_pair(&self, it: &Interp, a: u32, b: u32) -> bool {
@@ -664,13 +679,15 @@ impl<'a> Ctx<'a> {
                     || it.dict[index as usize].comp.as_ref().is_some_and(|comp| comp.test_for_peptide()))
     }
 
-    fn has_peptide_partner(&self, it: &Interp, initial: &[Vec<u32>], initial_bonds: usize,
+    fn has_peptide_partner(&self, it: &Interp, initial: &Initial, initial_bonds: usize,
                            atom: u32, candidate: u32) -> bool {
         let compatible = |other: u32| {
             let (a, b) = (&self.ag(other).altloc, &self.ag(candidate).altloc);
             a.is_empty() || b.is_empty() || a == b
         };
-        initial[atom as usize].iter().any(|&other| compatible(other))
+        // peptide bonds made before linking
+        initial.of(atom).iter().zip(initial.bonds_of(atom)).any(|(&other, &k)|
+            peptide_origin(it.bonds[k as usize].origin) && self.peptide_pair(it, atom, other) && compatible(other))
             || it.bonds[initial_bonds..].iter().any(|bond| {
                 let other = if bond.i == atom { bond.j } else if bond.j == atom { bond.i } else { return false };
                 peptide_origin(bond.origin) && self.peptide_pair(it, atom, other) && compatible(other)
@@ -726,7 +743,7 @@ impl<'a> Ctx<'a> {
             it.add_plane(atoms);
         }
         if !bonds.is_empty() {
-            let anchors = [self.ags[g1 as usize].atoms[0], self.ags[g2 as usize].atoms[0]];
+            let anchors = [self.ags[g1 as usize].atoms.start, self.ags[g2 as usize].atoms.start];
             it.automatic_links.push(crate::interp::AutomaticLink::Dictionary {
                 id: link.id.clone(), anchors, origin,
             });
@@ -738,7 +755,7 @@ impl<'a> Ctx<'a> {
     fn glyco_link_atoms(&self, g1: u32, g2: u32, cutoff: f64) -> Option<GlycoAtoms> {
         // bonds by distance over the atoms of both residue groups
         let all: Vec<u32> =
-            self.ags[g1 as usize].rg_atoms.iter().chain(self.ags[g2 as usize].rg_atoms.iter()).copied().collect();
+            self.ags[g1 as usize].rg_atoms.clone().chain(self.ags[g2 as usize].rg_atoms.clone()).collect();
         let c2 = cutoff * cutoff;
         let mut bonds: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         for (i, &x) in all.iter().enumerate() {
@@ -756,7 +773,7 @@ impl<'a> Ctx<'a> {
         let nb = |x: u32| bonds.get(&x).map(|v| v.as_slice()).unwrap_or(&[]);
         let el = |x: u32| self.elem(x);
         let order: Vec<u32> =
-            self.ags[g1 as usize].atoms.iter().chain(self.ags[g2 as usize].atoms.iter()).copied().collect();
+            self.ags[g1 as usize].atoms.clone().chain(self.ags[g2 as usize].atoms.clone()).collect();
         // anomeric carbon: a C bonded to two O of different atom groups
         let mut found: Option<(u32, bool)> = None;
         for &x in &order {
@@ -822,7 +839,7 @@ impl<'a> Ctx<'a> {
             } else {
                 g2
             };
-            self.ags[link_group as usize].atoms.iter().copied().find(|&x| el(x) == "O" && self.d2(x, ac) < 5.0)
+            self.ags[link_group as usize].atoms.clone().find(|&x| el(x) == "O" && self.d2(x, ac) < 5.0)
         };
         if link_oxygen.is_none() {
             link_oxygen = on_distance();
@@ -878,7 +895,7 @@ impl<'a> Ctx<'a> {
 
     /// `glyco_link_class.get_isomer`.
     fn isomer(&self, g: &GlycoAtoms) -> String {
-        let rn = self.ag(g.anomeric_carbon).resname.clone();
+        let rn = self.ag(g.anomeric_carbon).resname;
         let mut s = match linkdata::GLYCO_VOLUMES.iter().find(|(k, _)| *k == rn) {
             Some(&(_, v)) if v < 0.0 => "ALPHA".to_string(),
             Some(_) => "BETA".to_string(),
@@ -903,8 +920,8 @@ impl<'a> Ctx<'a> {
     /// `process_atom_groups_for_linking_single_link`: the link key, or None.
     fn single_link_key(&self, a1: u32, a2: u32) -> Option<String> {
         let (mut a1, mut a2) = (a1, a2);
-        let t1 = self.ccd_type(&self.ag(a1).resname);
-        let t2 = self.ccd_type(&self.ag(a2).resname);
+        let t1 = self.ccd_type(self.ag(a1).resname);
+        let t2 = self.ccd_type(self.ag(a2).resname);
         let sugar = |t: &Option<String>| t.as_deref().map_or(false, |t| SUGAR_TYPES.contains(&t));
         let amino = |t: &Option<String>| t.as_deref().map_or(false, |t| AMINO_TYPES.contains(&t));
         let both = t1.is_some() && t2.is_some();
@@ -924,12 +941,12 @@ impl<'a> Ctx<'a> {
         let (r1, r2) = (self.ag(a1).resname.trim().to_string(), self.ag(a2).resname.trim().to_string());
         let long_key = format!("{}:{}-{}:{}", r1, self.name(a1).trim(), r2, self.name(a2).trim());
         let tmp_key = format!("{}-{}", r1, r2);
-        let (rn1, rn2) = (&self.ag(a1).resname, &self.ag(a2).resname);
+        let (rn1, rn2) = (self.ag(a1).resname, self.ag(a2).resname);
         let (t1, t2) = (self.ccd_type(rn1), self.ccd_type(rn2));
         let both = t1.is_some() && t2.is_some();
         let count = |names: &[&str]| -> bool {
             let s = sugar(&t1) as u8 + sugar(&t2) as u8;
-            let l = (!sugar(&t1) && names.contains(&rn1.as_str())) as u8 + (!sugar(&t2) && names.contains(&rn2.as_str())) as u8;
+            let l = (!sugar(&t1) && names.contains(&rn1)) as u8 + (!sugar(&t2) && names.contains(&rn2)) as u8;
             s == 1 && l == 1
         };
         if both && count(&["ASN"]) {
@@ -1015,14 +1032,14 @@ impl<'a> Ctx<'a> {
         }
         let other = if cl1.has("common_amino_acid") { self.ag_of[a2 as usize] } else { self.ag_of[a1 as usize] };
         let og = &self.ags[other as usize];
-        if resclass::get_class(&og.resname).name() != "other" {
+        if resclass::get_class(og.resname).name() != "other" {
             return None;
         }
         let (n1, n2) = (self.name(a1).trim(), self.name(a2).trim());
         if n1 == "SG" && n2 == "SG" {
             return Some(("SS", false));
         }
-        let count = og.atoms.iter().filter(|&&x| matches!(self.name(x).trim(), "C" | "N" | "O")).count();
+        let count = og.atoms.clone().filter(|&x| matches!(self.name(x).trim(), "C" | "N" | "O")).count();
         if count != 3 {
             return None;
         }
@@ -1052,52 +1069,184 @@ impl GlycoAtoms {
     }
 }
 
+/// The bonds made before linking: each atom's partners and bond indices, in
+/// bond order.
+struct Initial {
+    start: Vec<u32>,
+    partner: Vec<u32>,
+    bond: Vec<u32>,
+}
+
+impl Initial {
+    fn new(it: &Interp, n: usize) -> Initial {
+        let mut start = vec![0u32; n + 1];
+        for b in &it.bonds {
+            start[b.i as usize + 1] += 1;
+            start[b.j as usize + 1] += 1;
+        }
+        for k in 0..n {
+            start[k + 1] += start[k];
+        }
+        let mut fill = start.clone();
+        let mut partner = vec![0u32; start[n] as usize];
+        let mut bond = vec![0u32; start[n] as usize];
+        for (k, b) in it.bonds.iter().enumerate() {
+            for (x, y) in [(b.i, b.j), (b.j, b.i)] {
+                let slot = &mut fill[x as usize];
+                partner[*slot as usize] = y;
+                bond[*slot as usize] = k as u32;
+                *slot += 1;
+            }
+        }
+        Initial { start, partner, bond }
+    }
+    /// Adjacency lists given directly, without bond indices.
+    #[cfg(test)]
+    fn from_lists(lists: &[Vec<u32>]) -> Initial {
+        let mut start = vec![0u32];
+        for l in lists {
+            start.push(start[start.len() - 1] + l.len() as u32);
+        }
+        let partner: Vec<u32> = lists.iter().flatten().copied().collect();
+        let bond = vec![u32::MAX; partner.len()];
+        Initial { start, partner, bond }
+    }
+    fn of(&self, a: u32) -> &[u32] {
+        &self.partner[self.start[a as usize] as usize..self.start[a as usize + 1] as usize]
+    }
+    fn bonds_of(&self, a: u32) -> &[u32] {
+        &self.bond[self.start[a as usize] as usize..self.start[a as usize + 1] as usize]
+    }
+}
+
 /// Heavy-atom pairs closer than `MAX_BONDED_CUTOFF` within each model, in
 /// order of distance (then atom indices). Pairs the main loop would skip
 /// without side effects whatever happened before them are left out: atoms
 /// bonded before linking starts, atoms of one residue group, and different
 /// non-blank altlocs.
-fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
+fn candidate_pairs(cx: &Ctx, initial: &Initial) -> Vec<(f64, u32, u32)> {
     let flat = cx.flat;
     let n = flat.pos.len();
     let rg_of = |a: u32| {
         let p = flat.path[a as usize];
         (p.model, p.chain, p.rg)
     };
-    // heavy atoms per model, each model on a grid of cutoff-sized cells
-    let mut by_model: Vec<Vec<(u32, Vec3)>> = Vec::new();
+    // altloc code per heavy atom: 0 when blank, else 1 + index of the
+    // trimmed altloc among those seen
+    let mut alt_names: Vec<&str> = Vec::new();
+    let mut alt = vec![0u8; n];
+    // heavy atoms per model
+    let mut by_model: Vec<Vec<u32>> = Vec::new();
     for a in (0..n).filter(|&a| !flat.is_h[a]) {
+        let t = flat.altloc[a].trim();
+        if !t.is_empty() {
+            let k = match alt_names.iter().position(|&x| x == t) {
+                Some(k) => k,
+                None => {
+                    alt_names.push(t);
+                    alt_names.len() - 1
+                }
+            };
+            alt[a] = u8::try_from(k + 1).unwrap_or(u8::MAX);
+        }
         let m = flat.path[a].model as usize;
         if by_model.len() <= m {
             by_model.resize(m + 1, Vec::new());
         }
-        by_model[m].push((a as u32, flat.pos[a]));
+        by_model[m].push(a as u32);
+    }
+    // more than 254 altlocs share a code; compare their names then
+    let same_alt = |a: u32, b: u32| {
+        let (x, y) = (alt[a as usize], alt[b as usize]);
+        x == 0 || y == 0 || (x == y && (x != u8::MAX || flat.altloc[a as usize].trim() == flat.altloc[b as usize].trim()))
+    };
+    // cells a little wider than the cutoff, so that atoms closer than it lie
+    // in the same or adjacent cells; each pair of cells is visited once
+    let cell = MAX_BONDED_CUTOFF * (1.0 + 1e-6);
+    let limit2 = cell * cell;
+    let mut half: Vec<[isize; 3]> = Vec::new();
+    for dz in -1..=1isize {
+        for dy in -1..=1isize {
+            for dx in -1..=1isize {
+                if (dz, dy, dx) > (0, 0, 0) {
+                    half.push([dx, dy, dz]);
+                }
+            }
+        }
     }
     let mut out: Vec<(f64, u32, u32)> = Vec::new();
     for atoms in by_model.iter().filter(|v| !v.is_empty()) {
-        let grid = crate::probe::SpatialGrid::new(atoms, MAX_BONDED_CUTOFF);
-        let found = crate::par::flat_map_collect(atoms, |&(a, pa)| {
-            let ra = rg_of(a);
-            let alt_a = flat.altloc[a as usize].trim();
+        let mut lo = v3(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        let mut hi = v3(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for &a in atoms {
+            let p = flat.pos[a as usize];
+            lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+            hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+        }
+        let dims = [
+            ((hi.x - lo.x) / cell).floor() as usize + 1,
+            ((hi.y - lo.y) / cell).floor() as usize + 1,
+            ((hi.z - lo.z) / cell).floor() as usize + 1,
+        ];
+        let axis = |v: f64, l: f64, k: usize| (((v - l) / cell).floor() as usize).min(dims[k] - 1);
+        let cell_of = |p: Vec3| axis(p.x, lo.x, 0) + dims[0] * (axis(p.y, lo.y, 1) + dims[1] * axis(p.z, lo.z, 2));
+        let ncell = dims[0] * dims[1] * dims[2];
+        let mut starts = vec![0u32; ncell + 1];
+        let cells: Vec<usize> = atoms.iter().map(|&a| cell_of(flat.pos[a as usize])).collect();
+        for &c in &cells {
+            starts[c + 1] += 1;
+        }
+        for c in 0..ncell {
+            starts[c + 1] += starts[c];
+        }
+        let mut fill = starts.clone();
+        let mut items = vec![0u32; atoms.len()];
+        for (k, &a) in atoms.iter().enumerate() {
+            items[fill[cells[k]] as usize] = a;
+            fill[cells[k]] += 1;
+        }
+        let range = |c: usize| starts[c] as usize..starts[c + 1] as usize;
+        let planes: Vec<usize> = (0..dims[2]).collect();
+        let found = crate::par::flat_map_collect(&planes, |&z| {
             let mut v: Vec<(f64, u32, u32)> = Vec::new();
-            // a slightly larger query, then the exact test on the same distance
-            grid.for_each_within(pa, 0.0, MAX_BONDED_CUTOFF * (1.0 + 1e-9), |b, pb, _| {
-                if b <= a {
+            let mut test = |p: u32, q: u32| {
+                let (a, b) = if p < q { (p, q) } else { (q, p) };
+                let dv = flat.pos[b as usize] - flat.pos[a as usize];
+                if dv.x * dv.x + dv.y * dv.y + dv.z * dv.z > limit2 {
                     return;
                 }
-                let d = (pb - pa).length();
-                if d >= MAX_BONDED_CUTOFF || rg_of(b) == ra {
-                    return;
-                }
-                let alt_b = flat.altloc[b as usize].trim();
-                if !(alt_a == alt_b || alt_a.is_empty() || alt_b.is_empty()) {
-                    return;
-                }
-                if initial[a as usize].contains(&b) {
+                let d = dv.length();
+                if d >= MAX_BONDED_CUTOFF || rg_of(b) == rg_of(a) || !same_alt(a, b) || initial.of(a).contains(&b) {
                     return;
                 }
                 v.push((d, a, b));
-            });
+            };
+            for y in 0..dims[1] {
+                for x in 0..dims[0] {
+                    let c = x + dims[0] * (y + dims[1] * z);
+                    let own = range(c);
+                    if own.is_empty() {
+                        continue;
+                    }
+                    for k in own.clone() {
+                        for l in k + 1..own.end {
+                            test(items[k], items[l]);
+                        }
+                    }
+                    for d in &half {
+                        let (nx, ny, nz) = (x as isize + d[0], y as isize + d[1], z as isize + d[2]);
+                        if nx < 0 || ny < 0 || nx >= dims[0] as isize || ny >= dims[1] as isize || nz >= dims[2] as isize {
+                            continue;
+                        }
+                        let other = range(nx as usize + dims[0] * (ny as usize + dims[1] * nz as usize));
+                        for k in own.clone() {
+                            for l in other.clone() {
+                                test(items[k], items[l]);
+                            }
+                        }
+                    }
+                }
+            }
             v.into_iter()
         });
         out.extend(found);
@@ -1106,10 +1255,342 @@ fn candidate_pairs(cx: &Ctx, initial: &[Vec<u32>]) -> Vec<(f64, u32, u32)> {
     out
 }
 
+/// Atoms of amino acids, nucleotides and waters other than sulfur link to
+/// each other only when closer than this: `is_atom_pair_linked` passes such
+/// a pair only for amino acid with amino acid or nucleotide, within
+/// `AMINO_ACID_CUTOFF` plus the second-row buffer (1.965 A).
+const NARROW_CUTOFF: f64 = 2.0;
+
+/// Fixed mode: the pairs of `candidate_pairs` whose processing can change the
+/// result. The main loop changes its state only for a pair that passes
+/// `is_atom_pair_linked`. A pair that fails it only records its atom names
+/// for its pair of atom groups, and only later pairs of the same two groups
+/// that pass read the record. So the pairs kept are all those of each pair
+/// of atom groups with at least one passing pair, in the same order.
+fn linking_candidates(cx: &Ctx, initial: &Initial) -> Vec<(f64, u32, u32)> {
+    let flat = cx.flat;
+    let n = flat.pos.len();
+    // Groups whose atoms other than sulfur link only within NARROW_CUTOFF:
+    // those whose `classes(..).important` is an amino acid, a nucleotide or
+    // water, which it is for every atom of the group. `group_class` gives
+    // the same class without the backbone count.
+    let narrow_kind: Vec<Narrow> = (0..cx.ags.len() as u32).map(|g| match cx.group_class(g) {
+        (_, true) => Narrow::No,
+        ("common_amino_acid", _) => Narrow::AminoAcid,
+        ("common_rna_dna", _) => Narrow::Nucleotide,
+        ("common_water", _) => Narrow::Water,
+        _ => Narrow::No,
+    }).collect();
+    // What the narrow pass reads of an atom. A pair with water never passes
+    // `is_atom_pair_linked`, nor does a pair of two nucleotides. An amino acid
+    // passes with a nucleotide, and with another amino acid only as N with C
+    // by element or as atoms named N and C (`possible_cyclic_peptide`).
+    const NARROW: u8 = 1;
+    const AMINO: u8 = 2;
+    const NUCLEOTIDE: u8 = 4;
+    const AMIDE_N: u8 = 8;
+    const AMIDE_C: u8 = 16;
+    let kind = |a: u32| -> u8 {
+        if cx.elem(a) == "S" {
+            return 0;
+        }
+        match narrow_kind[cx.ag_of[a as usize] as usize] {
+            Narrow::No => 0,
+            Narrow::Water => NARROW,
+            Narrow::Nucleotide => NARROW | NUCLEOTIDE,
+            Narrow::AminoAcid => {
+                let (e, name) = (cx.elem(a), cx.name(a));
+                let n_bit = if e == "N" || name == " N  " { AMIDE_N } else { 0 };
+                let c_bit = if e == "C" || name == " C  " { AMIDE_C } else { 0 };
+                NARROW | AMINO | n_bit | c_bit
+            }
+        }
+    };
+    let same_alt = |a: u32, b: u32| {
+        let (x, y) = (flat.altloc[a as usize].trim(), flat.altloc[b as usize].trim());
+        x.is_empty() || y.is_empty() || x == y
+    };
+    let rg_of = |a: u32| {
+        let p = flat.path[a as usize];
+        (p.model, p.chain, p.rg)
+    };
+    let full = MAX_BONDED_CUTOFF * (1.0 + 1e-6);
+    // the pair as `candidate_pairs` records it, if it does
+    let candidate = |p: u32, q: u32| -> Option<(f64, u32, u32)> {
+        let (a, b) = if p < q { (p, q) } else { (q, p) };
+        let dv = flat.pos[b as usize] - flat.pos[a as usize];
+        if dv.x * dv.x + dv.y * dv.y + dv.z * dv.z > full * full {
+            return None;
+        }
+        let d = dv.length();
+        if d >= MAX_BONDED_CUTOFF || rg_of(b) == rg_of(a) || !same_alt(a, b) || initial.of(a).contains(&b) {
+            return None;
+        }
+        Some((d, a, b))
+    };
+    let peptides = ["common_amino_acid", "d_amino_acid", "uncommon_amino_acid"];
+    let passes = |d: f64, i: u32, j: u32| {
+        let (cl1, cl2) = (cx.classes(i), cx.classes(j));
+        let only_cutoff = peptides.contains(&cl1.important) && peptides.contains(&cl2.important) && cx.possible_cyclic_peptide(i, j);
+        cx.is_atom_pair_linked(i, j, cl1.important, cl2.important, d, only_cutoff)
+    };
+    let mut by_model: Vec<Vec<u32>> = Vec::new();
+    for a in (0..n).filter(|&a| !flat.is_h[a]) {
+        let m = flat.path[a].model as usize;
+        if by_model.len() <= m {
+            by_model.resize(m + 1, Vec::new());
+        }
+        by_model[m].push(a as u32);
+    }
+    // residue number of each atom; atoms of one residue are contiguous
+    let mut rg_id = vec![0u32; n];
+    let (mut id, mut prev) = (0u32, None);
+    for g in &cx.ags {
+        let key = (g.model, g.chain, g.rg);
+        if prev.is_some_and(|p| p != key) {
+            id += 1;
+        }
+        prev = Some(key);
+        rg_id[g.atoms.start as usize..g.atoms.end as usize].fill(id);
+    }
+    let cell = NARROW_CUTOFF * (1.0 + 1e-6);
+    let mut keys: FxHashSet<(u32, u32)> = FxHashSet::default();
+    let mut found = |d: f64, a: u32, b: u32| {
+        if passes(d, a, b) {
+            let (x, y) = (cx.ag_of[a as usize], cx.ag_of[b as usize]);
+            keys.insert((x.min(y), x.max(y)));
+        }
+    };
+    for atoms in by_model.iter().filter(|v| !v.is_empty()) {
+        let mut lo = v3(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        let mut hi = v3(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for &a in atoms {
+            let p = flat.pos[a as usize];
+            lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+            hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+        }
+        let dims = [
+            ((hi.x - lo.x) / cell).floor() as usize + 1,
+            ((hi.y - lo.y) / cell).floor() as usize + 1,
+            ((hi.z - lo.z) / cell).floor() as usize + 1,
+        ];
+        let axis = |v: f64, l: f64, k: usize| (((v - l) / cell).floor() as usize).min(dims[k] - 1);
+        let coords = |p: Vec3| [axis(p.x, lo.x, 0), axis(p.y, lo.y, 1), axis(p.z, lo.z, 2)];
+        // The atoms are sorted by row of cells (y, z), then by x cell, then
+        // by index: a counting sort by x cell, then a stable one by row. Each
+        // row is a run of the list, found from `row_start`.
+        let nrow = dims[1] * dims[2];
+        // x cell, row and kind of each atom, in index order
+        let mut cell_x = Vec::with_capacity(atoms.len());
+        let mut cell_row = Vec::with_capacity(atoms.len());
+        let mut flags = Vec::with_capacity(atoms.len());
+        let lists_of = [AMINO, NUCLEOTIDE, AMIDE_N, AMIDE_C];
+        let mut sizes = [0usize; 4];
+        for &a in atoms {
+            let c = coords(flat.pos[a as usize]);
+            cell_x.push(c[0] as u32);
+            cell_row.push((c[1] + dims[1] * c[2]) as u32);
+            let f = kind(a);
+            for (size, bit) in sizes.iter_mut().zip(lists_of) {
+                *size += usize::from(f & bit != 0);
+            }
+            flags.push(f);
+        }
+        let mut by_x = vec![0u32; dims[0] + 1];
+        for &x in &cell_x {
+            by_x[x as usize + 1] += 1;
+        }
+        for x in 0..dims[0] {
+            by_x[x + 1] += by_x[x];
+        }
+        let mut order = vec![0u32; atoms.len()];
+        for (k, &x) in cell_x.iter().enumerate() {
+            let slot = &mut by_x[x as usize];
+            order[*slot as usize] = k as u32;
+            *slot += 1;
+        }
+        let mut row_start = vec![0u32; nrow + 1];
+        for &r in &cell_row {
+            row_start[r as usize + 1] += 1;
+        }
+        for r in 0..nrow {
+            row_start[r + 1] += row_start[r];
+        }
+        let mut fill = row_start.clone();
+        let mut sorted = vec![0u32; atoms.len()];
+        for &k in &order {
+            let slot = &mut fill[cell_row[k as usize] as usize];
+            sorted[*slot as usize] = k;
+            *slot += 1;
+        }
+        let items: Vec<u32> = sorted.iter().map(|&k| atoms[k as usize]).collect();
+        let xs: Vec<u32> = sorted.iter().map(|&k| cell_x[k as usize]).collect();
+        let is_narrow: Vec<bool> = sorted.iter().map(|&k| flags[k as usize] & NARROW != 0).collect();
+        // the atoms of each narrow list in the same order
+        let mut lists = sizes.map(|size| RowAtoms::with_capacity(nrow, size));
+        for r in 0..nrow {
+            for &k in &sorted[row_start[r] as usize..row_start[r + 1] as usize] {
+                let f = flags[k as usize];
+                if f & (AMINO | NUCLEOTIDE) == 0 {
+                    continue;
+                }
+                let a = atoms[k as usize];
+                let (x, p, rg) = (cell_x[k as usize], flat.pos[a as usize], rg_id[a as usize]);
+                for (list, bit) in lists.iter_mut().zip(lists_of) {
+                    if f & bit != 0 {
+                        list.push(a, x, p, rg);
+                    }
+                }
+            }
+            for list in &mut lists {
+                list.end_row();
+            }
+        }
+        let [amino, nucleotide, amide_n, amide_c] = lists;
+        let near2 = cell * cell;
+        // narrow pairs from different residues in the same or adjacent cells
+        for (own, other) in [(&amino, &nucleotide), (&amide_n, &amide_c)] {
+            adjacent_pairs(own, other, dims, |k, l| {
+                if other.rgs[l] == own.rgs[k] || (other.pos[l] - own.pos[k]).length_sq() > near2 {
+                    return;
+                }
+                if let Some((d, a, b)) = candidate(own.items[k], other.items[l]) {
+                    found(d, a, b);
+                }
+            });
+        }
+        // pairs with an atom that is not narrow, up to the full cutoff
+        let reach = (MAX_BONDED_CUTOFF / cell).ceil() as usize;
+        for k in (0..items.len()).filter(|&k| !is_narrow[k]) {
+            let c = coords(flat.pos[items[k] as usize]);
+            let (x0, x1) = (c[0].saturating_sub(reach) as u32, (c[0] + reach).min(dims[0] - 1) as u32);
+            for z in c[2].saturating_sub(reach)..=(c[2] + reach).min(dims[2] - 1) {
+                for y in c[1].saturating_sub(reach)..=(c[1] + reach).min(dims[1] - 1) {
+                    let r = y + dims[1] * z;
+                    let (first, last) = (row_start[r] as usize, row_start[r + 1] as usize);
+                    // the atoms of cells x0 to x1 of the row
+                    let from = first + xs[first..last].partition_point(|&x| x < x0);
+                    let to = first + xs[first..last].partition_point(|&x| x <= x1);
+                    for l in from..to {
+                        // a pair of two such atoms is taken from its first atom
+                        if l == k || (!is_narrow[l] && items[l] < items[k]) {
+                            continue;
+                        }
+                        if let Some((d, a, b)) = candidate(items[k], items[l]) {
+                            found(d, a, b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // every candidate pair of the atom groups with a passing pair
+    let mut out: Vec<(f64, u32, u32)> = Vec::new();
+    for &(x, y) in &keys {
+        for a in cx.ags[x as usize].atoms.clone() {
+            if flat.is_h[a as usize] {
+                continue;
+            }
+            for b in cx.ags[y as usize].atoms.clone() {
+                if flat.is_h[b as usize] {
+                    continue;
+                }
+                out.extend(candidate(a, b));
+            }
+        }
+    }
+    out.sort_unstable_by_key(|&(d, i, j)| (d.to_bits(), i, j));
+    out
+}
+
+/// What an atom is for the narrow pass of `linking_candidates`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Narrow {
+    No,
+    AminoAcid,
+    Nucleotide,
+    Water,
+}
+
+/// Atoms sorted by row of grid cells and then by x cell, with the data the
+/// pair test reads.
+struct RowAtoms {
+    /// The first atom of each row, and the end of the list.
+    start: Vec<u32>,
+    items: Vec<u32>,
+    xs: Vec<u32>,
+    pos: Vec<Vec3>,
+    rgs: Vec<u32>,
+}
+
+impl RowAtoms {
+    fn with_capacity(nrow: usize, atoms: usize) -> RowAtoms {
+        let mut start = Vec::with_capacity(nrow + 1);
+        start.push(0);
+        RowAtoms {
+            start,
+            items: Vec::with_capacity(atoms),
+            xs: Vec::with_capacity(atoms),
+            pos: Vec::with_capacity(atoms),
+            rgs: Vec::with_capacity(atoms),
+        }
+    }
+    fn push(&mut self, a: u32, x: u32, p: Vec3, rg: u32) {
+        self.items.push(a);
+        self.xs.push(x);
+        self.pos.push(p);
+        self.rgs.push(rg);
+    }
+    /// End the current row.
+    fn end_row(&mut self) {
+        self.start.push(self.items.len() as u32);
+    }
+    fn row(&self, r: usize) -> std::ops::Range<usize> {
+        self.start[r] as usize..self.start[r + 1] as usize
+    }
+}
+
+/// Calls `f(k, l)` for each atom `k` of `own` and atom `l` of `other` in the
+/// same or adjacent cells of a grid with `dims` cells. For each row of `own`
+/// and each of the nine rows of `other` next to it, a pointer that only
+/// moves forward finds the atoms of cells x - 1 to x + 1.
+fn adjacent_pairs(own: &RowAtoms, other: &RowAtoms, dims: [usize; 3], mut f: impl FnMut(usize, usize)) {
+    for z in 0..dims[2] {
+        for y in 0..dims[1] {
+            let mine = own.row(y + dims[1] * z);
+            if mine.is_empty() {
+                continue;
+            }
+            for nz in z.saturating_sub(1)..=(z + 1).min(dims[2] - 1) {
+                for ny in y.saturating_sub(1)..=(y + 1).min(dims[1] - 1) {
+                    let theirs = other.row(ny + dims[1] * nz);
+                    if theirs.is_empty() {
+                        continue;
+                    }
+                    let mut lo = theirs.start;
+                    for k in mine.clone() {
+                        let x = own.xs[k];
+                        while lo < theirs.end && other.xs[lo] + 1 < x {
+                            lo += 1;
+                        }
+                        for l in lo..theirs.end {
+                            if other.xs[l] > x + 1 {
+                                break;
+                            }
+                            f(k, l);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Keep unique records for custom-link guards and resolved records for peptide links.
 fn declared_covalent_pairs(st: &Structure, flat: &FlatAtoms) -> (FxHashSet<(u32, u32)>, FxHashSet<(u32, u32)>) {
     if !st.links.iter().any(|link| link.kind == "covale") { return (FxHashSet::default(), FxHashSet::default()); }
-    let resolver = EndpointResolver::new(st, &flat.path);
+    let labels = st.links.iter().filter(|link| link.kind == "covale").flat_map(|link| [&link.atom1, &link.atom2]);
+    let resolver = EndpointResolver::for_labels(st, &flat.path, labels);
     let mut pairs = FxHashMap::default();
     for link in &st.links {
         if link.kind != "covale" { continue; }
@@ -1146,17 +1627,8 @@ fn peptide_origin(origin: u16) -> bool {
 pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &AutoLinkParams, log: &mut String) {
     let cx = Ctx::new(st, flat, ml, p);
     let n = flat.pos.len();
-    let mut initial: Vec<Vec<u32>> = vec![Vec::new(); n];
-    let mut initial_peptides: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let initial = Initial::new(it, n);
     let initial_bonds = it.bonds.len();
-    for b in &it.bonds {
-        initial[b.i as usize].push(b.j);
-        initial[b.j as usize].push(b.i);
-        if !p.compat && peptide_origin(b.origin) && cx.peptide_pair(it, b.i, b.j) {
-            initial_peptides[b.i as usize].push(b.j);
-            initial_peptides[b.j as usize].push(b.i);
-        }
-    }
     // `done`: atoms that took their link, and per residue pair the atom-name
     // pairs considered
     let mut atom_done: Vec<bool> = vec![false; n];
@@ -1166,13 +1638,14 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
     let mut custom_partners: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
     let (declared, declared_peptides) = if p.compat { Default::default() } else { declared_covalent_pairs(st, flat) };
 
-    for (dist, i, j) in candidate_pairs(&cx, &initial) {
+    let candidates = if p.compat { candidate_pairs(&cx, &initial) } else { linking_candidates(&cx, &initial) };
+    for (dist, i, j) in candidates {
         if it.has_bond(i, j) {
             continue;
         }
         let (gi, gj) = (cx.ag(i), cx.ag(j));
         let moved = ["SF4", "F3S", "FES"];
-        if moved.contains(&gi.resname.as_str()) || moved.contains(&gj.resname.as_str()) {
+        if moved.contains(&gi.resname) || moved.contains(&gj.resname) {
             continue;
         }
         let (ri, rj) = (gi.resname.trim(), gj.resname.trim());
@@ -1239,8 +1712,8 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
             .or(peptide.map(|(key, _)| key)).or(lkey.as_deref());
         if !p.compat && selected_key.is_some_and(|key| matches!(key, "CIS" | "NMCIS" | "NMTRANS" | "PCIS" | "PTRANS" | "TRANS"))
             && cx.peptide_pair(it, i, j) && !declared_peptides.contains(&(i.min(j), i.max(j)))
-            && (cx.has_peptide_partner(it, &initial_peptides, initial_bonds, i, j)
-                || cx.has_peptide_partner(it, &initial_peptides, initial_bonds, j, i)) {
+            && (cx.has_peptide_partner(it, &initial, initial_bonds, i, j)
+                || cx.has_peptide_partner(it, &initial, initial_bonds, j, i)) {
             continue;
         }
         let custom_fallback = found.is_none() && !is_glyco && peptide.is_none()
@@ -1274,7 +1747,7 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
                 if cx.elem(a) != "N" {
                     return false;
                 }
-                let heavy = initial[a as usize].iter().filter(|&&x| !flat.is_h[x as usize]).count();
+                let heavy = initial.of(a).iter().filter(|&&x| !flat.is_h[x as usize]).count();
                 heavy + (n_links[a as usize] as usize) < 3
             };
             if has_maximum_per_atom_links(c1) {
@@ -1301,8 +1774,8 @@ pub fn auto_link(it: &mut Interp, st: &Structure, flat: &FlatAtoms, ml: &MonLib,
         let (agi, agj) = (cx.ag_of[i as usize], cx.ag_of[j as usize]);
         let link_found = cx.ags[agi as usize]
             .atoms
-            .iter()
-            .any(|&x| initial[x as usize].iter().any(|&y| cx.ag_of[y as usize] == agj));
+            .clone()
+            .any(|x| initial.of(x).iter().any(|&y| cx.ag_of[y as usize] == agj));
         if link_found {
             continue;
         }

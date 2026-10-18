@@ -14,7 +14,7 @@ fn fixture(orders: [&str; 2]) -> (Interp, Vec<Vec3>) {
     }
     let comp = Arc::new(comp);
     for (i, name) in names.iter().enumerate() {
-        it.dict[i] = crate::interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*name).into()) };
+        it.dict[i] = crate::interp::AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*name).into()), instance: 0 };
     }
     it.push_angle_unchecked(3, 0, 1, 120., 3.);
     it.push_angle_unchecked(3, 0, 2, 120., 3.);
@@ -29,7 +29,7 @@ fn parameterize(it: &Interp, sites: &mut [Vec3], fixed: bool) -> RidingResult {
     let mut is_h = vec![false; count];
     is_h[3] = true;
     riding(it, sites, &RidingAtoms {
-        is_h: &is_h, altloc: &vec![String::new(); count],
+        is_h: &is_h, altloc: &vec![ShortStr::new(); count],
         name: &names, occ: &vec![1.; count], rg_of: &vec![0; count], expected_heavy: &|_| None,
         dictionary_nh2_torsion: fixed, reroute_axial_reference: fixed, use_plane_restraints: fixed,
     }, true)

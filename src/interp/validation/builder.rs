@@ -90,7 +90,7 @@ pub(super) fn build(
         .enumerate()
         .map(|(i, &p)| (p, i as u32))
         .collect();
-    let chains = conformer_residues(st, &index);
+    let chains = conformer_residues(st, Some(&index));
     let mut all_residues = Vec::new();
     let mut prepared_chains = Vec::new();
     for model in &chains {

@@ -17,6 +17,26 @@ pub mod target_uncertainty;
 mod disulfides;
 mod covalent;
 
+/// The result of `str::trim`, found with a byte loop when the ends are ASCII.
+#[inline]
+fn trim(s: &str) -> &str {
+    let b = s.as_bytes();
+    // the ASCII characters that `char::is_whitespace` accepts
+    let ws = |c: u8| c == b' ' || (b'\t'..=b'\r').contains(&c);
+    let mut i = 0;
+    while i < b.len() && ws(b[i]) {
+        i += 1;
+    }
+    let mut j = b.len();
+    while j > i && ws(b[j - 1]) {
+        j -= 1;
+    }
+    if i < j && (b[i] >= 0x80 || b[j - 1] >= 0x80) {
+        return s.trim();
+    }
+    &s[i..j]
+}
+
 /// Resolve generic bond types against the component present in the model.
 pub(crate) fn source_bond_order(ml: &MonLib, comp: &Comp, bond: &crate::monlib::CompBond, actual_component: &str) -> Option<u8> {
     if !bond.type_.eq_ignore_ascii_case("coval") || comp.id.eq_ignore_ascii_case(actual_component) {
@@ -97,7 +117,7 @@ pub struct DihedralProxy {
 /// Energy type of an atom as cctbx records it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EType {
-    Typed(String),
+    Typed(ShortStr),
     /// Dictionary atom without a type (`'None'`).
     NoneType,
     /// Unexpected or duplicate atom (`'False'`).
@@ -110,20 +130,199 @@ pub enum EType {
 pub struct AtomDictInfo {
     /// The residue dictionary used for the atom and its dictionary atom id.
     pub comp: Option<Arc<Comp>>,
-    pub dict_id: Option<String>,
+    pub dict_id: Option<ShortStr>,
+    /// 0, or a number unique to one residue of one conformer whose dictionary
+    /// copy (an RNA pucker modification) it shares with others: atoms have the
+    /// same dictionary when `comp` is the same allocation and this matches.
+    pub instance: u32,
+}
+
+/// Bonded neighbors of each atom, each bond giving `j` to `i` and `i` to `j`
+/// in bond order: the order of pushing every bond onto per-atom lists.
+pub struct Adjacency {
+    start: Vec<u32>,
+    nbr: Vec<u32>,
+}
+
+impl Adjacency {
+    pub fn new(n: usize, bonds: &[BondProxy]) -> Adjacency {
+        Adjacency::from_pairs(n, bonds.iter().map(|b| (b.i, b.j)))
+    }
+
+    /// The adjacency of the bonds (i, j) given in order.
+    pub fn from_pairs(n: usize, pairs: impl Iterator<Item = (u32, u32)> + Clone) -> Adjacency {
+        let mut start = vec![0u32; n + 1];
+        for (i, j) in pairs.clone() {
+            start[i as usize + 1] += 1;
+            start[j as usize + 1] += 1;
+        }
+        for k in 0..n {
+            start[k + 1] += start[k];
+        }
+        let mut fill = start.clone();
+        let mut nbr = vec![0u32; start[n] as usize];
+        for (i, j) in pairs {
+            nbr[fill[i as usize] as usize] = j;
+            fill[i as usize] += 1;
+            nbr[fill[j as usize] as usize] = i;
+            fill[j as usize] += 1;
+        }
+        Adjacency { start, nbr }
+    }
+
+    /// The adjacency of `bonds`, each with i < j, with every atom's
+    /// neighbors in ascending order, and for each entry the index of its bond.
+    /// This is the adjacency of the bonds sorted by (i, j): a neighbor below
+    /// the atom comes from a bond listed under that neighbor, which sorts
+    /// before the atom's own bonds.
+    pub fn sorted(n: usize, bonds: &[BondProxy]) -> (Adjacency, Vec<u32>) {
+        let mut start = vec![0u32; n + 1];
+        for b in bonds {
+            start[b.i as usize + 1] += 1;
+            start[b.j as usize + 1] += 1;
+        }
+        for k in 0..n {
+            start[k + 1] += start[k];
+        }
+        let mut fill = start.clone();
+        let mut nbr = vec![0u32; start[n] as usize];
+        let mut bond = vec![0u32; start[n] as usize];
+        for (k, b) in bonds.iter().enumerate() {
+            for (a, other) in [(b.i, b.j), (b.j, b.i)] {
+                let at = &mut fill[a as usize];
+                nbr[*at as usize] = other;
+                bond[*at as usize] = k as u32;
+                *at += 1;
+            }
+        }
+        // a stable insertion sort of each short list by neighbor
+        for a in 0..n {
+            let (s, e) = (start[a] as usize, start[a + 1] as usize);
+            for x in s + 1..e {
+                let (v, b) = (nbr[x], bond[x]);
+                let mut y = x;
+                while y > s && nbr[y - 1] > v {
+                    nbr[y] = nbr[y - 1];
+                    bond[y] = bond[y - 1];
+                    y -= 1;
+                }
+                nbr[y] = v;
+                bond[y] = b;
+            }
+        }
+        (Adjacency { start, nbr }, bond)
+    }
+
+    /// The range of `a`'s entries.
+    #[inline]
+    pub fn range(&self, a: u32) -> std::ops::Range<usize> {
+        self.start[a as usize] as usize..self.start[a as usize + 1] as usize
+    }
+
+    /// The neighbor at entry `e`.
+    #[inline]
+    pub fn of_entry(&self, e: usize) -> u32 {
+        self.nbr[e]
+    }
+
+    #[inline]
+    pub fn of(&self, a: u32) -> &[u32] {
+        &self.nbr[self.start[a as usize] as usize..self.start[a as usize + 1] as usize]
+    }
+}
+
+/// Marks the end of a chain in `KeyChains`.
+const NO_ENTRY: u32 = u32::MAX;
+
+/// A map from restraint keys to indices. Each key is stored in a list kept
+/// for one of its atoms, so a lookup reads the few keys of that atom. The
+/// map keeps its own copy of each key, so it gives the same answers as a hash
+/// map when the restraint lists are changed directly.
+struct KeyChains<K> {
+    /// The newest entry of each atom, or `NO_ENTRY`.
+    head: Vec<u32>,
+    /// Key, index and the atom's next older entry.
+    entries: Vec<(K, u32, u32)>,
+}
+
+impl<K: PartialEq> KeyChains<K> {
+    fn new(n: usize) -> KeyChains<K> {
+        KeyChains { head: vec![NO_ENTRY; n], entries: Vec::new() }
+    }
+
+    fn reserve(&mut self, keys: usize) {
+        self.entries.reserve(keys);
+    }
+
+    /// The entry of `key` in the list of `atom`.
+    #[inline]
+    fn find(&self, atom: u32, key: &K) -> Option<usize> {
+        let mut e = *self.head.get(atom as usize)?;
+        while e != NO_ENTRY {
+            let (k, _, next) = &self.entries[e as usize];
+            if k == key {
+                return Some(e as usize);
+            }
+            e = *next;
+        }
+        None
+    }
+
+    #[inline]
+    fn get(&self, atom: u32, key: &K) -> Option<usize> {
+        self.find(atom, key).map(|e| self.entries[e].1 as usize)
+    }
+
+    /// Add a key that is not in the map.
+    #[inline]
+    fn push(&mut self, atom: u32, key: K, index: usize) {
+        let a = atom as usize;
+        if a >= self.head.len() {
+            self.head.resize(a + 1, NO_ENTRY);
+        }
+        self.entries.push((key, index as u32, self.head[a]));
+        self.head[a] = (self.entries.len() - 1) as u32;
+    }
+
+    /// Add `key` and return true, or return false when it is present.
+    #[inline]
+    fn insert_new(&mut self, atom: u32, key: K, index: usize) -> bool {
+        if self.find(atom, &key).is_some() {
+            return false;
+        }
+        self.push(atom, key, index);
+        true
+    }
+
+    /// Set the index of `key`, adding the key when it is absent.
+    fn set(&mut self, atom: u32, key: K, index: usize) {
+        match self.find(atom, &key) {
+            Some(e) => self.entries[e].1 = index as u32,
+            None => self.push(atom, key, index),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.head.fill(NO_ENTRY);
+        self.entries.clear();
+    }
 }
 
 pub struct Interp {
     pub bonds: Vec<BondProxy>,
-    bond_keys: FxHashMap<(u32, u32), usize>,
+    /// Bond (i, j), i < j, listed under i as j.
+    bond_keys: KeyChains<u32>,
     pub angles: Vec<AngleProxy>,
-    angle_keys: FxHashMap<(u32, u32, u32), usize>,
+    /// Angle i-b-k, with x < z the sorted ends, listed under x as (b, z).
+    angle_keys: KeyChains<(u32, u32)>,
     pub dihedrals: Vec<DihedralProxy>,
-    dih_keys: FxHashMap<[u32; 4], usize>,
+    /// Canonical dihedrals, listed under their first atom.
+    dih_keys: KeyChains<[u32; 4]>,
     pub const_dihedrals: Vec<DihedralProxy>,
-    const_keys: FxHashMap<[u32; 4], usize>,
+    const_keys: KeyChains<[u32; 4]>,
     pub planes: Vec<Vec<u32>>,
-    plane_keys: FxHashSet<Vec<u32>>,
+    /// Sorted plane atoms, listed under the first.
+    plane_keys: KeyChains<Vec<u32>>,
     /// Bonds to a symmetry copy (cctbx `bond_asu_proxy`): disulfides across
     /// crystal symmetry, with `j` the atom whose copy is bonded.
     pub sym_bonds: Vec<BondProxy>,
@@ -144,31 +343,49 @@ impl Interp {
     fn new(n: usize) -> Interp {
         Interp {
             bonds: Vec::new(),
-            bond_keys: FxHashMap::default(),
+            bond_keys: KeyChains::new(n),
             angles: Vec::new(),
-            angle_keys: FxHashMap::default(),
+            angle_keys: KeyChains::new(n),
             dihedrals: Vec::new(),
-            dih_keys: FxHashMap::default(),
+            dih_keys: KeyChains::new(n),
             const_dihedrals: Vec::new(),
-            const_keys: FxHashMap::default(),
+            const_keys: KeyChains::new(n),
             planes: Vec::new(),
-            plane_keys: FxHashSet::default(),
+            plane_keys: KeyChains::new(n),
             sym_bonds: Vec::new(),
             symmetry_images: Vec::new(),
             automatic_links: Vec::new(),
-            etype: vec![EType::Unknown; n],
-            dict: vec![AtomDictInfo::default(); n],
+            // built in place: `vec!` would clone a template value n times
+            etype: std::iter::repeat_with(|| EType::Unknown).take(n).collect(),
+            dict: std::iter::repeat_with(AtomDictInfo::default).take(n).collect(),
             missing_residues: Vec::new(),
             log: String::new(),
         }
     }
 
+    /// Reserve room for the restraints of a model of `n` atoms (counts per atom
+    /// measured on large structures), so the key maps do not grow step by step.
+    fn reserve_for(&mut self, n: usize) {
+        self.bonds.reserve(n + n / 8);
+        self.bond_keys.reserve(n + n / 8);
+        self.angles.reserve(2 * n);
+        self.angle_keys.reserve(2 * n);
+        self.dihedrals.reserve(n / 2 + n / 8);
+        self.dih_keys.reserve(n / 2 + n / 8);
+        self.const_dihedrals.reserve(n / 4);
+        self.const_keys.reserve(n / 4);
+        self.planes.reserve(n / 8);
+        self.plane_keys.reserve(n / 8);
+    }
+
     pub fn add_bond(&mut self, a: u32, b: u32, ideal: f64, origin: u16) -> bool {
         let (i, j) = if a < b { (a, b) } else { (b, a) };
-        if i == j || self.bond_keys.contains_key(&(i, j)) {
+        if i == j {
             return false;
         }
-        self.bond_keys.insert((i, j), self.bonds.len());
+        if !self.bond_keys.insert_new(i, j, self.bonds.len()) {
+            return false;
+        }
         self.bonds.push(BondProxy { i, j, ideal, origin });
         true
     }
@@ -179,13 +396,13 @@ impl Interp {
         if i == j {
             return;
         }
-        match self.bond_keys.get(&(i, j)) {
-            Some(&k) => {
+        match self.bond_keys.get(i, &j) {
+            Some(k) => {
                 self.bonds[k].ideal = ideal;
                 self.bonds[k].origin = origin;
             }
             None => {
-                self.bond_keys.insert((i, j), self.bonds.len());
+                self.bond_keys.push(i, j, self.bonds.len());
                 self.bonds.push(BondProxy { i, j, ideal, origin });
             }
         }
@@ -193,36 +410,33 @@ impl Interp {
     /// Ideal length of a bond, if there is one.
     pub fn bond_ideal(&self, a: u32, b: u32) -> Option<f64> {
         let (i, j) = if a < b { (a, b) } else { (b, a) };
-        self.bond_keys.get(&(i, j)).map(|&k| self.bonds[k].ideal)
+        self.bond_keys.get(i, &j).map(|k| self.bonds[k].ideal)
     }
     pub fn has_bond(&self, a: u32, b: u32) -> bool {
         let (i, j) = if a < b { (a, b) } else { (b, a) };
-        self.bond_keys.contains_key(&(i, j))
+        self.bond_keys.find(i, &j).is_some()
     }
 
     pub(crate) fn add_angle(&mut self, a: u32, b: u32, c: u32, ideal: f64, esd: f64) {
         let (x, z) = if a < c { (a, c) } else { (c, a) };
-        let key = (b, x, z);
-        if self.angle_keys.contains_key(&key) {
-            return;
+        if self.angle_keys.insert_new(x, (b, z), self.angles.len()) {
+            self.angles.push(AngleProxy { i: [x, b, z], ideal, esd });
         }
-        self.angle_keys.insert(key, self.angles.len());
-        self.angles.push(AngleProxy { i: [x, b, z], ideal, esd });
     }
     pub fn has_angle(&self, a: u32, b: u32, c: u32) -> bool {
         let (x, z) = if a < c { (a, c) } else { (c, a) };
-        self.angle_keys.contains_key(&(b, x, z))
+        self.angle_keys.find(x, &(b, z)).is_some()
     }
     pub fn push_angle_unchecked(&mut self, a: u32, b: u32, c: u32, ideal: f64, esd: f64) {
         self.add_angle(a, b, c, ideal, esd);
     }
     pub fn remove_angle(&mut self, a: u32, b: u32, c: u32) {
         let (x, z) = if a < c { (a, c) } else { (c, a) };
-        if let Some(idx) = self.angle_keys.remove(&(b, x, z)) {
+        if let Some(idx) = self.angle_keys.get(x, &(b, z)) {
             self.angles.remove(idx);
             self.angle_keys.clear();
             for (k, p) in self.angles.iter().enumerate() {
-                self.angle_keys.insert((p.i[1], p.i[0], p.i[2]), k);
+                self.angle_keys.set(p.i[0], (p.i[1], p.i[2]), k);
             }
         }
     }
@@ -247,16 +461,10 @@ impl Interp {
     pub(crate) fn add_dihedral(&mut self, idx: [u32; 4], ideal: f64, period: i32, is_const: bool) {
         let (i, v) = Self::canon_dihedral(idx, ideal);
         if is_const {
-            if self.const_keys.contains_key(&i) {
-                return;
+            if self.const_keys.insert_new(i[0], i, self.const_dihedrals.len()) {
+                self.const_dihedrals.push(DihedralProxy { i, ideal: v, period: 0 });
             }
-            self.const_keys.insert(i, self.const_dihedrals.len());
-            self.const_dihedrals.push(DihedralProxy { i, ideal: v, period: 0 });
-        } else {
-            if self.dih_keys.contains_key(&i) {
-                return;
-            }
-            self.dih_keys.insert(i, self.dihedrals.len());
+        } else if self.dih_keys.insert_new(i[0], i, self.dihedrals.len()) {
             self.dihedrals.push(DihedralProxy { i, ideal: v, period });
         }
     }
@@ -268,10 +476,10 @@ impl Interp {
         let mut a = atoms;
         a.sort_unstable();
         a.dedup();
-        if a.len() < 4 || self.plane_keys.contains(&a) {
+        if a.len() < 4 || self.plane_keys.find(a[0], &a).is_some() {
             return;
         }
-        self.plane_keys.insert(a.clone());
+        self.plane_keys.push(a[0], a.clone(), self.planes.len());
         self.planes.push(a);
     }
 }
@@ -289,7 +497,11 @@ struct ConfResidue {
 /// Interpreted residue: dictionary and id -> atom map.
 struct ResInterp {
     comp: Option<Arc<Comp>>,
-    id_to_atom: FxHashMap<String, u32>,
+    /// Index of the memo template the residue was built from.
+    template: usize,
+    /// `AtomDictInfo::instance` of the residue's atoms.
+    instance: u32,
+    id_to_atom: FxHashMap<ShortStr, u32>,
     is_peptide: bool,
     is_rna_dna: bool,
     is_rna2p: Option<bool>,
@@ -309,31 +521,41 @@ pub struct InterpParams {
 /// Flat per-atom view used during interpretation.
 pub struct FlatAtoms {
     pub pos: Vec<Vec3>,
-    pub element: Vec<String>,
-    pub name: Vec<String>,
-    pub altloc: Vec<String>,
+    pub element: Vec<ShortStr>,
+    pub name: Vec<ShortStr>,
+    pub altloc: Vec<ShortStr>,
     pub is_h: Vec<bool>,
     pub path: Vec<AtomPath>,
 }
 
 impl FlatAtoms {
     pub fn from_structure(st: &Structure) -> FlatAtoms {
-        let paths = st.atom_paths();
+        let n = st.atom_count();
         let mut f = FlatAtoms {
-            pos: Vec::with_capacity(paths.len()),
-            element: Vec::with_capacity(paths.len()),
-            name: Vec::with_capacity(paths.len()),
-            altloc: Vec::with_capacity(paths.len()),
-            is_h: Vec::with_capacity(paths.len()),
-            path: paths.clone(),
+            pos: Vec::with_capacity(n),
+            element: Vec::with_capacity(n),
+            name: Vec::with_capacity(n),
+            altloc: Vec::with_capacity(n),
+            is_h: Vec::with_capacity(n),
+            path: Vec::with_capacity(n),
         };
-        for p in &paths {
-            let a = st.atom(*p);
-            f.pos.push(a.xyz);
-            f.element.push(a.elem().to_ascii_uppercase());
-            f.name.push(a.name.clone());
-            f.altloc.push(st.atom_group(*p).altloc.clone());
-            f.is_h.push(a.is_hydrogen());
+        // the atoms in `atom_paths` order
+        for (mi, m) in st.models.iter().enumerate() {
+            for (ci, c) in m.chains.iter().enumerate() {
+                for (ri, rg) in c.residue_groups.iter().enumerate() {
+                    for (gi, ag) in rg.atom_groups.iter().enumerate() {
+                        let altloc = ShortStr::from(ag.altloc.as_str());
+                        for (ai, a) in ag.atoms.iter().enumerate() {
+                            f.path.push(AtomPath { model: mi as u32, chain: ci as u32, rg: ri as u32, ag: gi as u32, atom: ai as u32 });
+                            f.pos.push(a.xyz);
+                            f.element.push(ShortStr::upper(a.elem()));
+                            f.name.push(a.name.clone());
+                            f.altloc.push(altloc.clone());
+                            f.is_h.push(a.is_hydrogen());
+                        }
+                    }
+                }
+            }
         }
         f
     }
@@ -355,20 +577,50 @@ pub fn angle_delta_deg(a1: f64, a2: f64, periodicity: i32) -> f64 {
     d
 }
 
+/// Index of each atom path in `flat`: None when `flat` holds the atoms of
+/// `st` in structure order, so that offsets give the indices.
+fn flat_index(st: &Structure, flat: &FlatAtoms) -> Option<FxHashMap<AtomPath, u32>> {
+    let mut k = 0usize;
+    let mut in_order = flat.path.len() == st.atom_count();
+    'walk: for (mi, m) in st.models.iter().enumerate() {
+        for (ci, c) in m.chains.iter().enumerate() {
+            for (ri, rg) in c.residue_groups.iter().enumerate() {
+                for (gi, ag) in rg.atom_groups.iter().enumerate() {
+                    for ai in 0..ag.atoms.len() {
+                        let pth = AtomPath { model: mi as u32, chain: ci as u32, rg: ri as u32, ag: gi as u32, atom: ai as u32 };
+                        if !in_order || flat.path.get(k) != Some(&pth) {
+                            in_order = false;
+                            break 'walk;
+                        }
+                        k += 1;
+                    }
+                }
+            }
+        }
+    }
+    (!in_order).then(|| flat.path.iter().enumerate().map(|(k, pth)| (*pth, k as u32)).collect())
+}
+
 /// Build the conformer residues of every chain, in cctbx iteration order.
-fn conformer_residues(st: &Structure, flat_index: &FxHashMap<AtomPath, u32>) -> Vec<Vec<Vec<ConfResidue>>> {
+/// `flat_index` is the result of `flat_index`.
+fn conformer_residues(st: &Structure, flat_index: Option<&FxHashMap<AtomPath, u32>>) -> Vec<Vec<Vec<ConfResidue>>> {
     // [model][chain-conformer][residue]
     let mut out = Vec::new();
+    // flat index of the first atom of the chain, for atoms in structure order
+    let mut chain_first = 0u32;
     for (mi, m) in st.models.iter().enumerate() {
         let mut per_model = Vec::new();
         for (ci, c) in m.chains.iter().enumerate() {
             let alts = c.conformer_altlocs();
             for alt in &alts {
                 let mut residues = Vec::new();
+                let mut first = chain_first;
                 for (ri, rg) in c.residue_groups.iter().enumerate() {
                     // atom groups with blank altloc or this altloc, grouped by resname
                     let mut by_res: Vec<(String, Vec<u32>)> = Vec::new();
                     for (gi, ag) in rg.atom_groups.iter().enumerate() {
+                        let base = first;
+                        first += ag.atoms.len() as u32;
                         if !(ag.altloc.is_empty() || ag.altloc == *alt) {
                             continue;
                         }
@@ -379,9 +631,14 @@ fn conformer_residues(st: &Structure, flat_index: &FxHashMap<AtomPath, u32>) -> 
                                 by_res.len() - 1
                             }
                         };
-                        for k in 0..ag.atoms.len() {
-                            let p = AtomPath { model: mi as u32, chain: ci as u32, rg: ri as u32, ag: gi as u32, atom: k as u32 };
-                            by_res[entry].1.push(flat_index[&p]);
+                        match flat_index {
+                            Some(idx) => {
+                                for k in 0..ag.atoms.len() {
+                                    let p = AtomPath { model: mi as u32, chain: ci as u32, rg: ri as u32, ag: gi as u32, atom: k as u32 };
+                                    by_res[entry].1.push(idx[&p]);
+                                }
+                            }
+                            None => by_res[entry].1.extend(base..first),
                         }
                     }
                     for (resname, atoms) in by_res {
@@ -390,6 +647,7 @@ fn conformer_residues(st: &Structure, flat_index: &FxHashMap<AtomPath, u32>) -> 
                 }
                 per_model.push(residues);
             }
+            chain_first += c.residue_groups.iter().flat_map(|rg| rg.atom_groups.iter()).map(|ag| ag.atoms.len() as u32).sum::<u32>();
         }
         out.push(per_model);
     }
@@ -403,12 +661,12 @@ fn lookup(r: &ResInterp, id: &str) -> Option<u32> {
         return Some(a);
     }
     if id.contains('\'') {
-        if let Some(&a) = r.id_to_atom.get(&id.replace('\'', "*")) {
+        if let Some(&a) = r.id_to_atom.get(id.replace('\'', "*").as_str()) {
             return Some(a);
         }
     }
     if id.contains('*') {
-        if let Some(&a) = r.id_to_atom.get(&id.replace('*', "'")) {
+        if let Some(&a) = r.id_to_atom.get(id.replace('*', "'").as_str()) {
             return Some(a);
         }
     }
@@ -433,8 +691,8 @@ fn v2_to_v3(id: &str) -> String {
 fn lookup_angle(r: &ResInterp, id: &str) -> Option<u32> {
     r.id_to_atom
         .get(id)
-        .or_else(|| r.id_to_atom.get(&v3_to_v2(id)))
-        .or_else(|| r.id_to_atom.get(&v2_to_v3(id)))
+        .or_else(|| r.id_to_atom.get(v3_to_v2(id).as_str()))
+        .or_else(|| r.id_to_atom.get(v2_to_v3(id).as_str()))
         .copied()
 }
 
@@ -459,7 +717,7 @@ fn rna_pucker(flat: &FlatAtoms, cur: &ResInterp, next_p: Option<u32>) -> Option<
     // outbound atom from C1': closest N or C (no prime) within 1.463 + 0.5
     let mut out: Option<(f64, Vec3)> = None;
     for &a in cur.id_to_atom.values() {
-        let nm = flat.name[a as usize].trim();
+        let nm = trim(&flat.name[a as usize]);
         let el = flat.element[a as usize].as_str();
         if nm.contains('\'') || nm.contains('*') || (el != "N" && el != "C") {
             continue;
@@ -503,7 +761,7 @@ fn interpret_residue_mode(
 ) -> (ResInterp, Vec<Option<String>>) {
     let _ = neutron_unused;
     let resname = res.resname.trim().to_ascii_uppercase();
-    let names: Vec<String> = res.atoms.iter().map(|&a| flat.name[a as usize].clone()).collect();
+    let names: Vec<String> = res.atoms.iter().map(|&a| flat.name[a as usize].to_string()).collect();
     let mut is_water = resclass::get_class(&res.resname) == ResClass::CommonWater;
     let mut work = resname.clone();
     let mut d_aa = false;
@@ -529,6 +787,8 @@ fn interpret_residue_mode(
     let Some(comp0) = comp0 else {
         let ri = ResInterp {
             comp: None,
+            template: 0,
+            instance: 0,
             id_to_atom: FxHashMap::default(),
             is_peptide: false,
             is_rna_dna: false,
@@ -628,16 +888,18 @@ fn interpret_residue_mode(
             }
         }
     }
-    let mut id_to_atom: FxHashMap<String, u32> = FxHashMap::default();
+    let mut id_to_atom: FxHashMap<ShortStr, u32> = FxHashMap::default();
     for (k, id) in mapping.ids.iter().enumerate() {
         if let Some(id) = id {
-            id_to_atom.insert(id.clone(), res.atoms[k]);
+            id_to_atom.insert(id.as_str().into(), res.atoms[k]);
         }
     }
     let is_rna_dict = comp.test_for_rna_dna();
     (
         ResInterp {
             comp: Some(comp),
+            template: 0,
+            instance: 0,
             id_to_atom,
             is_peptide: is_peptide_dict && !is_na,
             is_rna_dna: is_na || is_rna_dict.is_some(),
@@ -652,20 +914,107 @@ fn interpret_residue_mode(
 /// the dictionaries), the same for every residue that shares them.
 struct ResTemplate {
     resname: String,
-    names: Vec<String>,
+    names: Vec<ShortStr>,
     comp: Option<Arc<Comp>>,
-    /// Dictionary id of each atom position.
-    ids: Vec<Option<String>>,
+    /// Dictionary id -> atom position, built by the same inserts as the
+    /// residue's `id_to_atom` (empty without a dictionary), so a copy with the
+    /// positions replaced by atom indices iterates in the same order.
+    id_pos: FxHashMap<ShortStr, u32>,
     is_peptide: bool,
     is_rna_dna: bool,
     is_water: bool,
     log: String,
 }
 
+/// Residue templates of one run, found by a hash of residue and atom names.
+#[derive(Default)]
+struct ResMemo {
+    templates: Vec<ResTemplate>,
+    buckets: FxHashMap<u64, Vec<usize>>,
+    /// The template last matched for each residue name, tried first.
+    last: FxHashMap<String, usize>,
+}
+
+/// A residue's dictionary restraints and atom types, with atoms given as
+/// positions in the residue's atom list. Residues with the same template and
+/// dictionary share it.
+struct ResRestraints {
+    /// Energy type and dictionary id at each position; None for an atom the
+    /// dictionary does not map.
+    types: Vec<Option<(EType, ShortStr)>>,
+    bonds: Vec<(u32, u32, f64)>,
+    angles: Vec<(u32, u32, u32, f64, f64)>,
+    /// Atoms, ideal value, period and whether the dihedral is constant.
+    tors: Vec<([u32; 4], f64, i32, bool)>,
+    planes: Vec<Vec<u32>>,
+}
+
+/// Resolve the restraints of `add_residue_restraints` and the atom types of
+/// `interpret_impl` for one residue, in the same order, as atom positions.
+fn residue_restraints(r: &ResInterp, atoms: &[u32], neutron: bool) -> ResRestraints {
+    let mut out = ResRestraints { types: Vec::with_capacity(atoms.len()), bonds: Vec::new(), angles: Vec::new(), tors: Vec::new(), planes: Vec::new() };
+    let Some(comp) = r.comp.as_ref() else { return out };
+    let local: FxHashMap<u32, u32> = atoms.iter().enumerate().map(|(k, &a)| (a, k as u32)).collect();
+    let mapped: FxHashMap<u32, &ShortStr> = r.id_to_atom.iter().map(|(id, &a)| (a, id)).collect();
+    for a in atoms {
+        out.types.push(mapped.get(a).map(|id| {
+            let ca = comp.atom(id.as_str()).unwrap();
+            let e = match &ca.type_energy {
+                Some(t) => EType::Typed(t.into()),
+                // Reduce2's CCD-built dictionaries leave the type empty
+                None if comp.from_ccd => EType::Unknown,
+                None => EType::NoneType,
+            };
+            (e, (*id).into())
+        }));
+    }
+    let at = |a: u32| local[&a];
+    for b in &comp.bonds {
+        let (Some(i), Some(j)) = (lookup(r, &b.a1), lookup(r, &b.a2)) else { continue };
+        let v = if neutron { b.value_dist_neutron.or(b.value_dist) } else { b.value_dist };
+        let Some(v) = v else { continue };
+        match b.esd {
+            Some(e) if e > 0.0 => {}
+            _ => continue,
+        }
+        out.bonds.push((at(i), at(j), v));
+    }
+    for a in &comp.angles {
+        let (Some(i), Some(j), Some(k)) = (lookup_angle(r, &a.a1), lookup_angle(r, &a.a2), lookup_angle(r, &a.a3)) else { continue };
+        let (Some(v), Some(e)) = (a.value, a.esd) else { continue };
+        if e <= 0.0 {
+            continue;
+        }
+        out.angles.push((at(i), at(j), at(k), v, e));
+    }
+    for t in &comp.tors {
+        let ids: Vec<Option<u32>> = t.a.iter().map(|x| lookup(r, x)).collect();
+        if ids.iter().any(|x| x.is_none()) {
+            continue;
+        }
+        let ids = [at(ids[0].unwrap()), at(ids[1].unwrap()), at(ids[2].unwrap()), at(ids[3].unwrap())];
+        let Some(v) = t.value else { continue };
+        match t.esd {
+            Some(e) if e > 0.0 => out.tors.push((ids, v, t.period, false)),
+            _ => out.tors.push((ids, v, 0, true)),
+        }
+    }
+    let mut planes: Vec<(String, Vec<u32>)> = Vec::new();
+    for p in &comp.planes {
+        let Some(a) = lookup(r, &p.atom) else { continue };
+        match planes.iter_mut().find(|x| x.0 == p.plane_id) {
+            Some(x) => x.1.push(at(a)),
+            None => planes.push((p.plane_id.clone(), vec![at(a)])),
+        }
+    }
+    out.planes = planes.into_iter().map(|(_, atoms)| atoms).collect();
+    out
+}
+
 /// `interpret_residue` through a per-run memo keyed by residue name and atom
 /// names: a hit rebuilds the atom map in the same order and replays the log.
 fn interpret_residue_memo(
-    memo: &mut FxHashMap<u64, Vec<ResTemplate>>,
+    memo: &mut ResMemo,
     ml: &MonLib,
     auto_comps: &FxHashMap<String, Arc<Comp>>,
     flat: &FlatAtoms,
@@ -674,27 +1023,35 @@ fn interpret_residue_memo(
     log: &mut String,
 ) -> ResInterp {
     use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    res.resname.hash(&mut h);
-    for &a in &res.atoms {
-        flat.name[a as usize].hash(&mut h);
-    }
-    let key = h.finish();
+    let key = || {
+        let mut h = rustc_hash::FxHasher::default();
+        res.resname.hash(&mut h);
+        for &a in &res.atoms {
+            flat.name[a as usize].hash(&mut h);
+        }
+        h.finish()
+    };
     let same = |t: &ResTemplate| {
         t.resname == res.resname && t.names.len() == res.atoms.len() && t.names.iter().zip(&res.atoms).all(|(n, &a)| *n == flat.name[a as usize])
     };
-    if let Some(t) = memo.get(&key).and_then(|b| b.iter().find(|t| same(t))) {
+    // at most one template has the residue's name and atom names
+    let last = memo.last.get(res.resname.as_str()).copied().filter(|&ti| same(&memo.templates[ti]));
+    let found = last.or_else(|| {
+        let ti = memo.buckets.get(&key()).and_then(|b| b.iter().copied().find(|&ti| same(&memo.templates[ti])))?;
+        memo.last.insert(res.resname.clone(), ti);
+        Some(ti)
+    });
+    if let Some(ti) = found {
+        let t = &memo.templates[ti];
         log.push_str(&t.log);
-        let mut id_to_atom: FxHashMap<String, u32> = FxHashMap::default();
-        if t.comp.is_some() {
-            for (k, id) in t.ids.iter().enumerate() {
-                if let Some(id) = id {
-                    id_to_atom.insert(id.clone(), res.atoms[k]);
-                }
-            }
+        let mut id_to_atom = t.id_pos.clone();
+        for a in id_to_atom.values_mut() {
+            *a = res.atoms[*a as usize];
         }
         return ResInterp {
             comp: t.comp.clone(),
+            template: ti,
+            instance: 0,
             id_to_atom,
             is_peptide: t.is_peptide,
             is_rna_dna: t.is_rna_dna,
@@ -703,17 +1060,28 @@ fn interpret_residue_memo(
         };
     }
     let mut own_log = String::new();
-    let (ri, ids) = if preparation {
+    let (mut ri, ids) = if preparation {
         interpret_residue(ml, auto_comps, flat, res, false, &mut own_log)
     } else {
         interpret_residue_mode(ml, auto_comps, flat, res, false, &mut own_log, false)
     };
     log.push_str(&own_log);
-    memo.entry(key).or_default().push(ResTemplate {
+    ri.template = memo.templates.len();
+    memo.buckets.entry(key()).or_default().push(ri.template);
+    memo.last.insert(res.resname.clone(), ri.template);
+    let mut id_pos: FxHashMap<ShortStr, u32> = FxHashMap::default();
+    if ri.comp.is_some() {
+        for (k, id) in ids.iter().enumerate() {
+            if let Some(id) = id {
+                id_pos.insert(id.as_str().into(), k as u32);
+            }
+        }
+    }
+    memo.templates.push(ResTemplate {
         resname: res.resname.clone(),
         names: res.atoms.iter().map(|&a| flat.name[a as usize].clone()).collect(),
         comp: ri.comp.clone(),
-        ids,
+        id_pos,
         is_peptide: ri.is_peptide,
         is_rna_dna: ri.is_rna_dna,
         is_water: ri.is_water,
@@ -868,123 +1236,119 @@ fn py312_sort_small<T>(v: &mut Vec<T>, lt: impl Fn(&T, &T) -> bool) {
     }
 }
 
-/// Add the proxies of a chain link between `prev` and `cur`. Returns false
-/// when a link bond is broken (chain break).
-fn add_link(it: &mut Interp, ml: &MonLib, flat: &FlatAtoms, link_id: &str, prev: &ResInterp, cur: &ResInterp, cutoff: f64) -> bool {
-    let Some(l) = ml.link(link_id) else { return false };
-    let side = |c: u8| if c == 1 { prev } else { cur };
-    let mut broken: Vec<(u32, u32)> = Vec::new();
-    let mut any = false;
+/// An atom of a chain link: whether it is in the current residue (else the
+/// previous one), and its position in that residue's atom list.
+type LinkAtom = (bool, u32);
+
+/// The proxies of a chain link between two residue templates, with the
+/// lookups, value and esd tests done. Only the distance tests remain, which
+/// depend on the coordinates.
+struct LinkRestraints {
+    bonds: Vec<(LinkAtom, LinkAtom, f64)>,
+    angles: Vec<([LinkAtom; 3], f64, f64)>,
+    /// Atoms, ideal value, period, whether the dihedral is constant, and
+    /// whether it is a peptide omega whose ideal value follows the model.
+    tors: Vec<([LinkAtom; 4], f64, i32, bool, bool)>,
+    planes: Vec<Vec<LinkAtom>>,
+}
+
+/// Resolve the proxies of chain link `link_id` between `prev` and `cur`,
+/// whose atom lists are `prev_atoms` and `cur_atoms`, in the order `add_link`
+/// adds them.
+fn link_restraints(ml: &MonLib, link_id: &str, prev: (&ResInterp, &[u32]), cur: (&ResInterp, &[u32])) -> Option<LinkRestraints> {
+    let l = ml.link(link_id)?;
+    let side = |c: u8| if c == 1 { prev.0 } else { cur.0 };
+    // the position of atom `a` of side `c`
+    let pos = |c: u8, a: u32| -> LinkAtom {
+        let atoms = if c == 1 { prev.1 } else { cur.1 };
+        (c != 1, atoms.iter().position(|&x| x == a).unwrap_or(0) as u32)
+    };
+    let mut out = LinkRestraints { bonds: Vec::new(), angles: Vec::new(), tors: Vec::new(), planes: Vec::new() };
     for b in &l.bonds {
         let (Some(i), Some(j)) = (lookup(side(b.c1), &b.a1), lookup(side(b.c2), &b.a2)) else { continue };
         let Some(v) = b.value_dist else { continue };
         if b.esd.unwrap_or(0.0) <= 0.0 {
             continue;
         }
-        if flat.pos[i as usize].dist(flat.pos[j as usize]) > cutoff {
-            broken.push((i.min(j), i.max(j)));
-            continue;
-        }
-        it.add_bond(i, j, v, ORIGIN_COVALENT);
-        any = true;
+        out.bonds.push((pos(b.c1, i), pos(b.c2, j), v));
     }
-    let involves_broken = |ids: &[u32]| broken.iter().any(|(a, b)| ids.contains(a) && ids.contains(b));
     for a in &l.angles {
         let ids: Vec<Option<u32>> = (0..3).map(|k| lookup_angle(side(a.c[k]), &a.a[k])).collect();
-        if ids.iter().any(|x| x.is_none()) {
-            continue;
-        }
-        let ids: Vec<u32> = ids.into_iter().flatten().collect();
+        let [Some(i), Some(j), Some(k)] = ids[..] else { continue };
         let (Some(v), Some(e)) = (a.value, a.esd) else { continue };
-        if e <= 0.0 || involves_broken(&ids) {
+        if e <= 0.0 {
             continue;
         }
-        it.add_angle(ids[0], ids[1], ids[2], v, e);
+        out.angles.push(([pos(a.c[0], i), pos(a.c[1], j), pos(a.c[2], k)], v, e));
     }
+    let omega_fix = matches!(link_id, "TRANS" | "PTRANS" | "NMTRANS");
     for t in &l.tors {
         if t.id == "psi" || t.id == "phi" {
             continue;
         }
         let ids: Vec<Option<u32>> = (0..4).map(|k| lookup(side(t.c[k]), &t.a[k])).collect();
-        if ids.iter().any(|x| x.is_none()) {
+        let [Some(a0), Some(a1), Some(a2), Some(a3)] = ids[..] else { continue };
+        let Some(v) = t.value else { continue };
+        let atoms = [pos(t.c[0], a0), pos(t.c[1], a1), pos(t.c[2], a2), pos(t.c[3], a3)];
+        let omega = t.id == "omega" && omega_fix;
+        match t.esd {
+            Some(e) if e > 0.0 => out.tors.push((atoms, v, t.period, false, omega)),
+            _ => out.tors.push((atoms, v, 0, true, omega)),
+        }
+    }
+    let mut planes: Vec<(&str, Vec<LinkAtom>)> = Vec::new();
+    for p in &l.planes {
+        let Some(a) = lookup(side(p.c), &p.atom) else { continue };
+        match planes.iter_mut().find(|x| x.0 == p.plane_id) {
+            Some(x) => x.1.push(pos(p.c, a)),
+            None => planes.push((p.plane_id.as_str(), vec![pos(p.c, a)])),
+        }
+    }
+    out.planes = planes.into_iter().map(|(_, atoms)| atoms).collect();
+    Some(out)
+}
+
+/// Add the proxies of a chain link between residues with atom lists
+/// `prev_atoms` and `cur_atoms`: a link bond longer than `cutoff` is left out
+/// (chain break), with the other proxies that hold both of its atoms.
+fn add_link(it: &mut Interp, flat: &FlatAtoms, l: &LinkRestraints, prev_atoms: &[u32], cur_atoms: &[u32], cutoff: f64) {
+    let at = |(is_cur, k): LinkAtom| if is_cur { cur_atoms[k as usize] } else { prev_atoms[k as usize] };
+    let mut broken: Vec<(u32, u32)> = Vec::new();
+    for &(a, b, v) in &l.bonds {
+        let (i, j) = (at(a), at(b));
+        if flat.pos[i as usize].dist(flat.pos[j as usize]) > cutoff {
+            broken.push((i.min(j), i.max(j)));
             continue;
         }
-        let ids: [u32; 4] = [ids[0].unwrap(), ids[1].unwrap(), ids[2].unwrap(), ids[3].unwrap()];
+        it.add_bond(i, j, v, ORIGIN_COVALENT);
+    }
+    let involves_broken = |ids: &[u32]| broken.iter().any(|(a, b)| ids.contains(a) && ids.contains(b));
+    for &(atoms, v, e) in &l.angles {
+        let ids = atoms.map(at);
+        if !involves_broken(&ids) {
+            it.add_angle(ids[0], ids[1], ids[2], v, e);
+        }
+    }
+    for &(atoms, v, period, is_const, omega) in &l.tors {
+        let ids = atoms.map(at);
         if involves_broken(&ids) {
             continue;
         }
-        let Some(mut v) = t.value else { continue };
-        if t.id == "omega" && matches!(link_id, "TRANS" | "PTRANS" | "NMTRANS") {
+        let mut v = v;
+        if omega {
             if let Some(m) = dihedral_model(&flat.pos, ids) {
                 if angle_delta_deg(m, 180.0, 1).abs() > 180.0 - 45.0 {
                     v = 0.0;
                 }
             }
         }
-        match t.esd {
-            Some(e) if e > 0.0 => it.add_dihedral(ids, v, t.period, false),
-            _ => it.add_dihedral(ids, v, 0, true),
-        }
+        it.add_dihedral(ids, v, period, is_const);
     }
-    let mut planes: Vec<(String, Vec<u32>)> = Vec::new();
-    for p in &l.planes {
-        let Some(a) = lookup(side(p.c), &p.atom) else { continue };
-        match planes.iter_mut().find(|x| x.0 == p.plane_id) {
-            Some(x) => x.1.push(a),
-            None => planes.push((p.plane_id.clone(), vec![a])),
-        }
-    }
-    for (_, atoms) in planes {
+    for plane in &l.planes {
+        let atoms: Vec<u32> = plane.iter().map(|&a| at(a)).collect();
         if !involves_broken(&atoms) {
             it.add_plane(atoms);
         }
-    }
-    any || broken.is_empty()
-}
-
-fn add_residue_restraints(it: &mut Interp, flat: &FlatAtoms, r: &ResInterp, neutron: bool) {
-    let Some(comp) = r.comp.as_ref() else { return };
-    let _ = flat;
-    for b in &comp.bonds {
-        let (Some(i), Some(j)) = (lookup(r, &b.a1), lookup(r, &b.a2)) else { continue };
-        let v = if neutron { b.value_dist_neutron.or(b.value_dist) } else { b.value_dist };
-        let Some(v) = v else { continue };
-        match b.esd {
-            Some(e) if e > 0.0 => {}
-            _ => continue,
-        }
-        it.add_bond(i, j, v, ORIGIN_COVALENT);
-    }
-    for a in &comp.angles {
-        let (Some(i), Some(j), Some(k)) = (lookup_angle(r, &a.a1), lookup_angle(r, &a.a2), lookup_angle(r, &a.a3)) else { continue };
-        let (Some(v), Some(e)) = (a.value, a.esd) else { continue };
-        if e <= 0.0 {
-            continue;
-        }
-        it.add_angle(i, j, k, v, e);
-    }
-    for t in &comp.tors {
-        let ids: Vec<Option<u32>> = t.a.iter().map(|x| lookup(r, x)).collect();
-        if ids.iter().any(|x| x.is_none()) {
-            continue;
-        }
-        let ids = [ids[0].unwrap(), ids[1].unwrap(), ids[2].unwrap(), ids[3].unwrap()];
-        let Some(v) = t.value else { continue };
-        match t.esd {
-            Some(e) if e > 0.0 => it.add_dihedral(ids, v, t.period, false),
-            _ => it.add_dihedral(ids, v, 0, true),
-        }
-    }
-    let mut planes: Vec<(String, Vec<u32>)> = Vec::new();
-    for p in &comp.planes {
-        let Some(a) = lookup(r, &p.atom) else { continue };
-        match planes.iter_mut().find(|x| x.0 == p.plane_id) {
-            Some(x) => x.1.push(a),
-            None => planes.push((p.plane_id.clone(), vec![a])),
-        }
-    }
-    for (_, atoms) in planes {
-        it.add_plane(atoms);
     }
 }
 
@@ -1001,15 +1365,28 @@ fn interpret_validation(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &Inter
 fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParams, preparation: bool) -> Interp {
     let n = flat.pos.len();
     let mut it = Interp::new(n);
-    let mut flat_index: FxHashMap<AtomPath, u32> = FxHashMap::default();
-    for (k, path) in flat.path.iter().enumerate() {
-        flat_index.insert(*path, k as u32);
-    }
-    let confs = conformer_residues(st, &flat_index);
+    it.reserve_for(n);
+    let flat_index = flat_index(st, flat);
+    let confs = conformer_residues(st, flat_index.as_ref());
     let mut log = String::new();
-    let mut memo: FxHashMap<u64, Vec<ResTemplate>> = FxHashMap::default();
+    let mut memo = ResMemo::default();
+    // resolved restraints by (template, dictionary allocation); each entry
+    // holds the dictionary so its address stays unique
+    let mut resolved: FxHashMap<(usize, usize), (Arc<Comp>, ResRestraints)> = FxHashMap::default();
+    // pucker modifications by (dictionary address, mod id); the entry holds the
+    // dictionary so its address stays unique
+    #[allow(clippy::type_complexity)]
+    let mut pucker_mods: FxHashMap<(usize, &str), (Arc<Comp>, Option<Arc<Comp>>)> = FxHashMap::default();
+    let mut next_instance = 1u32;
     let mut cys_sg: Vec<u32> = Vec::new();
     let mut cys_sg_seen: FxHashSet<u32> = FxHashSet::default();
+    // chain links by (template and dictionary address of each residue, pucker
+    // of the previous one); each entry holds the dictionaries so their
+    // addresses stay unique
+    #[allow(clippy::type_complexity)]
+    let mut links: FxHashMap<(usize, usize, usize, usize, Option<bool>), (Option<Arc<Comp>>, Option<Arc<Comp>>, Option<LinkRestraints>)> =
+        FxHashMap::default();
+    let comp_addr = |r: &ResInterp| r.comp.as_ref().map_or(0, |c| Arc::as_ptr(c) as usize);
     for model_confs in &confs {
         for residues in model_confs {
             // interpret all residues of this chain conformer first (pucker needs next P)
@@ -1022,15 +1399,30 @@ fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParam
                     interps[k].is_rna2p = pk;
                     if let Some(two) = pk {
                         let comp = interps[k].comp.as_ref().unwrap();
-                        let base = residues[k].resname.trim().to_ascii_uppercase();
-                        let kind = match base.as_str() {
-                            "A" | "G" => "_pur",
-                            "C" | "U" => "_pyr",
-                            _ => "",
+                        let base = residues[k].resname.trim();
+                        let is = |x: &str| base.eq_ignore_ascii_case(x);
+                        let mod_id = match (two, is("A") || is("G"), is("C") || is("U")) {
+                            (true, true, _) => "rna2p_pur",
+                            (true, _, true) => "rna2p_pyr",
+                            (true, ..) => "rna2p",
+                            (false, true, _) => "rna3p_pur",
+                            (false, _, true) => "rna3p_pyr",
+                            (false, ..) => "rna3p",
                         };
-                        let mod_id = format!("{}{}", if two { "rna2p" } else { "rna3p" }, kind);
-                        if let Some(c) = ml.apply_mod(comp, &mod_id) {
-                            interps[k].comp = Some(Arc::new(c));
+                        // residues share their dictionary, so each modified copy is made once
+                        let key = (Arc::as_ptr(comp) as usize, mod_id);
+                        let modified = match pucker_mods.get(&key) {
+                            Some((_, m)) => m.clone(),
+                            None => {
+                                let m = ml.apply_mod(comp, mod_id).map(Arc::new);
+                                pucker_mods.insert(key, (comp.clone(), m.clone()));
+                                m
+                            }
+                        };
+                        if let Some(c) = modified {
+                            interps[k].comp = Some(c);
+                            interps[k].instance = next_instance;
+                            next_instance += 1;
                         }
                     }
                 }
@@ -1051,33 +1443,43 @@ fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParam
                 }
                 if let Some(pk) = prev {
                     if r.link_to_previous && (p.compat || residues[pk].rg.2 + 1 == r.rg.2) {
-                        if let Some(lid) = lib_link_id(ml, &interps[pk], ri) {
-                            add_link(&mut it, ml, flat, &lid, &interps[pk], ri, p.link_distance_cutoff);
+                        let pr = &interps[pk];
+                        let key = (pr.template, ri.template, comp_addr(pr), comp_addr(ri), pr.is_rna2p);
+                        let (_, _, l) = links.entry(key).or_insert_with(|| {
+                            let l = lib_link_id(ml, pr, ri).and_then(|lid| link_restraints(ml, &lid, (pr, &residues[pk].atoms), (ri, &r.atoms)));
+                            (pr.comp.clone(), ri.comp.clone(), l)
+                        });
+                        if let Some(l) = l {
+                            add_link(&mut it, flat, l, &residues[pk].atoms, &r.atoms, p.link_distance_cutoff);
                         }
                     }
                 }
-                // energy types
+                // energy types, then the dictionary restraints
                 let comp = ri.comp.as_ref().unwrap();
-                let mapped: FxHashMap<u32, &String> = ri.id_to_atom.iter().map(|(id, &a)| (a, id)).collect();
-                for &a in &r.atoms {
-                    match mapped.get(&a) {
-                        Some(id) => {
-                            let ca = comp.atom(id).unwrap();
-                            it.etype[a as usize] = match &ca.type_energy {
-                                Some(t) => EType::Typed(t.clone()),
-                                // Reduce2's CCD-built dictionaries leave the type empty
-                                None if comp.from_ccd => EType::Unknown,
-                                None => EType::NoneType,
-                            };
-                            it.dict[a as usize] = AtomDictInfo { comp: Some(comp.clone()), dict_id: Some((*id).clone()) };
-                        }
-                        None => {
-                            it.etype[a as usize] = EType::Unexpected;
-                            it.dict[a as usize] = AtomDictInfo { comp: Some(comp.clone()), dict_id: None };
-                        }
-                    }
+                let (_, rr) = resolved
+                    .entry((ri.template, Arc::as_ptr(comp) as usize))
+                    .or_insert_with(|| (comp.clone(), residue_restraints(ri, &r.atoms, p.neutron)));
+                for (&a, t) in r.atoms.iter().zip(&rr.types) {
+                    let (e, dict_id) = match t {
+                        Some((e, id)) => (e.clone(), Some(id.clone())),
+                        None => (EType::Unexpected, None),
+                    };
+                    it.etype[a as usize] = e;
+                    it.dict[a as usize] = AtomDictInfo { comp: Some(comp.clone()), dict_id, instance: ri.instance };
                 }
-                add_residue_restraints(&mut it, flat, ri, p.neutron);
+                let at = |k: u32| r.atoms[k as usize];
+                for &(i, j, v) in &rr.bonds {
+                    it.add_bond(at(i), at(j), v, ORIGIN_COVALENT);
+                }
+                for &(i, j, k, v, e) in &rr.angles {
+                    it.add_angle(at(i), at(j), at(k), v, e);
+                }
+                for &(ids, v, period, is_const) in &rr.tors {
+                    it.add_dihedral(ids.map(at), v, period, is_const);
+                }
+                for plane in &rr.planes {
+                    it.add_plane(plane.iter().map(|&k| at(k)).collect());
+                }
                 if comp.id == "CYS" {
                     if let Some(&sg) = ri.id_to_atom.get("SG") {
                         if cys_sg_seen.insert(sg) {
@@ -1090,7 +1492,8 @@ fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParam
         }
     }
     it.log = log;
-    add_disulfides(&mut it, st, flat, &cys_sg, p.compat);
+    let special = SpecialAtoms::new(flat);
+    add_disulfides(&mut it, st, flat, &special, &cys_sg, p.compat);
     if !p.compat { covalent::add_thioethers(&mut it, st, flat, &|comp, bond| covalent::source_order(ml, comp, bond)); }
     let mut link_log = String::new();
     crate::autolink::auto_link(
@@ -1104,13 +1507,13 @@ fn interpret_impl(st: &Structure, flat: &FlatAtoms, ml: &MonLib, p: &InterpParam
     it.log.push_str(&link_log);
     if preparation {
         add_iron_sulfur_coordination(&mut it, st, flat, p.compat);
-        add_zinc_coordination(&mut it, st, flat);
+        add_zinc_coordination(&mut it, st, flat, &special);
         if !p.compat {
-            add_zinc_symmetry_coordination(&mut it, st, flat);
-            add_thiolate_metal_coordination(&mut it, st, flat);
+            add_zinc_symmetry_coordination(&mut it, st, flat, &special);
+            add_thiolate_metal_coordination(&mut it, st, flat, &special);
         }
     }
-    adjust_for_ph_variants(&mut it, st, flat, &flat_index, ml, p);
+    adjust_for_ph_variants(&mut it, st, flat, flat_index.as_ref(), ml, p);
     it
 }
 
@@ -1125,7 +1528,7 @@ fn adjust_for_ph_variants(
     it: &mut Interp,
     st: &Structure,
     flat: &FlatAtoms,
-    flat_index: &FxHashMap<AtomPath, u32>,
+    flat_index: Option<&FxHashMap<AtomPath, u32>>,
     ml: &MonLib,
     p: &InterpParams,
 ) {
@@ -1151,6 +1554,12 @@ fn adjust_for_ph_variants(
         let Some(v) = ml.ph_variant(&resname) else { continue };
         // the residue group's atoms by atom group: (stripped name, flat index)
         let rg = st.residue_group(pth);
+        // flat index of the residue group's first atom, for atoms in structure order
+        let mut next = if flat_index.is_none() {
+            k - pth.atom - rg.atom_groups[..pth.ag as usize].iter().map(|ag| ag.atoms.len() as u32).sum::<u32>()
+        } else {
+            0
+        };
         let groups: Vec<Vec<(String, u32)>> = rg
             .atom_groups
             .iter()
@@ -1160,8 +1569,15 @@ fn adjust_for_ph_variants(
                     .iter()
                     .enumerate()
                     .filter_map(|(i, a)| {
-                        let path = AtomPath { model: pth.model, chain: pth.chain, rg: pth.rg, ag: g as u32, atom: i as u32 };
-                        flat_index.get(&path).map(|&f| (a.name.trim().to_string(), f))
+                        let f = match flat_index {
+                            Some(idx) => {
+                                let path = AtomPath { model: pth.model, chain: pth.chain, rg: pth.rg, ag: g as u32, atom: i as u32 };
+                                idx.get(&path).copied()
+                            }
+                            None => Some(next),
+                        };
+                        next += 1;
+                        f.map(|f| (a.name.trim().to_string(), f))
                     })
                     .collect()
             })
@@ -1247,7 +1663,7 @@ fn adjust_for_ph_variants(
         let Some(te) = te else { continue };
         if unknown_set.contains(&a) {
             it.etype[a as usize] = match te {
-                Some(t) => EType::Typed(t),
+                Some(t) => EType::Typed(t.into()),
                 None => EType::NoneType,
             };
         }
@@ -1264,12 +1680,52 @@ fn copy_in_model(flat: &FlatAtoms, atoms: impl IntoIterator<Item = usize>, model
     atoms.into_iter().any(|s| flat.path[s].model == model && flat.pos[s].dist(p) <= COINCIDENT_COPY)
 }
 
-fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32], compat: bool) {
+/// The atoms that the disulfide and metal rules look for, found in one pass,
+/// each list in atom order.
+struct SpecialAtoms {
+    /// Element other than H, D, T, S, O, P, N, C and SE (typically metals).
+    others: Vec<usize>,
+    /// Element in `THIOLATE_METALS`.
+    thiolate_metals: Vec<usize>,
+    /// Name ZN.
+    zincs: Vec<usize>,
+    /// Name SG, ND1 or NE2.
+    zinc_partners: Vec<usize>,
+    /// Name SG and element S.
+    sulfur_sg: Vec<usize>,
+}
+
+impl SpecialAtoms {
+    fn new(flat: &FlatAtoms) -> SpecialAtoms {
+        let mut out = SpecialAtoms { others: Vec::new(), thiolate_metals: Vec::new(), zincs: Vec::new(), zinc_partners: Vec::new(), sulfur_sg: Vec::new() };
+        for (a, (el, name)) in flat.element.iter().zip(&flat.name).enumerate() {
+            let el = el.as_str();
+            if !matches!(el, "H" | "D" | "T" | "S" | "O" | "P" | "N" | "C" | "SE") {
+                out.others.push(a);
+                if THIOLATE_METALS.contains(&el) {
+                    out.thiolate_metals.push(a);
+                }
+            }
+            match trim(name) {
+                "ZN" => out.zincs.push(a),
+                "SG" => {
+                    out.zinc_partners.push(a);
+                    if el == "S" {
+                        out.sulfur_sg.push(a);
+                    }
+                }
+                "ND1" | "NE2" => out.zinc_partners.push(a),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, special: &SpecialAtoms, sgs: &[u32], compat: bool) {
     let explicit = if compat { FxHashSet::default() } else { disulfides::add_explicit(it, st, flat) };
     // exclude SG near atoms that are not H D T S O P N C SE (typically metals)
-    let ok_el = ["H", "D", "T", "S", "O", "P", "N", "C", "SE"];
-    let n = flat.pos.len();
-    let others: Vec<usize> = (0..n).filter(|&a| !ok_el.contains(&flat.element[a].as_str())).collect();
+    let others = &special.others;
     let excluded: FxHashSet<u32> = sgs
         .iter()
         .copied()
@@ -1384,7 +1840,21 @@ fn add_disulfides(it: &mut Interp, st: &Structure, flat: &FlatAtoms, sgs: &[u32]
 fn add_iron_sulfur_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms, compat: bool) {
     let cluster = |a: usize| matches!(st.atom_group(flat.path[a]).resname.trim(), "SF4" | "F3S" | "FES");
     let n = flat.pos.len();
-    let in_cluster: Vec<usize> = (0..n).filter(|&a| cluster(a)).collect();
+    // the atoms of one atom group are usually adjacent, so the residue name
+    // is read once per run of them
+    let mut in_cluster: Vec<usize> = Vec::new();
+    let mut last: Option<((u32, u32, u32, u32), bool)> = None;
+    for (a, pth) in flat.path.iter().enumerate() {
+        let group = (pth.model, pth.chain, pth.rg, pth.ag);
+        let is_cluster = match last {
+            Some((g, c)) if g == group => c,
+            _ => cluster(a),
+        };
+        last = Some((group, is_cluster));
+        if is_cluster {
+            in_cluster.push(a);
+        }
+    }
     if in_cluster.is_empty() {
         return;
     }
@@ -1457,13 +1927,12 @@ const THIOLATE_METAL_DISTANCE: f64 = 2.9;
 /// `THIOLATE_METAL_DISTANCE` of such a metal in the same model and a
 /// compatible conformer is bonded to the closest one, which removes the
 /// hydrogen as for zinc.
-fn add_thiolate_metal_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms) {
-    let n = flat.pos.len();
-    let metals: Vec<usize> = (0..n).filter(|&a| THIOLATE_METALS.contains(&flat.element[a].as_str())).collect();
+fn add_thiolate_metal_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms, special: &SpecialAtoms) {
+    let metals = &special.thiolate_metals;
     if metals.is_empty() {
         return;
     }
-    for sg in (0..n).filter(|&a| flat.name[a].trim() == "SG" && flat.element[a] == "S") {
+    for &sg in &special.sulfur_sg {
         let closest = metals
             .iter()
             .copied()
@@ -1490,22 +1959,21 @@ fn add_thiolate_metal_coordination(it: &mut Interp, st: &Structure, flat: &FlatA
 /// of 2F4Y) is bonded to it as a symmetry bond, so the residue's hydrogens and
 /// flips treat the atom as coordinated. One partner atom per residue, closest
 /// first, as within the model.
-fn add_zinc_symmetry_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms) {
+fn add_zinc_symmetry_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms, special: &SpecialAtoms) {
     const CUTOFF: f64 = 3.0;
-    let n = flat.pos.len();
-    let zincs: Vec<usize> = (0..n).filter(|&a| flat.name[a].trim() == "ZN").collect();
+    let zincs = &special.zincs;
     if zincs.is_empty() {
         return;
     }
     let Some((uc, ops)) = crate::cell::crystal_operators(st) else { return };
-    let cands: Vec<usize> = (0..n).filter(|&a| matches!(flat.name[a].trim(), "SG" | "ND1" | "NE2")).collect();
+    let cands = &special.zinc_partners;
     if cands.is_empty() {
         return;
     }
     let cell = |p: Vec3| ((p.x / CUTOFF).floor() as i64, (p.y / CUTOFF).floor() as i64, (p.z / CUTOFF).floor() as i64);
     let mut grid: FxHashMap<(i64, i64, i64), Vec<usize>> = FxHashMap::default();
     let (mut lo, mut hi) = (v3(f64::MAX, f64::MAX, f64::MAX), v3(f64::MIN, f64::MIN, f64::MIN));
-    for &a in &cands {
+    for &a in cands {
         grid.entry(cell(flat.pos[a])).or_default().push(a);
         let f = uc.fractionalize(flat.pos[a]);
         lo = v3(lo.x.min(f.x), lo.y.min(f.y), lo.z.min(f.z));
@@ -1524,7 +1992,7 @@ fn add_zinc_symmetry_coordination(it: &mut Interp, st: &Structure, flat: &FlatAt
             linked.insert((z as usize, res_of(o as usize)));
         }
     }
-    for &z in &zincs {
+    for &z in zincs {
         let fz = uc.fractionalize(flat.pos[z]);
         let mut partners: Vec<(f64, usize)> = Vec::new();
         for op in &ops {
@@ -1573,17 +2041,13 @@ fn add_zinc_symmetry_coordination(it: &mut Interp, st: &Structure, flat: &FlatAt
     }
 }
 
-fn add_zinc_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms) {
-    let n = flat.pos.len();
-    let cands: Vec<usize> = (0..n).filter(|&a| matches!(flat.name[a].trim(), "SG" | "ND1" | "NE2")).collect();
-    for z in 0..n {
-        if flat.name[z].trim() != "ZN" {
-            continue;
-        }
+fn add_zinc_coordination(it: &mut Interp, st: &Structure, flat: &FlatAtoms, special: &SpecialAtoms) {
+    let cands = &special.zinc_partners;
+    for &z in &special.zincs {
         let pz = flat.pos[z];
         let mut per_res: FxHashSet<(u32, u32, u32)> = FxHashSet::default();
         let mut partners: Vec<(f64, u32)> = Vec::new();
-        for &a in &cands {
+        for &a in cands {
             if a == z || flat.path[a].model != flat.path[z].model {
                 continue;
             }

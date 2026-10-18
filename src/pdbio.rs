@@ -151,7 +151,7 @@ fn edit_blank_altloc(rg: &mut ResidueGroup) {
         if let Some(bg) = blank.iter().find(|g| g.resname == a.resname) {
             for at in &a.atoms {
                 if bg.atoms.iter().any(|x| x.name == at.name) {
-                    blank_but_alt.entry(a.resname.clone()).or_default().push(at.name.clone());
+                    blank_but_alt.entry(a.resname.clone()).or_default().push(at.name.to_string());
                 }
             }
         }
@@ -161,7 +161,7 @@ fn edit_blank_altloc(rg: &mut ResidueGroup) {
         for bg in &mut blank {
             if let Some(names) = blank_but_alt.get(&bg.resname) {
                 let (moved, kept): (Vec<Atom>, Vec<Atom>) =
-                    bg.atoms.drain(..).partition(|a| names.contains(&a.name));
+                    bg.atoms.drain(..).partition(|a| names.iter().any(|n| *n == a.name));
                 bg.atoms = kept;
                 if !moved.is_empty() {
                     extra.push(AtomGroup { altloc: " ".into(), resname: bg.resname.clone(), atoms: moved });
@@ -281,14 +281,14 @@ pub fn read_pdb(text: &str) -> Structure {
                     element = infer_element(&name);
                 }
                 let atom = Atom {
-                    name,
-                    element: format!("{:>2}", element.trim()),
-                    charge,
-                    serial: col(line, 7, 11).to_string(),
+                    name: name.into(),
+                    element: format!("{:>2}", element.trim()).into(),
+                    charge: charge.into(),
+                    serial: col(line, 7, 11).into(),
                     xyz: v3(x, y, z),
                     occ,
                     b,
-                    segid: segid.clone(),
+                    segid: segid.as_str().into(),
                     hetero: rec.starts_with("HETATM"),
                     uij: None,
                     i_seq: 0,

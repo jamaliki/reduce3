@@ -18,8 +18,8 @@ fn atom(structure: &Structure, chain: &str, name: &str) -> AtomPath {
 
 fn sites(structure: &Structure) -> Vec<(String, String, [u32; 3], String)> {
     let mut sites: Vec<_> = structure.atom_paths().into_iter().filter(|&p| !structure.atom(p).is_hydrogen()).map(|p| (
-        structure.chain(p).id.clone(), structure.atom(p).name.clone(),
-        structure.atom(p).xyz.as_array().map(|v| (v as f32).to_bits()), structure.atom(p).charge.clone(),
+        structure.chain(p).id.clone(), structure.atom(p).name.to_string(),
+        structure.atom(p).xyz.as_array().map(|v| (v as f32).to_bits()), structure.atom(p).charge.to_string(),
     )).collect();
     sites.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
     sites

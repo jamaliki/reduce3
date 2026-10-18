@@ -13,6 +13,8 @@ categories = ["science", "command-line-utilities"]
 [dependencies]
 rayon = "1.12.0"
 rustc-hash = "2.1.3"
+# Hosts serialize atom names (`ShortStr`) as strings.
+serde = { version = "1.0.229", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.151", optional = true, features = ["float_roundtrip"] }
 smallvec = "1.16.2"
 mimalloc = { version = "0.1", default-features = false, optional = true }

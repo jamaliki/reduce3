@@ -1,7 +1,7 @@
 //! Flat, index-based view of a structure used by the optimizer and Movers.
 
 use crate::geom::Vec3;
-use crate::model::Structure;
+use crate::model::{ShortStr, Structure};
 use crate::movers::RidingRef;
 use crate::probe::AtomInfo;
 use crate::resclass::{self, ResClass};
@@ -12,11 +12,11 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Default)]
 pub struct AtomLabels {
     /// Stripped, upper-case atom name.
-    pub name: String,
+    pub name: ShortStr,
     /// Raw (padded) atom name.
-    pub raw_name: String,
+    pub raw_name: ShortStr,
     /// Stripped, upper-case element.
-    pub element: String,
+    pub element: ShortStr,
     // Residue-level labels are shared by the atoms of an atom group.
     pub resname: Arc<str>,
     /// Raw (padded) residue name as stored by iotbx.
@@ -126,9 +126,9 @@ impl World {
                         let class = resclass::get_class(&ag.resname);
                         for a in &ag.atoms {
                             labels.push(AtomLabels {
-                                name: a.name.trim().to_ascii_uppercase(),
+                                name: ShortStr::upper(a.name.trim()),
                                 raw_name: a.name.clone(),
-                                element: a.elem().to_ascii_uppercase(),
+                                element: ShortStr::upper(a.elem()),
                                 resname: resname.clone(),
                                 resname_raw: resname_raw.clone(),
                                 chain: chain.clone(),

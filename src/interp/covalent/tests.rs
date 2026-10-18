@@ -38,7 +38,7 @@ fn fixture() -> (Structure, FlatAtoms, Interp) {
     let flat = FlatAtoms::from_structure(&st);
     let mut it = Interp::empty(flat.pos.len());
     for (i, source) in [(0, &sulfur), (1, &sulfur), (2, &carbon), (3, &carbon), (4, &carbon), (5, &sulfur), (6, &sulfur)] {
-        it.dict[i] = AtomDictInfo { comp: Some(source.clone()), dict_id: Some(flat.name[i].trim().into()) };
+        it.dict[i] = AtomDictInfo { comp: Some(source.clone()), dict_id: Some(flat.name[i].trim().into()), instance: 0 };
     }
     for (a, b) in [(0, 1), (2, 3), (2, 4), (5, 6)] { it.add_bond(a, b, 1.5, ORIGIN_COVALENT); }
     (st, flat, it)

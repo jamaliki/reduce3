@@ -37,7 +37,7 @@ fn declare(st: &mut Structure, a: u32, b: u32) {
     let flat = FlatAtoms::from_structure(st);
     let label = |i: u32| {
         let p = flat.path[i as usize];
-        AtomLabel { name: st.atom(p).name.clone(), resname: st.atom_group(p).resname.clone(),
+        AtomLabel { name: st.atom(p).name.to_string(), resname: st.atom_group(p).resname.clone(),
             chain: st.chain(p).id.clone(), resseq: st.residue_group(p).resseq.clone(),
             altloc: st.atom_group(p).altloc.clone(), icode: st.residue_group(p).icode.clone() }
     };
@@ -78,7 +78,7 @@ fn accepted_automatic_peptide_also_blocks_a_later_candidate() {
             for p in st.atom_paths() {
                 let atom = st.atom_mut(p);
                 let name = if atom.name.trim() == "N" { "C" } else { "N" };
-                atom.name = format!(" {name:<3}");
+                atom.name = format!(" {name:<3}").into();
                 atom.element = name.into();
             }
         }
