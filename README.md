@@ -409,6 +409,20 @@ Where the speed comes from:
     twice. Fixed mode skips an image within 0.5 A of an atom of the model, which the in-model
     search has already handled. Deposited coordinates are unaffected.
 
+**Flip geometry**
+
+27. When an Asn, Gln or His flip is applied with its fix-up (`AnglesAdjusted`), `_rotateHingeDock`
+    docks the flipped side chain onto the original atom positions by turning it, from CB outward,
+    about CA. CB moves, but the hydrogen on CA, which rides on N, C and CB, kept the position the
+    unflipped CB gave it. With flips on, that left HA off its riding position for 96 residues in 10
+    of the 13 reference structures, by a median of 0.015 A and up to 0.069 A (His B8 of 7c31, whose
+    CB moved 0.14 A). Fixed mode places HA again by its riding rule from the final coordinates,
+    after the optimizer has finished, so scores, flip choices and the report do not change. Only
+    residues whose fix-up was applied are affected: on the reference structures nothing else in the
+    output changes, and runs without flips are byte-identical. The atoms the dock moves with CB
+    (HB2/HB3, HG2/HG3, the ring hydrogens) turn rigidly about CA and keep their riding geometry.
+    `OptParams::reride_flipped_alpha_h = false` keeps Reduce2's position.
+
 ## Where Reduce2 gives up
 
 Fixed mode carries on in these cases; compat mode stops or loses data exactly as Reduce2 does.

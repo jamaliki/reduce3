@@ -37,6 +37,11 @@ pub struct OptParams {
     /// syn to the carbonyl oxygen rather than anti.
     pub acid_syn_preference: f64,
     pub skip_bond_fixup: bool,
+    /// Fixed mode: place the hydrogen on the alpha carbon of an Asn, Gln or His
+    /// again once its flip's fix-up has docked the side chain (fix 27 in the
+    /// README). Off keeps Reduce2's position, for comparisons; compat mode
+    /// never places it again.
+    pub reride_flipped_alpha_h: bool,
     pub flip_states: String,
     pub verbosity: i32,
     pub compat: bool,
@@ -61,6 +66,7 @@ impl Default for OptParams {
             planar_hydroxyl_preference: 1.0,
             acid_syn_preference: 1.0,
             skip_bond_fixup: false,
+            reride_flipped_alpha_h: true,
             flip_states: String::new(),
             verbosity: 2,
             compat: false,
@@ -160,6 +166,9 @@ pub struct OptOutput {
     pub hydrogens_to_delete: Vec<u32>,
     pub amide_flips: Vec<FlippedMoverInfo>,
     pub his_flips: Vec<FlippedMoverInfo>,
+    /// Alpha carbons about which a flip's fix-up docked the side chain, by
+    /// Mover or lock-down, in the order applied.
+    pub docked_alpha_carbons: Vec<u32>,
     pub num_calculated: usize,
     pub num_cached: usize,
 }
@@ -1967,6 +1976,7 @@ fn run_one(
         info: String::new(),
         amide_flips: Vec::new(),
         his_flips: Vec::new(),
+        docked_alpha_carbons: Vec::new(),
     };
     place_movers(w, p, &atoms, rotatable_h, flip_states, alt, max_vdw, &mut nidx, &removed, n_models, &mut placement);
     info += &placement.info;
@@ -1974,6 +1984,7 @@ fn run_one(
     let mut mover_info = placement.mover_info;
     out.amide_flips.extend(placement.amide_flips);
     out.his_flips.extend(placement.his_flips);
+    out.docked_alpha_carbons.extend(placement.docked_alpha_carbons);
     info += &vcheck(v, 1, &format!("Inserted {} Movers\n", movers.len()));
     info += &vcheck(v, 1, &format!("Marked {} atoms for deletion\n", placement.delete_atoms.len()));
     info += &tm.report("place movers");
@@ -2404,6 +2415,9 @@ fn run_one(
             }
             for (i, &pp) in in_state(&mv.fixup_pos, loc).iter().enumerate() {
                 w.pos[mv.atoms[i] as usize] = pp;
+            }
+            if !in_state(&mv.fixup_pos, loc).is_empty() {
+                out.docked_alpha_carbons.extend(mv.alpha_carbon);
             }
             for (i, inf) in in_state(&mv.fixup_info, loc).iter().enumerate() {
                 w.info[mv.atoms[i] as usize] = *inf;
@@ -3668,6 +3682,7 @@ struct Placement {
     info: String,
     amide_flips: Vec<FlippedMoverInfo>,
     his_flips: Vec<FlippedMoverInfo>,
+    docked_alpha_carbons: Vec<u32>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3830,7 +3845,7 @@ fn place_movers(
                     Ok(flip) => {
                         pl.info += &vcheck(v, 1, &format!("Locking MoverAmideFlip on {} flipped (ionic contact)\n", rid(w)));
                         set_state_now(w, &flip, 1, q);
-                        apply_fixup(w, &flip, 1, &mut pl.delete_atoms);
+                        apply_fixup(w, &flip, 1, &mut pl.delete_atoms, &mut pl.docked_alpha_carbons);
                         pl.amide_flips.push(FlippedMoverInfo { alt: alt.into(), base_atom: a });
                     }
                     Err(e) => pl.info += &vcheck(v, 0, &format!("Did not add MoverAmideFlip to {}: {}\n", rid(w), e)),
@@ -3856,7 +3871,7 @@ fn place_movers(
                             }
                             set_state_now(w, &flip, index, q);
                             if s.fixed_up {
-                                apply_fixup(w, &flip, index, &mut pl.delete_atoms);
+                                apply_fixup(w, &flip, index, &mut pl.delete_atoms, &mut pl.docked_alpha_carbons);
                             }
                         } else {
                             pl.movers.push(flip);
@@ -3981,9 +3996,12 @@ fn set_state_now(w: &mut World, mv: &Mover, c: usize, q: &mut NeighborIndex) {
     }
 }
 
-fn apply_fixup(w: &mut World, mv: &Mover, c: usize, deletes: &mut Vec<u32>) {
+fn apply_fixup(w: &mut World, mv: &Mover, c: usize, deletes: &mut Vec<u32>, docked: &mut Vec<u32>) {
     for (i, &pp) in in_state(&mv.fixup_pos, c).iter().enumerate() {
         w.pos[mv.atoms[i] as usize] = pp;
+    }
+    if !in_state(&mv.fixup_pos, c).is_empty() {
+        docked.extend(mv.alpha_carbon);
     }
     for (i, inf) in in_state(&mv.fixup_info, c).iter().enumerate() {
         w.info[mv.atoms[i] as usize] = *inf;
@@ -4080,6 +4098,9 @@ fn place_his(
             if i < hist.fixup_info[bc].len() {
                 w.info[at as usize] = hist.fixup_info[bc][i];
             }
+        }
+        if !hist.fixup_pos[bc].is_empty() {
+            pl.docked_alpha_carbons.extend(hist.alpha_carbon);
         }
         if bc == 4 {
             // The original records the wrong atom here (its loop variable was

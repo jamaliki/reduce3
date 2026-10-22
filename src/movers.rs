@@ -8,6 +8,7 @@
 
 use crate::geom::*;
 use crate::probe::AtomInfo;
+use crate::riding::{compute_h_position, HType, RidingCoef};
 use crate::world::World;
 pub(crate) mod hydroxyl;
 use hydroxyl::{PlanarHydroxyl, planar_hydroxyl};
@@ -65,6 +66,9 @@ pub struct Mover {
     pub fixup_info: Vec<Vec<AtomInfo>>,
     pub fixup_del: Vec<Vec<bool>>,
     pub rot: Option<RotatorMeta>,
+    /// A flip's alpha carbon, about which its fix-up docks the side chain
+    /// (`rotate_hinge_dock`); `None` for rotators.
+    pub alpha_carbon: Option<u32>,
 }
 
 /// Entry `c` of one of a Mover's per-state lists, or nothing when the list is
@@ -375,6 +379,7 @@ fn build_rotator_poses(w: &mut World, kind: MoverKind, spec: RotatorSpec, poses_
             axis_origin: spec.axis_origin,
             axis_dir: spec.axis_dir,
         }),
+        alpha_carbon: None,
     };
     if poses_now {
         recompute_rotator_positions(w, &mut m, spec.preference, spec.pref_scale, spec.do_fine);
@@ -825,6 +830,36 @@ fn rotate_hinge_dock(
     Ok(movable)
 }
 
+/// Fixed mode: place the hydrogens riding on each alpha carbon whose side chain
+/// a flip's fix-up docked again, from the final coordinates. The dock turns the
+/// atoms from CB outward about CA, but N and C stay put, so HA (riding on N, C
+/// and CB) would keep the position the unflipped CB gave it, up to 0.07 A from
+/// its riding position. Only hydrogens with CA as their riding parent and a
+/// position that follows from the heavy atoms alone are placed, with their
+/// existing coefficients. The atoms that move with CB keep their geometry, as
+/// the dock is rigid about CA. Returns the number placed.
+pub fn ride_docked_alpha_hydrogens(w: &mut World, coef: &[Option<RidingCoef>], alpha_carbons: &[u32]) -> usize {
+    let mut alpha_carbons = alpha_carbons.to_vec();
+    alpha_carbons.sort_unstable();
+    alpha_carbons.dedup();
+    let mut placed = 0;
+    for ca in alpha_carbons {
+        let hydrogens: Vec<u32> = w.bonded[ca as usize].iter().copied().filter(|&h| w.is_h(h)).collect();
+        for h in hydrogens {
+            let Some(c) = coef.get(h as usize).copied().flatten() else { continue };
+            let from_heavy_atoms = matches!(c.htype, HType::Flat2 | HType::TwoNeigbs | HType::TwoTetra | HType::ThreeNeigbs);
+            if c.a0 != ca || !from_heavy_atoms {
+                continue;
+            }
+            if let Some(p) = compute_h_position(&c, &w.pos) {
+                w.set_pos(h, p);
+                placed += 1;
+            }
+        }
+    }
+    placed
+}
+
 /// `MoverAmideFlip`.
 pub fn amide_flip(w: &mut World, nh2: u32, ca_name: &str, non_flip_preference: f64, clamp: bool) -> MResult<Mover> {
     if w.elem(nh2) != "N" {
@@ -950,6 +985,7 @@ pub fn amide_flip(w: &mut World, nh2: u32, ca_name: &str, non_flip_preference: f
         fixup_info: vec![vec![], vec![]],
         fixup_del: vec![vec![], vec![]],
         rot: None,
+        alpha_carbon: Some(ca_atom),
     })
 }
 
@@ -1142,5 +1178,6 @@ pub fn his_flip(
         fixup_info: infos,
         fixup_del: dels,
         rot: None,
+        alpha_carbon: Some(ca),
     })
 }

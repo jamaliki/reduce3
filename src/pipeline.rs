@@ -502,6 +502,9 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
     let out = optimizer::optimize(&mut w, &models, &rotatable, &p.opt, n_models);
     crate::model::mem_checkpoint("optimizer: done");
     info += &out.info;
+    if !p.compat && p.opt.reride_flipped_alpha_h {
+        crate::movers::ride_docked_alpha_hydrogens(&mut w, &coefs, &out.docked_alpha_carbons);
+    }
     if !p.compat {
         let selected: rustc_hash::FxHashSet<u32> = models.iter().flat_map(|model|
             model.alts.iter().flat_map(|(_, atoms)| atoms.iter().copied())).collect();
