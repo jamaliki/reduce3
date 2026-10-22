@@ -65,9 +65,9 @@ pub fn world_from_dump(d: &Value) -> World {
         let resname_raw = s(&a["resname"]);
         let class = resclass::get_class(&resname_raw);
         labels.push(AtomLabels {
-            name: s(&a["name"]).trim().to_ascii_uppercase(),
-            raw_name: s(&a["name"]),
-            element: s(&a["element"]).trim().to_ascii_uppercase(),
+            name: s(&a["name"]).trim().to_ascii_uppercase().into(),
+            raw_name: s(&a["name"]).into(),
+            element: s(&a["element"]).trim().to_ascii_uppercase().into(),
             resname: resname_raw.trim().to_ascii_uppercase().into(),
             resname_raw: resname_raw.clone().into(),
             chain: s(&a["chain_id"]).into(),
@@ -349,7 +349,7 @@ pub fn hcheck(pdb: &str, dump: &str, chem_data: &str, compat: bool) {
                 st.atom_group(pp).resname.clone(),
                 st.atom_group(pp).altloc.clone(),
                 st.residue_group(pp).resseq_as_int(),
-                a.name.clone(),
+                a.name.to_string(),
                 a.xyz,
             )
         })
