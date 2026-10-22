@@ -144,6 +144,12 @@ pub struct RidingAtoms<'a> {
     /// and the temporary position then decides which H gets which name
     /// (HD21/HD22 come out swapped for a few percent of amides).
     pub dictionary_nh2_torsion: bool,
+    /// The name of the atom a hydrogen must be cis to, when a naming
+    /// convention fixes it ([`crate::names::amino_h_cis_partner`]). It
+    /// overrides the dictionary torsion of that hydrogen: a period-2 torsion
+    /// does not tell the two H of an NH2 apart, and the constant torsions of
+    /// GeoStd's DG name its amino group the other way round. Reduce2 has none.
+    pub cis_partner: &'a dyn Fn(u32) -> Option<&'static str>,
     /// Orient a one-neighbor group by another atom when its third neighbor lies
     /// on the parent bond axis (a ligand on a crystallographic two-fold, say).
     /// Reduce2 divides by zero there.
@@ -354,6 +360,11 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             }
         }
     };
+    // the torsion that puts H `t` cis (0) or trans (180) to the third atom of
+    // its dihedral by the naming convention, if one applies
+    let named = |t: u32, third: u32| {
+        (at.cis_partner)(t).map(|partner| if at.name[third as usize].trim() == partner { 0.0 } else { 180.0 })
+    };
     for dp in &it.const_dihedrals {
         for &t in &dp.i {
             if conn.index(t).is_none() {
@@ -368,7 +379,7 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             };
             if let Some(nb) = conn.get_mut(t) {
                 nb.b1_iseq = Some(third);
-                nb.b1_ideal = Some(ideal);
+                nb.b1_ideal = Some(named(t, third).unwrap_or(ideal));
             }
             assign_group(&mut conn, t, third);
         }
@@ -394,8 +405,15 @@ pub fn riding(it: &Interp, sites: &mut [Vec3], at: &RidingAtoms, use_ideal_dihed
             if let Some(nb) = conn.get_mut(t) {
                 nb.b1_iseq = Some(third);
                 let nh2 = at.dictionary_nh2_torsion && dp.period == 2 && nb.nh == 1;
-                // alg1a places the H at its torsion parameter + 180 degrees
-                nb.b1_ideal = Some(if nh2 { dp.ideal - 180.0 } else { model_deg + delta });
+                // Both images of a period-2 torsion fit the dictionary. Groups
+                // without a naming convention keep the image opposite its
+                // value, which names the amino groups of GeoStd's RNA A and C
+                // as IUPAC does.
+                nb.b1_ideal = Some(match named(t, third) {
+                    Some(torsion) => torsion,
+                    None if nh2 => dp.ideal - 180.0,
+                    None => model_deg + delta,
+                });
             }
             assign_group(&mut conn, t, third);
         }

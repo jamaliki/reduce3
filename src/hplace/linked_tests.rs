@@ -53,7 +53,7 @@ fn unparameterized(it: &Interp, flat: &FlatAtoms) -> Vec<u32> {
     let input = riding::RidingAtoms {
         is_h: &flat.is_h, altloc: &flat.altloc, name: &flat.name,
         occ: &occupancy, rg_of: &residues, expected_heavy: &|_| None,
-        dictionary_nh2_torsion: true, reroute_axial_reference: true,
+        dictionary_nh2_torsion: true, cis_partner: &|_| None, reroute_axial_reference: true,
         use_plane_restraints: true,
     };
     riding::riding(it, &mut flat.pos.clone(), &input, true).unparameterized

@@ -31,7 +31,7 @@ fn parameterize(it: &Interp, sites: &mut [Vec3], fixed: bool) -> RidingResult {
     riding(it, sites, &RidingAtoms {
         is_h: &is_h, altloc: &vec![ShortStr::new(); count],
         name: &names, occ: &vec![1.; count], rg_of: &vec![0; count], expected_heavy: &|_| None,
-        dictionary_nh2_torsion: fixed, reroute_axial_reference: fixed, use_plane_restraints: fixed,
+        dictionary_nh2_torsion: fixed, cis_partner: &|_| None, reroute_axial_reference: fixed, use_plane_restraints: fixed,
     }, true)
 }
 

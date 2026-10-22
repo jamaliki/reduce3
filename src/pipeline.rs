@@ -403,6 +403,8 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
             let expected_heavy = |a: u32| -> Option<usize> {
                 table.get(resnames[a as usize])?.as_ref()?.get(flat.name[a as usize].trim()).copied()
             };
+            let cis_partner =
+                |h: u32| if p.compat { None } else { crate::names::amino_h_cis_partner(resnames[h as usize], &flat.name[h as usize]) };
             let ra = crate::riding::RidingAtoms {
                 is_h: &flat.is_h,
                 altloc: &flat.altloc,
@@ -411,6 +413,7 @@ pub fn optimize_structure(st: &mut Structure, ml: &MonLib, p: &Params, prior: Op
                 rg_of: &rg_of,
                 expected_heavy: &expected_heavy,
                 dictionary_nh2_torsion: !p.compat,
+                cis_partner: &cis_partner,
                 reroute_axial_reference: !p.compat,
                 use_plane_restraints: !p.compat,
             };

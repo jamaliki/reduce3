@@ -326,11 +326,17 @@ Where the speed comes from:
 
 **Hydrogen placement**
 
-5. Amide and guanidinium NH2 names (HD21/HD22, HE21/HE22, HH11/HH12) came from the periodic image
-   of the dictionary torsion nearest a temporary hydrogen position. In the reference outputs this
-   swapped the names for 15 of 197 groups in 6oge, 2/32 in 1xso, 1/40 in 3gfh and 1/16 in 7c31.
-   Fixed mode uses the dictionary torsion, and every group now follows the CCD/dictionary
-   convention.
+5. The names of the two hydrogens of an amide or guanidinium NH2 (HD21/HD22, HE21/HE22,
+   HH11/HH12, HH21/HH22) depended on what placed them. The dictionary torsions of these groups have
+   period 2, so they do not tell the two apart, and riding took the image nearest a temporary
+   hydrogen seeded near the residue's centroid. The amide flip Mover names them the other way
+   round. Without flips, 686 of the 709 groups in the reference outputs have the reverse of the
+   IUPAC names; with flips the amides mostly follow IUPAC and the guanidiniums still do not. Fixed
+   mode now gives the IUPAC names (Markley et al., Pure Appl. Chem. 70, 117 (1998)) whether riding
+   or the Mover places them: HD21, HE21, HH11 and HH21 are cis to CB, CG and NE, so HD22 is cis to
+   OD1 and HE22 to OE1. The amino groups of the bases follow the same paper, H61 of A and H21 of G
+   cis to N1 and H41 of C cis to N3, in RNA and DNA alike. GeoStd's constant torsions for DG name
+   its amino group the other way round from G, so DG and G disagreed before.
 6. `flip_symmetric_amino_acids` flipped every alternate conformation of a residue as soon as one
    of them needed it. Each atom group is now tested on its own geometry.
 7. Modified amino acids had their hydrogens renamed to standard amino-acid names. That made them

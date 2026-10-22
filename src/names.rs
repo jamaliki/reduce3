@@ -325,6 +325,35 @@ pub fn rna_dna_mon_lib_name(resname: &str, has_o2: bool) -> Option<&'static str>
     })
 }
 
+/// The atom that a hydrogen of an amino group of a standard residue is cis to
+/// under the IUPAC names (Markley et al., Pure Appl. Chem. 70, 117 (1998),
+/// Figs. 1 and 2). HD21, HE21, HH11 and HH21 are cis to the heavy atom three
+/// bonds closer to the main chain (CB, CG and NE). In the bases H61 is cis to
+/// N1, H41 to N3 and H21 to N1. Deuterium names count as hydrogen names, and
+/// D-amino acids and DNA follow the L and RNA residues.
+pub fn amino_h_cis_partner(resname: &str, h: &str) -> Option<&'static str> {
+    let r = resname.trim();
+    let r = l_given_d(r).or_else(|| rna_dna_mon_lib_name(r, true)).unwrap_or(r);
+    let h = h.trim();
+    let digits = h.strip_prefix('H').or_else(|| h.strip_prefix('D'))?;
+    Some(match (r, digits) {
+        ("ASN", "D21") => "CB",
+        ("ASN", "D22") => "OD1",
+        ("GLN", "E21") => "CG",
+        ("GLN", "E22") => "OE1",
+        ("ARG", "H11" | "H21") => "NE",
+        ("ARG", "H12") => "NH2",
+        ("ARG", "H22") => "NH1",
+        ("A" | "AD", "61") => "N1",
+        ("A" | "AD", "62") => "C5",
+        ("C" | "CD", "41") => "N3",
+        ("C" | "CD", "42") => "C5",
+        ("G" | "GD", "21") => "N1",
+        ("G" | "GD", "22") => "N3",
+        _ => return None,
+    })
+}
+
 /// Normalize a nucleotide atom name to the v3 reference name.
 pub fn na_reference_name(name: &str) -> String {
     let n = name.trim().to_ascii_uppercase();

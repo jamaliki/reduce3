@@ -903,6 +903,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         let m = heavy_cache.get(resnames[a as usize])?.as_ref()?;
         m.get(w.flat.name[a as usize].trim()).copied()
     };
+    let cis_partner = |h: u32| if p.compat { None } else { names::amino_h_cis_partner(resnames[h as usize], &w.flat.name[h as usize]) };
     let mut sites = w.flat.pos.clone();
     let ra = RidingAtoms {
         is_h: &w.flat.is_h,
@@ -912,6 +913,7 @@ pub fn place_hydrogens(st: &mut Structure, ml: &MonLib, p: &HPlaceParams) -> Pla
         rg_of: &rg_of,
         expected_heavy: &expected_heavy,
         dictionary_nh2_torsion: !p.compat,
+        cis_partner: &cis_partner,
         reroute_axial_reference: !p.compat,
         use_plane_restraints: !p.compat,
     };
