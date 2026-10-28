@@ -1,3 +1,6 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::Vec3;
 use reduce3::{hplace, mmcif, pipeline, MonLib, Params};
 use reduce3::model::{Atom, Structure};
@@ -6,10 +9,7 @@ const PEPTIDE: &str = include_str!("data/linked_8zje.cif");
 const ADDUCT: &str = include_str!("data/linked_9hj3.cif");
 
 fn library() -> Option<MonLib> {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return None;
-    };
+    let Some(root) = chem_data::locate() else { return None };
     Some(MonLib::load(&root).unwrap())
 }
 

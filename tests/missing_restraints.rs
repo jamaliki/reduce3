@@ -1,5 +1,8 @@
 //! Scoped missing dictionaries keep heavy contact context and strict targets.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::{v3, Vec3};
 use reduce3::model::{Atom, AtomGroup, Chain, ResidueGroup, Structure};
 use reduce3::{mmcif, pipeline, MonLib, Params};
@@ -19,10 +22,7 @@ ATOM 55 C CZ . TYR A 1 7 ? 0.441 -5.122 12.728 1.00 7.68 ? 7 TYR A CZ 1\n\
 ATOM 56 O OH . TYR A 1 7 ? -0.415 -4.135 13.154 1.00 8.87 ? 7 TYR A OH 1\n";
 
 fn library() -> Option<MonLib> {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return None;
-    };
+    let Some(root) = chem_data::locate() else { return None };
     Some(MonLib::load(&root).unwrap())
 }
 

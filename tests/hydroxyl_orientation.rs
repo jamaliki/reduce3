@@ -3,6 +3,9 @@
 //! hydrogen is syn to its carbonyl oxygen. Needs the monomer library (found as
 //! the command-line tool finds it); skipped without one.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::{dihedral_deg, Vec3};
 use reduce3::{mmcif, pipeline, MonLib, Params};
 
@@ -56,10 +59,7 @@ HETATM 2127 O  OZ2 . MBO C 3 . ? 0.280  12.067 30.897 1.00 19.62 ? 263 MBO B OZ2
 ";
 
 fn run(params: &Params) -> Option<Vec<(String, Vec3)>> {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return None;
-    };
+    let Some(root) = chem_data::locate() else { return None };
     let ml = MonLib::load(&root).unwrap();
     let out = pipeline::run(mmcif::read_mmcif(MODEL).unwrap(), &ml, params).unwrap();
     let mut atoms = Vec::new();
@@ -104,10 +104,7 @@ fn without_the_preferences_the_acid_is_not_syn() {
 
 #[test]
 fn crowded_6tbr_tyr224_keeps_its_gln_contact_without_large_hydrogen_tilt() {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return;
-    };
+    let Some(root) = chem_data::locate() else { return };
     let ml = MonLib::load(&root).unwrap();
     let input = mmcif::read_mmcif(include_str!("data/6tbr_tyr224.cif")).unwrap();
     let original = reduce3::world::World::from_structure(&input);

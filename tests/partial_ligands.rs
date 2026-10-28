@@ -1,15 +1,15 @@
 //! Undefined ligand H targets keep their parent rows and observed H.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::v3;
 use reduce3::model::{Atom, AtomPath, Structure};
 use reduce3::pipeline::{HydrogenUncertaintyReason, Output};
 use reduce3::{hplace, mmcif, pipeline, MonLib, Params};
 
 fn library() -> Option<MonLib> {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return None;
-    };
+    let Some(root) = chem_data::locate() else { return None };
     Some(MonLib::load(&root).unwrap())
 }
 

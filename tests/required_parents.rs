@@ -1,11 +1,11 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::{mmcif, pipeline, MonLib, Params};
 use reduce3::model::{Atom, Structure};
 
 fn library() -> Option<MonLib> {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return None;
-    };
+    let Some(root) = chem_data::locate() else { return None };
     Some(MonLib::load(&root).unwrap())
 }
 

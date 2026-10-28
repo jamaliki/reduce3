@@ -1,9 +1,12 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::{hplace::NTermCharge, mmcif, pipeline, MonLib, Params};
 use reduce3::model::{Atom, AtomPath, Structure};
 use reduce3::geom::v3;
 
 fn library() -> Option<MonLib> {
-    let root = MonLib::locate(None)?;
+    let root = chem_data::locate()?;
     Some(MonLib::load(&root).unwrap())
 }
 

@@ -2,6 +2,9 @@
 //! no thiol hydrogen on a cysteine bound to a metal other than zinc. Needs the
 //! monomer library (found as the command-line tool finds it); skipped without one.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::{mmcif, pipeline, MonLib, Params};
 
 const HEADER: &str = "\
@@ -70,10 +73,7 @@ ATOM 12 S SG . CYS A2 1 . ? 9.192 8.965 46.367 1.00 14.05 ? 57 CYS A2 SG 1
 
 /// Run fixed mode; the names of residue `resseq`'s atoms (None without chem_data).
 fn atom_names(model: &str, resseq: &str) -> Option<Vec<String>> {
-    let Some(root) = MonLib::locate(None) else {
-        eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
-        return None;
-    };
+    let Some(root) = chem_data::locate() else { return None };
     let ml = MonLib::load(&root).unwrap();
     let out = pipeline::run(mmcif::read_mmcif(model).unwrap(), &ml, &Params::default()).unwrap();
     let mut names = Vec::new();

@@ -31,6 +31,17 @@ The binary is `target/release/reduce3`. It needs the cctbx `chem_data` directory
 `mon_lib` monomer libraries plus `chemical_components`). Reduce3 looks for it in `--chem-data DIR`,
 then `$REDUCE3_CHEM_DATA`, `$CHEM_DATA`, and finally the active conda environment.
 
+## Tests
+
+```bash
+cargo test
+```
+
+Tests that need chem_data skip without it, unless `REDUCE3_REQUIRE_CHEM_DATA=1` (as in CI) makes
+them fail. `tests/golden.rs` compares fixed-mode output on 301 structures with golden files kept
+per platform. It also checks that the output does not depend on the thread count. See
+[tests/golden/README.md](tests/golden/README.md).
+
 ## Usage
 
 ```bash
@@ -578,6 +589,7 @@ still applies when enabled.
 | `src/cifsource.rs`, `src/lib.rs` | library interface for already-parsed CIF data |
 | `src/cell.rs` | cctbx unit-cell arithmetic used by compat mode |
 | `tools/` | table generators, the end-to-end comparison script and the neutron benchmark |
+| `tests/golden/`, `tools/golden/` | golden outputs, their inputs and pinned chem_data files, and the scripts that made them |
 | `reference/` | scripts that produce the Reduce2 reference data |
 
 ## License

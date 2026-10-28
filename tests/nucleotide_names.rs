@@ -1,3 +1,6 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::{names, MonLib};
 
 #[test]
@@ -12,7 +15,7 @@ fn thymine_methyl_names_share_the_v3_reference() {
 
 #[test]
 fn dictionary_mapping_accepts_both_thymine_methyl_spellings() {
-    let Some(root) = MonLib::locate(None) else { return };
+    let Some(root) = chem_data::locate() else { return };
     let library = MonLib::load(&root).unwrap();
     let dictionary = library.comp("TD").unwrap();
     let v2 = ["C5M", "H5M1", "H5M2", "H5M3"].map(String::from);

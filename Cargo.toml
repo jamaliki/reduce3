@@ -7,6 +7,8 @@ description = "Fast Rust reimplementation of cctbx Reduce2: add hydrogens and op
 license = "Apache-2.0"
 repository = "https://github.com/jamaliki/reduce3"
 readme = "README.md"
+# The golden test data (about 17 MB) stays out of the published crate.
+exclude = ["tests/golden", "tests/golden.rs", "tools/golden"]
 keywords = ["protein", "hydrogens", "crystallography", "structural-biology", "pdb"]
 categories = ["science", "command-line-utilities"]
 
@@ -19,6 +21,10 @@ serde_json = { version = "1.0.151", optional = true, features = ["float_roundtri
 smallvec = "1.16.2"
 mimalloc = { version = "0.1", default-features = false, optional = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+
+[dev-dependencies]
+# The golden test's input and chem_data checks and output hashes.
+sha2 = "0.10"
 
 [features]
 default = ["mimalloc", "gzip"]

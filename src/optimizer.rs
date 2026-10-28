@@ -19,6 +19,9 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(test)]
+mod lane_agreement_tests;
+
 /// Behavior switches: `compat` reproduces Reduce2 quirks that are bugs.
 #[derive(Clone, Debug)]
 pub struct OptParams {
