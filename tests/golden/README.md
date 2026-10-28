@@ -27,10 +27,18 @@ Fixed mode is not bit-identical across platforms. `riding::cx`,
 `ccdrestraints` and `cell` use fused multiply-adds on aarch64 only, and
 trigonometry comes from the platform's libm. So each platform has its own golden file:
 
-- `fixed-aarch64-macos.tsv`: Apple silicon.
+- `fixed-aarch64-macos.tsv`: Apple silicon (blessed on macOS 26; macOS 15 in CI matches it).
 - `fixed-x86_64-linux.tsv`: Sandpit Tokyo compute nodes (Ubuntu 24.04, glibc 2.39), where the corpora are built.
 
 A platform without a golden file fails the test. Bless one there to add it.
+
+The two files differ in 9 of the 301 structures, all in single-hydrogen
+rotors. In 8 the report prints a pose as 180 or 0 degrees on one platform and
+-180 or -0 on the other: the coordinates are the same. In one (1mcb THR 165
+HG1) two rotor angles tie, and the platforms choose 109 and 110 degrees, which
+moves the hydrogen 0.012 Å. That one comes from libm: it remains with the
+fused multiply-adds turned off. At the bit level, 300 structures and 11% of
+hydrogens differ.
 
 ## chem_data
 

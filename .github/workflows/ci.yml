@@ -67,6 +67,8 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+        env:
+          REDUCE3_GOLDEN_DUMP: ${{ github.workspace }}/golden-dump
 
       - name: Golden outputs and determinism (release)
         run: cargo test --locked --release --test golden
