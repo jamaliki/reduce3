@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The pinned chem_data files the tests read (tests/golden/chem_data.tsv);
+  # tests that need them fail rather than skip.
+  REDUCE3_CHEM_DATA: ${{ github.workspace }}/chem_data
+  REDUCE3_REQUIRE_CHEM_DATA: "1"
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86-64 Linux, as on Sandpit Tokyo (Ubuntu 24.04, glibc 2.39)
+          - name: x86_64-linux
+            os: ubuntu-24.04
+          - name: aarch64-macos
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache chem_data
+        id: chem-data
+        uses: actions/cache@v4
+        with:
+          path: chem_data
+          key: chem-data-${{ hashFiles('tests/golden/chem_data.tsv') }}
+
+      - uses: actions/setup-python@v5
+        if: steps.chem-data.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.14"
+
+      - name: Fetch chem_data
+        if: steps.chem-data.outputs.cache-hit != 'true'
+        run: python3 tools/golden/fetch_chem_data.py tests/golden/chem_data.tsv chem_data
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Clippy
+        # Correctness and suspicious lints only: the code base has style
+        # warnings that predate CI.
+        run: cargo clippy --locked --all-targets -- -D clippy::correctness -D clippy::suspicious
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Golden outputs and determinism (release)
+        run: cargo test --locked --release --test golden
+        env:
+          REDUCE3_GOLDEN_DUMP: ${{ github.workspace }}/golden-dump
+
+      - name: Upload golden dump
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-dump-${{ matrix.name }}
+          path: golden-dump
+          if-no-files-found: ignore
