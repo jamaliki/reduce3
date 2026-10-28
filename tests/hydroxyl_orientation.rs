@@ -59,7 +59,7 @@ HETATM 2127 O  OZ2 . MBO C 3 . ? 0.280  12.067 30.897 1.00 19.62 ? 263 MBO B OZ2
 ";
 
 fn run(params: &Params) -> Option<Vec<(String, Vec3)>> {
-    let Some(root) = chem_data::locate() else { return None };
+    let root = chem_data::locate()?;
     let ml = MonLib::load(&root).unwrap();
     let out = pipeline::run(mmcif::read_mmcif(MODEL).unwrap(), &ml, params).unwrap();
     let mut atoms = Vec::new();

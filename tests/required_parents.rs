@@ -5,7 +5,7 @@ use reduce3::{mmcif, pipeline, MonLib, Params};
 use reduce3::model::{Atom, Structure};
 
 fn library() -> Option<MonLib> {
-    let Some(root) = chem_data::locate() else { return None };
+    let root = chem_data::locate()?;
     Some(MonLib::load(&root).unwrap())
 }
 

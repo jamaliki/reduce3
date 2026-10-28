@@ -9,7 +9,7 @@ const PEPTIDE: &str = include_str!("data/linked_8zje.cif");
 const ADDUCT: &str = include_str!("data/linked_9hj3.cif");
 
 fn library() -> Option<MonLib> {
-    let Some(root) = chem_data::locate() else { return None };
+    let root = chem_data::locate()?;
     Some(MonLib::load(&root).unwrap())
 }
 
