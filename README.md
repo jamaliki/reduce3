@@ -439,6 +439,14 @@ Where the speed comes from:
     output changes, and runs without flips are byte-identical. The atoms the dock moves with CB
     (HB2/HB3, HG2/HG3, the ring hydrogens) turn rigidly about CA and keep their riding geometry.
     `OptParams::reride_flipped_alpha_h = false` keeps Reduce2's position.
+28. When the atom names of a symmetric side chain are swapped to the IUPAC convention (Asp and Glu
+    carboxylate oxygens, Phe and Tyr ring atoms, Arg guanidinium atoms, Val and Leu methyls), the
+    coordinates and B factors went with the swap but the occupancy and the anisotropic ADP stayed
+    with the old names, so a pair whose two sites differ in occupancy or ADP came out with the
+    values of the wrong site: 226 atoms in 42 of the audited views. Fixed mode swaps the occupancy
+    and the anisotropic ADP (which sets B for anisotropic atoms) with the coordinates. Positions,
+    scores and reports do not change, nor do any of the 301 golden outputs. Compat mode keeps
+    Reduce2's behaviour.
 
 ## Where Reduce2 gives up
 
