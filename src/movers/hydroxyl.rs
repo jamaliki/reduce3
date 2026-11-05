@@ -35,6 +35,15 @@ pub(super) fn planar_hydroxyl(w: &World, oxygen: u32, partner: u32, friends: &[u
 }
 
 impl PlanarHydroxyl {
+    /// Whether hydrogen `h` turned about `axis` (origin, direction) by `angle`
+    /// and by each of the `fine` offsets stays within the local-plane limit.
+    pub(super) fn admits(&self, w: &World, h: u32, axis: (Vec3, Vec3), angle: f64, fine: &[f64]) -> bool {
+        std::iter::once(0.0).chain(fine.iter().copied()).all(|offset| {
+            let at = rotate_deg_axis_dir(axis.0, axis.1, w.pos[h as usize], angle + offset);
+            self.height(w, at) <= MAX_HEIGHT + 1e-9
+        })
+    }
+
     fn height(&self, w: &World, hydrogen: Vec3) -> f64 {
         if !hydrogen.as_array().iter().all(|x| x.is_finite()) { return f64::INFINITY; }
         let o = w.pos[self.oxygen as usize];
@@ -53,11 +62,8 @@ impl PlanarHydroxyl {
 /// Keep the normal fine-angle grid. Add legal band endpoints so contact scoring
 /// can use the allowed tilt without adding a dense coarse search.
 pub(super) fn constrain_rotator(w: &World, h: u32, plane: &PlanarHydroxyl, rot: &mut RotatorMeta) -> Result<(), String> {
-    let position = |angle| rotate_deg_axis_dir(rot.axis_origin, rot.axis_dir, w.pos[h as usize], angle);
-    let legal = |angle: f64, fine: &[f64]| {
-        std::iter::once(0.0).chain(fine.iter().copied())
-            .all(|offset| plane.height(w, position(angle + offset)) <= MAX_HEIGHT + 1e-9)
-    };
+    let axis = (rot.axis_origin, rot.axis_dir);
+    let legal = |angle: f64, fine: &[f64]| plane.admits(w, h, axis, angle, fine);
     let reference = plane.carbonyl.first().copied().unwrap_or(plane.planes[0]);
     let center = dihedral_deg(w.pos[h as usize], w.pos[plane.partner as usize],
         w.pos[plane.oxygen as usize], w.pos[reference as usize])
@@ -131,9 +137,9 @@ mod tests {
             riding: vec![Some(RidingRef { n: 0, a2: 3 }), None, None, None, None, None], n_real: 6 }
     }
 
-    fn options(constrain: bool) -> SingleHOptions {
+    fn options(constrain: bool) -> SingleHOptions<'static> {
         SingleHOptions { circular_angle_spacing: true, any_partner_valence: true,
-            constrain_planar_hydroxyls: constrain, planar_preference: 0., syn_preference: 0. }
+            constrain_planar_hydroxyls: constrain, planar_preference: 0., syn_preference: 0., clearance: None }
     }
 
     #[test]

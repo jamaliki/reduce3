@@ -71,7 +71,8 @@ Reduce2's `name=value` parameters work the same way, with the same defaults exce
 `alt_id`, `bonded_neighbor_depth`, `verbosity`, `stop_on_any_missing_hydrogen`,
 `ignore_missing_restraints`, `output.filename`, `output.description_file_name`,
 `output.write_files`, and all `probe.*` scoring parameters. Fixed mode adds
-`planar_hydroxyl_preference` and `acid_syn_preference` (see "Hydroxyl orientation"). Extra options:
+`planar_hydroxyl_preference`, `acid_syn_preference` (see "Hydroxyl orientation") and `rotor_clearance`
+(fix 29). Extra options:
 `--threads N`, `-q`. `reduce3 --help` lists everything. In fixed mode a residue without restraints
 does not stop the run (so `ignore_missing_restraints` has no effect there);
 `stop_on_any_missing_hydrogen=True` makes it stop.
@@ -447,6 +448,29 @@ Where the speed comes from:
     and the anisotropic ADP (which sets B for anisotropic atoms) with the coordinates. Positions,
     scores and reports do not change, nor do any of the 301 golden outputs. Compat mode keeps
     Reduce2's behaviour.
+29. A hydroxyl, thiol or ammonium hydrogen was aimed straight at a nearby acceptor, to 1.2-1.3 A
+    from it (Ser292 HG of 1QVC chain B sat 1.27 A from Gln291 O), although a clear turn existed
+    (2,044 of the 2,110 close rotor groups in the audited views). The score does not stop it: the
+    hydrogen's own sphere trims the dots of its parent atom that overlap the acceptor, which hides
+    the clash between the two heavy atoms, and Probe softens a hydrogen bond that is too short
+    (reclassifying it as a clash with a `hbond_min_dist` penalty, as Probe does). Only the pose aimed
+    at the acceptor escapes both, so it won. Reduce2 scores it the same way.
+    Fixed mode offers no pose that puts a rotor hydrogen (the hydrogen of a Ser, Thr, Tyr or Cys or
+    of another hydroxyl or thiol, and every ammonium hydrogen, as in Lys) closer than
+    `rotor_clearance` (default 1.5 A, 0 turns it off) to a heavy atom, except its parent and the
+    atom behind it. A blocked coarse angle is replaced by the nearest clear angle on each side, so
+    the hydrogen can still turn to the edge of the blocked arc, and the planar hydroxyl limit still
+    applies. The heavy atoms include the waters that the scoring ignores for low occupancy or a high
+    B factor. A rotor with no clear turn is scored as Reduce2 scores it: ammonia bound to a metal is
+    the usual case.
+    The check uses the heavy atoms where they start, so a flip of a neighboring Asn, Gln or His
+    that later moves an acceptor next to the hydrogen is not seen. Methyl, aromatic and amide
+    hydrogens are not rotor hydrogens and are not changed. Compat mode keeps Reduce2's behavior.
+    In the 301 golden structures 58 outputs change, in rotor hydrogens only (229 of 29,467 move;
+    no heavy atom, hydrogen count or Mover changes), and the hydrogens within 1.4 A of a heavy atom
+    other than their parent fall from 28 to 1. Probe's clashscore does not fall with them: a
+    hydrogen bond that was too short also hid the clash between the two heavy atoms, which now
+    shows (see "Known limitations").
 
 ## Where Reduce2 gives up
 
@@ -555,6 +579,14 @@ Gln222 contact. Removing the active zinc left that position unchanged. The O-H m
 heavy atoms fixed and does not assign protonation states. The normal Asn/Gln/His flip search
 still applies when enabled.
 
+Whatever the hydroxyl, thiol or ammonium, fixed mode also keeps its hydrogens at least
+`rotor_clearance` (default 1.5 A) from every heavy atom but their parent and the atom behind it,
+wherever a turn that does so exists (fix 29 in the list above). Before this, the score could pick
+the pose aimed straight at an acceptor, 1.2-1.3 A away. `tests/rotor_clearance.rs` has the cases
+(a Ser aimed at a carbonyl oxygen, a Thr and a Cys next to a water, an ammonium, a water the
+scoring ignores). Hydrogen bonds are not affected: a hydrogen 1.6 A or more from the acceptor, as
+in a short strong bond, is still found, and a hydrogen with no clear turn stays where Reduce2 puts it.
+
 ## Known limitations
 
 * Protonation states follow fixed rules plus the contact score, with no electrostatics or pKa:
@@ -574,6 +606,16 @@ still applies when enabled.
   residue only if one of its hydrogens was added (input hydrogens of PDB files have a padded
   element field it does not recognize). Reduce3 does not track that padding and applies them
   whenever the residue has hydrogens.
+* The rotor clearance check (fix 29) sees the heavy atoms where they start. A flip of a neighboring
+  Asn, Gln or His can still put an acceptor within `rotor_clearance` of a hydrogen it did not see
+  (1 of the 29,467 rotor hydrogens in the 301 golden structures, 1.495 A: 1APV Tyr198 OH and Gln228).
+  Waters absent from the input cannot be seen either, nor can symmetry copies that the program
+  generates (disulfide and zinc partners).
+  Turning a hydrogen off an acceptor within about 2.5 A of its parent does not make the contact go
+  away. Probe2's clashscore, as `clashcheck` computes it on the optimizer's own atoms for the 300
+  smaller golden structures (435 models), rises from 7.494 to 7.518 clashes per 1000 atoms (8,784 to
+  8,812; 27 models change, 26 of them for the worse), because the clash between the two heavy atoms
+  is no longer suppressed by a hydrogen bond at 1.3 A.
 * User-supplied restraint CIF files are supported by the library code but not yet exposed on the
   command line.
 * Reduce2 options that only produce side files are accepted and ignored: `comparison_file`,

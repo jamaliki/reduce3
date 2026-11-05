@@ -45,6 +45,13 @@ pub struct OptParams {
     /// README). Off keeps Reduce2's position, for comparisons; compat mode
     /// never places it again.
     pub reride_flipped_alpha_h: bool,
+    /// Fixed mode: the closest, in A, that a hydroxyl, thiol or ammonium
+    /// hydrogen may be placed to a heavy atom that is not its parent, when
+    /// any turn about its bond keeps that clear (fix 29 in the README).
+    /// Reduce2 aims such a hydrogen straight at a nearby acceptor, which
+    /// leaves it as close as 1.3 A. 0 keeps Reduce2's poses; compat mode
+    /// never applies it.
+    pub rotor_clearance: f64,
     pub flip_states: String,
     pub verbosity: i32,
     pub compat: bool,
@@ -70,6 +77,7 @@ impl Default for OptParams {
             acid_syn_preference: 1.0,
             skip_bond_fixup: false,
             reride_flipped_alpha_h: true,
+            rotor_clearance: 1.5,
             flip_states: String::new(),
             verbosity: 2,
             compat: false,
@@ -1889,6 +1897,8 @@ fn run_one(
     let (ph_rad, ph_dist) = if neutron { (1.0, 0.98) } else { (1.05, 0.84) };
     let mut removed: FxHashSet<u32> = FxHashSet::default();
     let mut nidx = NeighborIndex::new(w, &atoms, p.compat);
+    // before the low-quality waters are dropped: they keep a hydrogen out too
+    let clearance = if p.compat { None } else { movers::Clearance::new(w, &atoms, p.rotor_clearance) };
     let is_bad_water = |w: &World, a: u32| -> Option<bool> {
         if w.elem(a) == "O" && w.labels[a as usize].is_water {
             Some(!(w.occ[a as usize] >= 0.66 && w.b[a as usize] < 40.0))
@@ -1981,7 +1991,7 @@ fn run_one(
         his_flips: Vec::new(),
         docked_alpha_carbons: Vec::new(),
     };
-    place_movers(w, p, &atoms, rotatable_h, flip_states, alt, max_vdw, &mut nidx, &removed, n_models, &mut placement);
+    place_movers(w, p, &atoms, rotatable_h, flip_states, alt, max_vdw, &mut nidx, &removed, n_models, clearance.as_ref(), &mut placement);
     info += &placement.info;
     let movers = placement.movers;
     let mut mover_info = placement.mover_info;
@@ -3700,6 +3710,7 @@ fn place_movers(
     q: &mut NeighborIndex,
     removed: &FxHashSet<u32>,
     n_models: usize,
+    clearance: Option<&movers::Clearance>,
     pl: &mut Placement,
 ) {
     let v = p.verbosity;
@@ -3732,7 +3743,7 @@ fn place_movers(
         if is_n && four {
             let num_h = w.bonded[a as usize].iter().filter(|&&n| w.is_h(n)).count();
             if num_h == 3 {
-                match movers::nh3_rotator(w, a, !p.compat) {
+                match movers::nh3_rotator(w, a, !p.compat, clearance) {
                     Ok(m) => {
                         pl.movers.push(m);
                         if rep {
@@ -3907,6 +3918,7 @@ fn place_movers(
         constrain_planar_hydroxyls: !p.compat,
         planar_preference: if p.compat { 0.0 } else { p.planar_hydroxyl_preference },
         syn_preference: if p.compat { 0.0 } else { p.acid_syn_preference },
+        clearance,
     };
     for &h in rotatable_h {
         if !in_atoms.get(h as usize).copied().unwrap_or(false) {
