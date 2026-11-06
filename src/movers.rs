@@ -10,8 +10,10 @@ use crate::geom::*;
 use crate::probe::AtomInfo;
 use crate::riding::{compute_h_position, HType, RidingCoef};
 use crate::world::World;
+mod clearance;
 pub(crate) mod hydroxyl;
 use hydroxyl::{PlanarHydroxyl, planar_hydroxyl};
+pub use clearance::Clearance;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MoverKind {
@@ -473,7 +475,7 @@ fn dihedral_of(w: &World, a: u32, b: u32, c: u32, d: u32) -> MResult<f64> {
         .ok_or_else(|| "unsupported operand type(s) for +: 'int' and 'NoneType'".to_string())
 }
 
-pub struct SingleHOptions {
+pub struct SingleHOptions<'a> {
     pub circular_angle_spacing: bool,
     /// Rotate a hydrogen whose partner has any number of other bonds
     /// (S-OH, P-OH, a metal oxo-hydroxide); Reduce2 needs two or three.
@@ -487,6 +489,9 @@ pub struct SingleHOptions {
     /// Further preference for an acid's hydroxyl hydrogen to be syn to its
     /// carbonyl oxygen (O=C-O-H near 0 degrees) rather than anti; Reduce2 has none (0).
     pub syn_preference: f64,
+    /// Fixed mode: offer no pose that puts the hydrogen closer than the
+    /// clearance to a heavy atom while one that does not exists.
+    pub clearance: Option<&'a Clearance>,
 }
 
 /// The preference of a hydroxyl hydrogen at `h`: `planar` times cos^2 of its
@@ -508,7 +513,7 @@ pub fn single_hydrogen_rotator(
     atom: u32,
     potential_acceptors: &[u32],
     potential_touches: &[u32],
-    opts: &SingleHOptions,
+    opts: &SingleHOptions<'_>,
 ) -> MResult<Mover> {
     if w.elem(atom) != "H" {
         return Err("MoverSingleHydrogenRotator(): Atom is not a hydrogen".into());
@@ -624,6 +629,12 @@ pub fn single_hydrogen_rotator(
             hydroxyl::constrain_rotator(w, atom, r, m.rot.as_mut().unwrap())?;
         }
     }
+    if let Some(clear) = opts.clearance {
+        let axis = (origin, normal);
+        let plane = planar.as_ref().filter(|_| opts.constrain_planar_hydroxyls);
+        let admissible = |angle: f64, fine: &[f64]| plane.is_none_or(|r| r.admits(w, atom, axis, angle, fine));
+        clearance::constrain(w, clear, &[atom], m.rot.as_mut().unwrap(), 360.0, &admissible);
+    }
     recompute_rotator_positions(w, &mut m, None, 1.0, true);
     if let Some(r) = &planar {
         let (pl, syn) = (opts.planar_preference, opts.syn_preference);
@@ -664,7 +675,7 @@ fn three_h_group(w: &World, atom: u32, elem: &str, who: &str) -> MResult<(Vec<u3
 /// `MoverNH3Rotator`.
 /// With `any_partner_valence`, the partner may have any number of other bonds
 /// (an ammine on a two-coordinate metal, say); Reduce2 needs at least three.
-pub fn nh3_rotator(w: &mut World, atom: u32, any_partner_valence: bool) -> MResult<Mover> {
+pub fn nh3_rotator(w: &mut World, atom: u32, any_partner_valence: bool, clearance: Option<&Clearance>) -> MResult<Mover> {
     let (hydrogens, partner, friends) = three_h_group(w, atom, "N", "MoverNH3Rotator")?;
     if friends.is_empty() || (friends.len() < 3 && !any_partner_valence) {
         return Err("MoverNH3Rotator(): Partner does not have at least three bonded friends".into());
@@ -676,7 +687,8 @@ pub fn nh3_rotator(w: &mut World, atom: u32, any_partner_valence: bool) -> MResu
     let dihedral = dihedral_of(w, conv_h, partner, atom, conv_friend)?;
     let mut atoms = vec![atom];
     atoms.extend(&hydrogens);
-    Ok(build_rotator(
+    // the poses are computed below, once the clearance has had its say
+    let mut m = build_rotator_poses(
         w,
         MoverKind::NH3Rotator,
         RotatorSpec {
@@ -692,7 +704,14 @@ pub fn nh3_rotator(w: &mut World, atom: u32, any_partner_valence: bool) -> MResu
             preference,
             pref_scale: 1.0,
         },
-    ))
+        false,
+    );
+    if let Some(clear) = clearance {
+        // the three hydrogens fill each other's places every 120 degrees
+        clearance::constrain(w, clear, &hydrogens, m.rot.as_mut().unwrap(), 120.0, &|_, _| true);
+    }
+    recompute_rotator_positions(w, &mut m, preference, 1.0, true);
+    Ok(m)
 }
 
 /// `MoverAromaticMethylRotator`.

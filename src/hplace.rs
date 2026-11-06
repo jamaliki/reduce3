@@ -635,6 +635,17 @@ fn flip_symmetric_amino_acids(st: &mut Structure, per_atom_group: bool) {
                             ag.atoms[x].b = ag.atoms[y].b;
                             ag.atoms[y].xyz = px;
                             ag.atoms[y].b = bx;
+                            if per_atom_group {
+                                // Reduce2 leaves these behind: the occupancy
+                                // and the anisotropic ADP (which later
+                                // rewrites B) stay with the name and not
+                                // with the site
+                                let (ox, ux) = (ag.atoms[x].occ, ag.atoms[x].uij);
+                                ag.atoms[x].occ = ag.atoms[y].occ;
+                                ag.atoms[x].uij = ag.atoms[y].uij;
+                                ag.atoms[y].occ = ox;
+                                ag.atoms[y].uij = ux;
+                            }
                         }
                     }
                 }

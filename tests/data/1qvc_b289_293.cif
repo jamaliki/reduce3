@@ -1,0 +1,106 @@
+data_1QVC_B289_293
+_entry.id '1QVC_B289_293'
+
+_cell.entry_id '1QVC_B289_293'
+_cell.length_a 105.369
+_cell.length_b 62.923
+_cell.length_c 97.792
+_cell.angle_alpha 90
+_cell.angle_beta 112.57
+_cell.angle_gamma 90
+
+_symmetry.entry_id '1QVC_B289_293'
+_symmetry.space_group_name_H-M 'C 1 2 1'
+_symmetry.Int_Tables_number 5
+
+loop_
+_entity.id
+_entity.type
+1 polymer
+
+loop_
+_entity_poly.entity_id
+_entity_poly.type
+_entity_poly.pdbx_strand_id
+_entity_poly.pdbx_seq_one_letter_code
+1 polypeptide(L) B ?
+
+
+
+loop_
+_chem_comp.id
+_chem_comp.type
+ASP .
+GLN .
+GLY .
+SER .
+THR .
+
+loop_
+_struct_asym.id
+_struct_asym.entity_id
+B 1
+
+
+
+loop_
+_atom_type.symbol
+C
+N
+O
+
+
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_asym_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 N N . THR B 1 89 ? 6.192 12.635 22.959 1 53.33 ? 289 B 1
+ATOM 2 C CA . THR B 1 89 ? 4.8 12.447 23.363 1 53.91 ? 289 B 1
+ATOM 3 C C . THR B 1 89 ? 4.012 11.997 22.139 1 53.86 ? 289 B 1
+ATOM 4 O O . THR B 1 89 ? 3.975 12.695 21.116 1 54.31 ? 289 B 1
+ATOM 5 C CB . THR B 1 89 ? 4.203 13.753 23.903 1 56.23 ? 289 B 1
+ATOM 6 O OG1 . THR B 1 89 ? 4.967 14.184 25.034 1 57.32 ? 289 B 1
+ATOM 7 C CG2 . THR B 1 89 ? 2.756 13.551 24.326 1 56.08 ? 289 B 1
+ATOM 8 N N . ASP B 1 90 ? 3.388 10.83 22.245 1 51.9 ? 290 B 1
+ATOM 9 C CA . ASP B 1 90 ? 2.635 10.277 21.132 1 53.57 ? 290 B 1
+ATOM 10 C C . ASP B 1 90 ? 1.169 10.665 21.137 1 53.59 ? 290 B 1
+ATOM 11 O O . ASP B 1 90 ? 0.355 9.97 20.533 1 51.45 ? 290 B 1
+ATOM 12 C CB . ASP B 1 90 ? 2.716 8.754 21.141 1 54.28 ? 290 B 1
+ATOM 13 C CG . ASP B 1 90 ? 1.863 8.133 22.22 1 54.62 ? 290 B 1
+ATOM 14 O OD1 . ASP B 1 90 ? 1.657 6.904 22.153 1 57.11 ? 290 B 1
+ATOM 15 O OD2 . ASP B 1 90 ? 1.402 8.862 23.129 1 54.95 ? 290 B 1
+ATOM 16 N N . GLN B 1 91 ? 0.843 11.762 21.816 1 53.43 ? 291 B 1
+ATOM 17 C CA . GLN B 1 91 ? -0.531 12.244 21.92 1 55.83 ? 291 B 1
+ATOM 18 C C . GLN B 1 91 ? -1.091 11.796 23.272 1 55.73 ? 291 B 1
+ATOM 19 O O . GLN B 1 91 ? -2.03 11.002 23.331 1 53 ? 291 B 1
+ATOM 20 C CB . GLN B 1 91 ? -1.408 11.688 20.778 1 56.36 ? 291 B 1
+ATOM 21 C CG . GLN B 1 91 ? -0.998 12.122 19.355 1 58.7 ? 291 B 1
+ATOM 22 C CD . GLN B 1 91 ? -1.627 11.255 18.267 1 60.54 ? 291 B 1
+ATOM 23 O OE1 . GLN B 1 91 ? -1.605 11.599 17.078 1 60.01 ? 291 B 1
+ATOM 24 N NE2 . GLN B 1 91 ? -2.185 10.119 18.672 1 60.58 ? 291 B 1
+ATOM 25 N N . SER B 1 92 ? -0.477 12.319 24.336 1 55.15 ? 292 B 1
+ATOM 26 C CA . SER B 1 92 ? -0.819 12.058 25.736 1 55.1 ? 292 B 1
+ATOM 27 C C . SER B 1 92 ? 0.213 11.171 26.435 1 56.45 ? 292 B 1
+ATOM 28 O O . SER B 1 92 ? 0.704 11.513 27.517 1 55.87 ? 292 B 1
+ATOM 29 C CB . SER B 1 92 ? -2.224 11.447 25.877 1 54.28 ? 292 B 1
+ATOM 30 O OG . SER B 1 92 ? -2.349 10.21 25.206 1 50.62 ? 292 B 1
+ATOM 31 N N . GLY B 1 93 ? 0.553 10.046 25.811 1 55.94 ? 293 B 1
+ATOM 32 C CA . GLY B 1 93 ? 1.522 9.14 26.401 1 55.55 ? 293 B 1
+ATOM 33 C C . GLY B 1 93 ? 2.964 9.48 26.071 1 54.89 ? 293 B 1
+ATOM 34 O O . GLY B 1 93 ? 3.346 9.582 24.905 1 55.26 ? 293 B 1
