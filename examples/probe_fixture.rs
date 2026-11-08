@@ -58,9 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let group_index = groups.len() as u32;
         let group_index = *groups.entry(group_key).or_insert(group_index);
         world.labels.push(AtomLabels {
-            name: name.clone(),
-            raw_name: name,
-            element,
+            name: (&name).into(),
+            raw_name: name.into(),
+            element: element.into(),
             resname: Arc::from(component.as_str()),
             resname_raw: Arc::from(component.as_str()),
             chain: Arc::from(chain),
