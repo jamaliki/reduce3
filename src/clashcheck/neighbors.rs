@@ -1,3 +1,6 @@
+//! Neighbor queries for clash checking: a dense grid, or sparse 4 A buckets
+//! when the model's extent would make a grid too large.
+
 use crate::geom::Vec3;
 use crate::probe::SpatialGrid;
 use rustc_hash::FxHashMap;

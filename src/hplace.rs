@@ -1793,10 +1793,10 @@ fn exclude_h_on_links(st: &mut Structure, ml: &MonLib, w: &mut Work, it: &Interp
 
 fn origin_name(o: u16) -> String {
     match o {
-        1 => "SS BOND".into(),
-        3 => "metal coordination".into(),
-        5 => "glycosidic custom".into(),
-        10 => "Misc. bond".into(),
+        interp::ORIGIN_SS => "SS BOND".into(),
+        interp::ORIGIN_METAL => "metal coordination".into(),
+        interp::ORIGIN_GLYCO_CUSTOM => "glycosidic custom".into(),
+        interp::ORIGIN_MISC => "Misc. bond".into(),
         x => format!("link {}", x),
     }
 }

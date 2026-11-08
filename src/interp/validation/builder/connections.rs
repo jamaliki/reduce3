@@ -1,3 +1,6 @@
+//! Declared connections: dictionary links the caller requests, deposited
+//! disulfides and explicit `struct_conn` links.
+
 use super::*;
 
 pub(super) fn prepare_declared(

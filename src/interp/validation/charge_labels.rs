@@ -1,4 +1,4 @@
-//! Ionic scattering labels from CCTBX 2026.9; see docs/CCTBX_LICENSE.txt.
+//! Ionic scattering labels from CCTBX 2026.9; see LICENSE-cctbx.txt.
 
 pub(super) const IONIC_LABELS: &[&str] = &[
     "AC3+", "AG1+", "AG2+", "AL3+", "AU1+", "AU3+", "BA2+", "BE2+", "BI3+", "BI5+", "BR1-", "CA2+",

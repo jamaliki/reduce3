@@ -40,6 +40,13 @@ mod spacegroup_data;
 pub mod refcheck;
 pub mod world;
 
+// The unit tests find chem_data as the integration tests do.
+#[cfg(test)]
+extern crate self as reduce3;
+#[cfg(test)]
+#[path = "../tests/common/chem_data.rs"]
+mod test_chem_data;
+
 pub use cifsource::{CifCell, CifSink, CifSource, CifTable};
 pub use monlib::MonLib;
 pub use pipeline::{Approach, Output, Params};

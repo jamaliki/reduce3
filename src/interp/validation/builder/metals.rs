@@ -1,3 +1,6 @@
+//! Metal coordination targets from CCTBX's Metal Coordination Library: zinc
+//! sites and iron-sulfur clusters.
+
 use super::*;
 mod candidates;
 mod images;

@@ -1,7 +1,8 @@
 //! Where the tests find chem_data (`REDUCE3_CHEM_DATA`, see
 //! [`reduce3::MonLib::locate`]). A test that needs it is skipped when it is
 //! absent, unless `REDUCE3_REQUIRE_CHEM_DATA` is set: then the test fails, so
-//! a run that is meant to cover them (CI) cannot pass by skipping them.
+//! a run that is meant to cover them (CI) cannot pass by skipping them. The
+//! unit tests include this file too, as `crate::test_chem_data`.
 
 use std::path::PathBuf;
 
@@ -20,4 +21,10 @@ pub fn locate() -> Option<PathBuf> {
         eprintln!("skipped: chem_data not found (set REDUCE3_CHEM_DATA)");
     }
     root
+}
+
+/// The monomer library from chem_data, or None to skip the test.
+#[allow(dead_code)] // tests/golden.rs checks the pinned files before loading
+pub fn library() -> Option<reduce3::MonLib> {
+    Some(reduce3::MonLib::load(&locate()?).unwrap())
 }

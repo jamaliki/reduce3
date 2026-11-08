@@ -1,3 +1,6 @@
+//! The bond, angle, chirality and plane restraints of a chem_link between two
+//! residues.
+
 use super::*;
 use crate::monlib::ChemLink;
 

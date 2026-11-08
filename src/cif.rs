@@ -82,6 +82,26 @@ pub fn is_null(v: &str) -> bool {
     v == "?" || v == "."
 }
 
+/// The result of `str::trim`, found with a byte loop when the ends are ASCII.
+#[inline]
+pub(crate) fn trim(s: &str) -> &str {
+    let b = s.as_bytes();
+    // the ASCII characters that `char::is_whitespace` accepts
+    let ws = |c: u8| c == b' ' || (b'\t'..=b'\r').contains(&c);
+    let mut i = 0;
+    while i < b.len() && ws(b[i]) {
+        i += 1;
+    }
+    let mut j = b.len();
+    while j > i && ws(b[j - 1]) {
+        j -= 1;
+    }
+    if i < j && (b[i] >= 0x80 || b[j - 1] >= 0x80) {
+        return s.trim();
+    }
+    &s[i..j]
+}
+
 /// Split `_cat.item` into (`_cat`, `item`), lower-cased. Tags without a dot (old
 /// style) are treated as a category with a single unnamed item.
 fn split_tag(full: &str) -> (String, String) {

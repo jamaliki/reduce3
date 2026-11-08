@@ -1,3 +1,5 @@
+//! Chiral-volume targets as CCTBX computes them, for residues and links.
+
 use super::*;
 
 /// CCTBX's target is the unit-cell volume from three bond lengths and angles.

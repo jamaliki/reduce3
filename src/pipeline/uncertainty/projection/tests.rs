@@ -146,7 +146,7 @@ fn source_rows_models_and_altlocs_must_share_an_accepted_frame() {
 
 #[test]
 fn exact_bjm_imine_and_hse_hydroxyl_keep_placed_sites_and_dictionary_restraints() {
-    let ml = MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap();
+    let Some(ml) = crate::test_chem_data::library() else { return };
     for (cif, component, hydrogen, parent, reference) in [
         (include_str!("../../../../tests/data/frame_3bjm.cif"), "BJM", "H19", "N23", "C18"),
         (include_str!("../../../../tests/data/frame_1waw.cif"), "HSE", "HO3", "O3", "C3"),
@@ -190,7 +190,7 @@ fn exact_bjm_imine_and_hse_hydroxyl_keep_placed_sites_and_dictionary_restraints(
 
 #[test]
 fn exact_5j2u_n_methyl_keeps_three_h_sites_and_joint_phase() {
-    let ml = MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap();
+    let Some(ml) = crate::test_chem_data::library() else { return };
     let mut st = crate::mmcif::read_mmcif(include_str!("../../../../tests/data/frame_5j2u.cif")).unwrap();
     let policy = Policy::read(&st, &ml, &crate::Params { stop_on_any_missing_hydrogen: true,
         allow_unresolved_bond_targets: true, ..crate::Params::default() }).unwrap();

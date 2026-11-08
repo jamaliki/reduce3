@@ -5,7 +5,7 @@
 #[path = "common/chem_data.rs"]
 mod chem_data;
 
-use reduce3::{mmcif, pipeline, MonLib, Params};
+use reduce3::{mmcif, pipeline, Params};
 
 const HEADER: &str = "\
 loop_
@@ -73,8 +73,7 @@ ATOM 12 S SG . CYS A2 1 . ? 9.192 8.965 46.367 1.00 14.05 ? 57 CYS A2 SG 1
 
 /// Run fixed mode; the names of residue `resseq`'s atoms (None without chem_data).
 fn atom_names(model: &str, resseq: &str) -> Option<Vec<String>> {
-    let root = chem_data::locate()?;
-    let ml = MonLib::load(&root).unwrap();
+    let ml = chem_data::library()?;
     let out = pipeline::run(mmcif::read_mmcif(model).unwrap(), &ml, &Params::default()).unwrap();
     let mut names = Vec::new();
     for chain in &out.structure.models[0].chains {

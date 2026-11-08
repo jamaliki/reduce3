@@ -1,3 +1,6 @@
+//! Symmetry images near anchor atoms: each crystal operator with the
+//! unit-cell shifts that can bring a copy within reach.
+
 use super::*;
 use crate::cell::{SymOp, crystal_operators};
 

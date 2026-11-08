@@ -65,6 +65,10 @@ jobs:
         # warnings that predate CI.
         run: cargo clippy --locked --all-targets -- -D clippy::correctness -D clippy::suspicious
 
+      - name: Check with refcheck
+        # The developer tool and the example that need the feature.
+        run: cargo check --locked --features refcheck --all-targets
+
       - name: Test
         run: cargo test --locked
         env:

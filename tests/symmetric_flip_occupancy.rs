@@ -7,7 +7,7 @@
 mod chem_data;
 
 use reduce3::geom::{v3, Vec3};
-use reduce3::{mmcif, pipeline, MonLib, Params};
+use reduce3::{mmcif, pipeline, Params};
 
 /// Five residues of 1QVC chain B. The dihedral CA-CB-CG-OD1 of Asp 290 is
 /// 167 degrees, so Reduce3 renames its carboxylate oxygens: OD1 is first at
@@ -52,8 +52,7 @@ fn atom(output: &pipeline::Output, resseq: &str, name: &str) -> (f64, f64, Vec3,
 }
 
 fn run(text: &str, params: &Params) -> Option<pipeline::Output> {
-    let root = chem_data::locate()?;
-    let library = MonLib::load(&root).unwrap();
+    let library = chem_data::library()?;
     Some(pipeline::run(mmcif::read_mmcif(text).unwrap(), &library, params).unwrap())
 }
 

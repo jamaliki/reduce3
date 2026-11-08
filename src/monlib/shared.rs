@@ -1,3 +1,5 @@
+//! Copy-on-write sharing of monomer-library tables.
+
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 

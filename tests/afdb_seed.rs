@@ -1,4 +1,7 @@
-use reduce3::{hplace, mmcif, MonLib};
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
+use reduce3::{hplace, mmcif};
 
 fn structure() -> reduce3::model::Structure {
     mmcif::read_mmcif(concat!(
@@ -17,7 +20,7 @@ fn structure() -> reduce3::model::Structure {
 
 #[test]
 fn ser200_places_ha_in_fixed_mode_and_keeps_compat_and_heavy_sites() {
-    let library = MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap();
+    let Some(library) = chem_data::library() else { return };
     for compat in [false, true] {
         let mut st = structure();
         let heavy: Vec<_> = st.atom_paths().into_iter().map(|p| (st.atom(p).name.clone(), st.atom(p).xyz)).collect();

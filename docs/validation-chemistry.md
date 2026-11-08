@@ -48,7 +48,7 @@ records the source and binary SHA-256 digests. The lookup uses nearest
 ten-degree bins, Python's ties-to-even rounding and angle wrapping. It also
 matches the reference adjustment that makes C-N-CA, C-N-H and CA-N-H targets
 sum to 360 degrees. Table and accepted-ion-label exports use CCTBX 2026.9;
-`CCTBX_LICENSE.txt` contains its license.
+`LICENSE-cctbx.txt` at the repository root contains its license.
 
 ## Supplied and optional hydrogens
 

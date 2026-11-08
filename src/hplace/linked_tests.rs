@@ -177,7 +177,7 @@ fn nonterminal_or_ambiguous_missing_atoms_get_no_replacement_restraints() {
 
 #[test]
 fn actual_dt_replacement_keeps_source_angles_bonds_and_coordinates() {
-    let ml = crate::monlib::MonLib::load(&crate::monlib::MonLib::locate(None).unwrap()).unwrap();
+    let Some(ml) = crate::test_chem_data::library() else { return };
     let mut st = crate::mmcif::read_mmcif(include_str!("../../tests/data/ptr_dt_3px7.cif")).unwrap();
     let params = HPlaceParams { neutron: false, n_terminal_charge: NTermCharge::ResidueOne,
         exclude_water: true, keep_existing_h: false, adp_scale: 1.0, compat: false, cell: None };

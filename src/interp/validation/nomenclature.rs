@@ -1,3 +1,6 @@
+//! The atom-label conventions CCTBX applies before building restraints, which
+//! swap coordinates between paired names.
+
 use super::*;
 
 /// Source rows whose coordinates and B factors exchange during interpretation.

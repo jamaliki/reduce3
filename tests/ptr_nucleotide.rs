@@ -1,9 +1,8 @@
-use reduce3::{hplace, mmcif, pipeline, MonLib, Params};
-use reduce3::model::Structure;
+#[path = "common/chem_data.rs"]
+mod chem_data;
 
-fn library() -> MonLib {
-    MonLib::load(&MonLib::locate(None).expect("set REDUCE3_CHEM_DATA for the PTR nucleotide test")).unwrap()
-}
+use reduce3::{hplace, mmcif, pipeline, Params};
+use reduce3::model::Structure;
 
 fn has(st: &Structure, name: &str) -> bool {
     st.atom_paths().into_iter().any(|p| st.chain(p).id == "B" && st.atom_group(p).resname.trim() == "DT"
@@ -12,12 +11,13 @@ fn has(st: &Structure, name: &str) -> bool {
 
 #[test]
 fn declared_ptr_nucleotide_product_keeps_both_named_c5_hydrogens() {
+    let Some(library) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/ptr_dt_3px7.cif")).unwrap();
     assert_eq!(input.links.len(), 1);
     let required = input.atom_paths().into_iter().filter(|&p| input.atom_group(p).resname.trim() == "DT")
         .map(|p| input.atom(p).src).collect();
     let original: Vec<_> = input.atom_paths().into_iter().map(|p| (input.chain(p).id.clone(), input.atom(p).name.clone(), input.atom(p).xyz, input.atom(p).charge.clone())).collect();
-    let output = pipeline::run(input, &library(), &Params {
+    let output = pipeline::run(input, &library, &Params {
         stop_on_any_missing_hydrogen: true, required_hydrogen_parent_sources: Some(required), ..Params::default()
     }).unwrap();
     assert!(has(&output.structure, "H5'") && has(&output.structure, "H5''"));
@@ -32,6 +32,7 @@ fn declared_ptr_nucleotide_product_keeps_both_named_c5_hydrogens() {
 
 #[test]
 fn missing_ambiguous_or_invalid_declaration_does_not_supply_c5_angles() {
+    let Some(library) = chem_data::library() else { return };
     for invalid in 0..8 {
         let mut input = mmcif::read_mmcif(include_str!("data/ptr_dt_3px7.cif")).unwrap();
         match invalid {
@@ -59,7 +60,7 @@ fn missing_ambiguous_or_invalid_declaration_does_not_supply_c5_angles() {
             }
             _ => unreachable!(),
         }
-        let placed = hplace::place_hydrogens(&mut input, &library(), &hplace::HPlaceParams {
+        let placed = hplace::place_hydrogens(&mut input, &library, &hplace::HPlaceParams {
             neutron: false, n_terminal_charge: hplace::NTermCharge::ResidueOne,
             exclude_water: true, keep_existing_h: false, adp_scale: 1.0, compat: false, cell: None,
         });
@@ -72,8 +73,9 @@ fn missing_ambiguous_or_invalid_declaration_does_not_supply_c5_angles() {
 
 #[test]
 fn compatibility_mode_keeps_its_existing_missing_parameter_result() {
+    let Some(library) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/ptr_dt_3px7.cif")).unwrap();
-    let placed = hplace::place_hydrogens(&mut input, &library(), &hplace::HPlaceParams {
+    let placed = hplace::place_hydrogens(&mut input, &library, &hplace::HPlaceParams {
         neutron: false, n_terminal_charge: hplace::NTermCharge::ResidueOne,
         exclude_water: true, keep_existing_h: false, adp_scale: 1.0, compat: true, cell: None,
     });

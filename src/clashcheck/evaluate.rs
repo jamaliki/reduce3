@@ -1,3 +1,6 @@
+//! Probe2's contact pass: the dots of each selected atom scored against its
+//! neighbors and collected into the report's contacts and clashes.
+
 use super::{Clash, Contact, Options, Report};
 use crate::optimizer::atoms_within_n_bonds;
 use crate::probe::{DotScorer, DotSphereCache, InteractionType, OverlapType, Target, trim_dots};

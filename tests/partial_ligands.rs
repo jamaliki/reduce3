@@ -6,12 +6,7 @@ mod chem_data;
 use reduce3::geom::v3;
 use reduce3::model::{Atom, AtomPath, Structure};
 use reduce3::pipeline::{HydrogenUncertaintyReason, Output};
-use reduce3::{hplace, mmcif, pipeline, MonLib, Params};
-
-fn library() -> Option<MonLib> {
-    let root = chem_data::locate()?;
-    Some(MonLib::load(&root).unwrap())
-}
+use reduce3::{hplace, mmcif, pipeline, Params};
 
 fn find(st: &Structure, component: &str, name: &str) -> AtomPath {
     st.atom_paths().into_iter().find(|p| st.atom_group(*p).resname.trim() == component
@@ -50,7 +45,7 @@ fn heavy_unchanged(before: &Structure, output: &Output) {
 
 #[test]
 fn exact_9l0k_tail_reports_only_retained_parent_c6() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/partial_cla_9l0k.cif")).unwrap();
     let c6 = input.atom(find(&input, "CLA", "C6")).src;
     let output = pipeline::run(input.clone(), &ml, &params(&input, "CLA")).unwrap();
@@ -70,7 +65,7 @@ fn exact_9l0k_tail_reports_only_retained_parent_c6() {
 
 #[test]
 fn exact_5lbm_formaldehyde_keeps_strict_default_and_reports_allowed_parent() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/partial_for_5lbm.cif")).unwrap();
     let mut strict = params(&input, "FOR");
     strict.allowed_unplaced_hydrogen_parent_sources.clear();
@@ -85,7 +80,7 @@ fn exact_5lbm_formaldehyde_keeps_strict_default_and_reports_allowed_parent() {
 
 #[test]
 fn observed_hydrogens_on_uncertain_parents_keep_source_metadata() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     for (component, file, parent, name, element) in [
         ("CLA", include_str!("data/partial_cla_9l0k.cif"), "C6", "H61", "H"),
         ("CLA", include_str!("data/partial_cla_9l0k.cif"), "C6", "D61", "D"),
@@ -127,7 +122,7 @@ fn observed_hydrogens_on_uncertain_parents_keep_source_metadata() {
 
 #[test]
 fn allowed_ligands_do_not_relax_missing_neighbor_protein_targets() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/linked_9hj3.cif")).unwrap();
     input.links.clear();
     let keep = input.atom_paths().into_iter().filter(|p| st_component(&input, *p) != "CYS"
@@ -143,7 +138,7 @@ fn st_component(st: &Structure, p: AtomPath) -> &str { st.atom_group(p).resname.
 
 #[test]
 fn invalid_parent_sources_and_modes_do_not_allow_uncertainty() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/partial_cla_9l0k.cif")).unwrap();
     let row = rows(&input, "CLA")[0];
     for allowed in [vec![row, row], vec![Atom::NEW], vec![999_999]] {
@@ -164,7 +159,7 @@ fn invalid_parent_sources_and_modes_do_not_allow_uncertainty() {
 
 #[test]
 fn typed_placement_reports_missing_neighbors_that_old_logs_omit() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/partial_cla_9l0k.cif")).unwrap();
     let c6 = input.atom(find(&input, "CLA", "C6")).src;
     let placed = hplace::place_hydrogens(&mut input, &ml, &hplace::HPlaceParams {
@@ -178,7 +173,7 @@ fn typed_placement_reports_missing_neighbors_that_old_logs_omit() {
 
 #[test]
 fn unresolved_source_bonds_restore_only_the_affected_observed_hydrogen() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/linked_9hj3.cif")).unwrap();
     let required = rows(&input, "CYS");
     let sg = find(&input, "CYS", "SG");
@@ -221,7 +216,7 @@ fn unresolved_source_bonds_restore_only_the_affected_observed_hydrogen() {
 
 #[test]
 fn unresolved_bond_guesses_leave_the_graph_before_optimization() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/linked_9hj3.cif")).unwrap();
     let required = rows(&input, "CYS");
     input.retain_atoms(|atom| required.contains(&atom.src));
@@ -253,7 +248,7 @@ fn unresolved_bond_guesses_leave_the_graph_before_optimization() {
 
 #[test]
 fn observed_terminal_aliases_keep_their_named_n_parent() {
-    let Some(ml) = library() else { return };
+    let Some(ml) = chem_data::library() else { return };
     for (name, element) in [("H1", "H"), ("D1", "D")] {
         let mut input = mmcif::read_mmcif(include_str!("data/linked_9hj3.cif")).unwrap();
         let required = rows(&input, "CYS");

@@ -1,13 +1,8 @@
 #[path = "common/chem_data.rs"]
 mod chem_data;
 
-use reduce3::{hplace, mmcif, pipeline, MonLib, Params};
+use reduce3::{hplace, mmcif, pipeline, Params};
 use reduce3::model::{AtomPath, Structure};
-
-fn library() -> Option<MonLib> {
-    let root = chem_data::locate()?;
-    Some(MonLib::load(&root).unwrap())
-}
 
 fn find(st: &Structure, component: &str, sequence: &str, name: &str) -> AtomPath {
     st.atom_paths().into_iter().find(|&p| st.atom_group(p).resname.trim() == component
@@ -16,7 +11,7 @@ fn find(st: &Structure, component: &str, sequence: &str, name: &str) -> AtomPath
 
 #[test]
 fn partial_esterified_sugar_removes_its_h_before_strict_parameter_check() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/linked_xyp_1ux7.cif")).unwrap();
     let before = input.atom(find(&input, "XYP", "1", "O1")).xyz;
     let output = pipeline::run(input.clone(), &library, &Params {
@@ -33,7 +28,7 @@ fn st_sequence(st: &Structure, p: AtomPath) -> &str { st.residue_group(p).resseq
 
 #[test]
 fn alternate_conformer_cannot_link_across_a_skipped_residue_group() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/altloc_peptide_5z3k.cif")).unwrap();
     let placed = hplace::place_hydrogens(&mut input, &library, &hplace::HPlaceParams {
         neutron: false, n_terminal_charge: hplace::NTermCharge::ResidueOne,

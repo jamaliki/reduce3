@@ -1,5 +1,5 @@
 //! Developer tool: run the optimizer on the exact post-placement state captured
-//! from the original Reduce2 (JSON dumps from ref/harness/dump_ref.py) and
+//! from the original Reduce2 (JSON dumps from reference/harness/dump_ref.py) and
 //! compare decisions, scores, coordinates and deletions.
 
 use crate::geom::v3;

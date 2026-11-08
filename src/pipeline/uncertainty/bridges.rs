@@ -170,8 +170,7 @@ mod tests {
 
     #[test]
     fn both_source_metal_flags_negative_charge_and_exact_names_are_required() {
-        let root = MonLib::locate(None).expect("Bridge tests require REDUCE3_CHEM_DATA");
-        let library = MonLib::load(&root).unwrap();
+        let Some(library) = crate::test_chem_data::library() else { return };
         let comp = library.ccd_comp("EJ2", false).unwrap();
         let parents = dictionary_parents(&comp, "H").unwrap();
         let source = std::fs::read_to_string(&comp.source).unwrap();

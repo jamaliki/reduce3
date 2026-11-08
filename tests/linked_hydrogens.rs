@@ -2,16 +2,11 @@
 mod chem_data;
 
 use reduce3::geom::Vec3;
-use reduce3::{hplace, mmcif, pipeline, MonLib, Params};
+use reduce3::{hplace, mmcif, pipeline, Params};
 use reduce3::model::{Atom, Structure};
 
 const PEPTIDE: &str = include_str!("data/linked_8zje.cif");
 const ADDUCT: &str = include_str!("data/linked_9hj3.cif");
-
-fn library() -> Option<MonLib> {
-    let root = chem_data::locate()?;
-    Some(MonLib::load(&root).unwrap())
-}
 
 fn atoms<'a>(structure: &'a Structure, component: &str) -> Vec<&'a Atom> {
     structure.models.iter().flat_map(|m| &m.chains).flat_map(|c| &c.residue_groups)
@@ -24,7 +19,7 @@ fn volume(center: Vec3, a: Vec3, b: Vec3, h: Vec3) -> f64 {
 
 #[test]
 fn linked_modified_peptide_keeps_its_valid_amide_hydrogens() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let out = pipeline::run(mmcif::read_mmcif(PEPTIDE).unwrap(), &library, &Params {
         stop_on_any_missing_hydrogen: true, ..Params::default()
     }).unwrap();
@@ -42,7 +37,7 @@ fn linked_modified_peptide_keeps_its_valid_amide_hydrogens() {
 
 #[test]
 fn explicit_cysteine_adduct_keeps_named_methylene_hydrogens() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(ADDUCT).unwrap();
     assert_eq!(input.links.len(), 1);
     let out = pipeline::run(input, &library, &Params {
@@ -65,7 +60,7 @@ fn explicit_cysteine_adduct_keeps_named_methylene_hydrogens() {
 
 #[test]
 fn absent_or_ambiguous_adduct_annotation_still_fails() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     for invalid in 0..4 {
         let mut input = mmcif::read_mmcif(ADDUCT).unwrap();
         match invalid {
@@ -99,7 +94,7 @@ fn connections_keep_auth_ids_and_reject_symmetry_or_metal_links() {
 
 #[test]
 fn compat_keeps_the_prior_missing_restraint_error() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let error = pipeline::run(mmcif::read_mmcif(ADDUCT).unwrap(), &library, &Params {
         compat: true, stop_on_any_missing_hydrogen: true, ..Params::default()
     }).err().unwrap();
@@ -108,7 +103,7 @@ fn compat_keeps_the_prior_missing_restraint_error() {
 
 #[test]
 fn public_dictionary_selection_matches_placement_name_rules() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     for (component, names, from_ccd) in [
         ("PEE", vec!["C1", "C2", "O2", "O2P"], false),
         ("HSO", vec!["C", "N", "CA", "CB", "O"], false),

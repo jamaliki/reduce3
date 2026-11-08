@@ -629,15 +629,21 @@ in a short strong bond, is still found, and a hydrogen with no clear turn stays 
 
 | File | Contents |
 |---|---|
-| `src/pipeline.rs` | program flow (`Program.run`) |
-| `src/hplace.rs`, `src/riding.rs` | `place_hydrogens`, riding connectivity and parameterization |
-| `src/interp.rs`, `src/autolink.rs`, `src/monlib.rs`, `src/names.rs` | restraint interpretation, automatic links, monomer library, atom-name mapping |
+| `src/pipeline.rs`, `src/pipeline/` | program flow (`Program.run`), and keeping observed hydrogens whose parents lack placement restraints |
+| `src/hplace.rs`, `src/hplace/`, `src/riding.rs`, `src/riding/` | `place_hydrogens`, riding connectivity and parameterization |
+| `src/interp.rs`, `src/interp/`, `src/autolink.rs`, `src/monlib.rs`, `src/monlib/`, `src/names.rs` | restraint interpretation, automatic links, monomer library, atom-name mapping |
 | `src/ccdrestraints.rs`, `src/rdkit_valence.rs`, `src/h_distances.rs` | restraints built from the CCD (Reduce2's RDKit fallback and the fixed-mode builder), RDKit's valence verdicts, GeoStd X-H lengths |
-| `src/atominfo.rs`, `src/probe.rs` | `getExtraAtomInfo`, Probe dot scoring |
-| `src/movers.rs`, `src/optimizer.rs` | Movers, optimizer (exact VE and the compat OptimizerC port) |
-| `src/pdbio.rs`, `src/mmcif.rs`, `src/cif.rs`, `src/model.rs` | I/O and the iotbx-style hierarchy |
+| `src/atominfo.rs`, `src/probe.rs`, `src/atomtypes.rs` | `getExtraAtomInfo`, Probe dot scoring, Probe's atom classification tables |
+| `src/movers.rs`, `src/movers/`, `src/optimizer.rs`, `src/optimizer/` | Movers; the optimizer, split into neighbor search, dot scoring, exact VE, the optimizer driver, Mover placement and the compat OptimizerC port |
+| `src/world.rs`, `src/geom.rs`, `src/par.rs` | the flat, index-based view of a structure that the optimizer, Movers and clash check use; 3D vectors with scitbx conventions; parallelism within one model |
+| `src/resclass.rs`, `src/resclass_data.rs` | residue classification (`common_residue_names_get_class`) and its generated tables |
+| `src/pdbio.rs`, `src/mmcif.rs`, `src/cif.rs`, `src/model.rs`, `src/model/`, `src/fastfmt.rs` | I/O, the iotbx-style hierarchy and fixed-point float formatting for output |
 | `src/cifsource.rs`, `src/lib.rs` | library interface for already-parsed CIF data |
-| `src/cell.rs` | cctbx unit-cell arithmetic used by compat mode |
+| `src/cell.rs`, `src/spacegroup_data.rs` | cctbx unit-cell and space-group arithmetic used by compat mode and validation |
+| `src/linkdata.rs` | generated cctbx tables for automatic links (anomeric chiral volumes, bond lengths by element pair) |
+| `src/interp/validation/`, `src/clashcheck/` | weighted validation restraints and all-atom Probe2 contacts on a typed chemical graph. They serve Nibbler; Reduce3's own pipeline does not use them |
+| `src/refcheck.rs` | developer checks against Reduce2 dumps (`--features refcheck`) |
+| `examples/` | `bench_repeat` (one model many times, warm caches) and `probe_fixture` (replays captured Probe2 inputs; `--features refcheck`) |
 | `tools/` | table generators, the end-to-end comparison script and the neutron benchmark |
 | `tests/golden/`, `tools/golden/` | golden outputs, their inputs and pinned chem_data files, and the scripts that made them |
 | `reference/` | scripts that produce the Reduce2 reference data |

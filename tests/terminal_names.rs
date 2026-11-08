@@ -1,14 +1,9 @@
 #[path = "common/chem_data.rs"]
 mod chem_data;
 
-use reduce3::{hplace::NTermCharge, mmcif, pipeline, MonLib, Params};
+use reduce3::{hplace::NTermCharge, mmcif, pipeline, Params};
 use reduce3::model::{Atom, AtomPath, Structure};
 use reduce3::geom::v3;
-
-fn library() -> Option<MonLib> {
-    let root = chem_data::locate()?;
-    Some(MonLib::load(&root).unwrap())
-}
 
 fn fixture() -> Structure {
     mmcif::read_mmcif(include_str!("data/terminal_0g7_1hut.cif")).unwrap()
@@ -37,7 +32,7 @@ fn hydrogens(structure: &Structure, chain: &str, parent: &str) -> Vec<String> {
 
 #[test]
 fn charged_modified_terminus_preserves_internal_amide_and_heavy_atoms() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let input = fixture();
     let original = sites(&input);
     let output = pipeline::run(input, &library, &Params {
@@ -59,7 +54,7 @@ fn charged_modified_terminus_preserves_internal_amide_and_heavy_atoms() {
 
 #[test]
 fn shared_dictionary_does_not_charge_a_neutral_copy() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixture();
     let mut neutral = input.models[0].chains[0].clone();
     neutral.id = "J".into();
@@ -78,7 +73,7 @@ fn shared_dictionary_does_not_charge_a_neutral_copy() {
 
 #[test]
 fn modified_terminal_policy_and_compat_mode_keep_their_meaning() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     for (seq, policy, count) in [(1, NTermCharge::NoCharge, 1), (701, NTermCharge::ResidueOne, 1),
         (701, NTermCharge::FirstInChain, 3)] {
         let mut input = fixture();
@@ -96,7 +91,7 @@ fn modified_terminal_policy_and_compat_mode_keep_their_meaning() {
 
 #[test]
 fn canonical_terminal_names_remain_unchanged() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixture();
     let group = &mut input.models[0].chains[0].residue_groups[0].atom_groups[0];
     group.resname = "GLY".into();

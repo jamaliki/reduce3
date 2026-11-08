@@ -1,3 +1,6 @@
+//! Residue interpretation along a chain and the polymer link restraints
+//! between consecutive residues, with nucleotide targets.
+
 use super::*;
 
 pub(super) fn prepare(

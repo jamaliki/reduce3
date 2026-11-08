@@ -1,9 +1,10 @@
 # cctbx PDB interpretation as used by Reduce2 hydrogen placement: implementation spec
 
 Status: written from the installed reference environment
-(`ref/env/lib/python3.12/site-packages`, `cctbx_base-2026.9`). It was checked by
-running that Python on `ref/pdbs/*` (scripts and raw dumps are in
-`ref/spec_work/`, see §11).
+(`reference/env/lib/python3.12/site-packages`, `cctbx_base-2026.9`). It was checked by
+running that Python on `reference/pdbs/*` (scripts and raw dumps are in
+`reference/spec_work/`, see §11; that directory and `reference/cctbx_project`, a
+cctbx_project checkout, are local and not in git).
 
 Path abbreviations used for citations (`file:line`). All paths are relative to
 `site-packages/` unless noted otherwise.
@@ -16,14 +17,14 @@ Path abbreviations used for citations (`file:line`). All paths are relative to
 | LM | `mmtbx/monomer_library/linking_mixins.py` |
 | LU | `mmtbx/monomer_library/linking_utils.py` |
 | LS | `mmtbx/monomer_library/linking_setup.py` |
-| RH | `mmtbx/hydrogens/reduce_hydrogen.py` (the **env** copy; `ref/cctbx_project` has a slightly newer one, see §10) |
+| RH | `mmtbx/hydrogens/reduce_hydrogen.py` (the **env** copy; `reference/cctbx_project` has a slightly newer one, see §10) |
 | CONN / PARAM / HH | `mmtbx/hydrogens/connectivity.py`, `parameterization.py`, `hydrogens.h` |
 | RIDING | `mmtbx/hydrogens/riding.py` |
 | MODEL | `mmtbx/model/model.py` |
 | IP | `iotbx/pdb/__init__.py` |
 | ANI | `iotbx/pdb/atom_name_interpretation.py` |
 | CRN | `iotbx/pdb/common_residue_names.h` (+ `modified_aa_names.h`, `modified_rna_dna_names.h`) |
-| HIER | `iotbx/pdb/hierarchy.py`; `HIER.cpp` = `ref/cctbx_project/iotbx/pdb/hierarchy.cpp` (the env ships no `.cpp`) |
+| HIER | `iotbx/pdb/hierarchy.py`; `HIER.cpp` = `reference/cctbx_project/iotbx/pdb/hierarchy.cpp` (the env ships no `.cpp`) |
 | GR | `cctbx/geometry_restraints/__init__.py`; `GR/utils.h`, `GR/dihedral.h` |
 | RSU / RSB | `mmtbx/ligands/ready_set_utils.py`, `mmtbx/ligands/ready_set_basics.py` |
 | MCL | `mmtbx/conformation_dependent_library/mcl.py`, `metal_coordination_library.py`, `mcl_sf4_coordination.py` |
@@ -1213,7 +1214,7 @@ the h-sign test and `v0` flip together. So the Python `set` ordering of a1–a3 
 
 ## 10. Caveats and things that are easy to get wrong
 
-* The env `RH` differs from `ref/cctbx_project/mmtbx/hydrogens/reduce_hydrogen.py` in two places:
+* The env `RH` differs from `reference/cctbx_project/mmtbx/hydrogens/reduce_hydrogen.py` in two places:
   1. The env applies the HB1/HB2 → HB2/HB3 rename hack to **modified** amino acids as well. Their dictionaries
      usually have no protein interpreter, so the renamed H becomes **unexpected** (no restraints), is not
      parameterized, and is dropped.
@@ -1232,7 +1233,7 @@ the h-sign test and `v0` flip together. So the Python `set` ordering of a1–a3 
 * `Var_01`'s weight is about 0 but it still drives riding at chain starts (§8.4).
 * `type_energies` strings `'False'`, `'None'` and `''` mean "no type" (KeyError in `get_specific_vdw_radius`).
 
-## 11. Files in `ref/spec_work/`
+## 11. Files in `reference/spec_work/`
 
 * `dump_proxies.py <pdb> "<selection>" [neutron]`: raw proxies in grm order with **raw** ideals (`.geo` prints
   model+delta for periodic dihedrals instead), origin ids, types, riding connectivity and parameterization, and
