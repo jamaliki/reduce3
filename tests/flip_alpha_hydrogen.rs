@@ -3,6 +3,9 @@
 //! water of 1A28 chain A within 4 A of the side chains of Asn 689, Gln 725 and
 //! His 881, all three of which Reduce3 flips there as in the full entry.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::Vec3;
 use reduce3::hplace::{self, HPlaceParams, NTermCharge};
 use reduce3::model::Structure;
@@ -22,10 +25,6 @@ fn key(st: &Structure, p: reduce3::model::AtomPath) -> Key {
 
 fn atoms(st: &Structure) -> Vec<(Key, Vec3)> {
     st.atom_paths().into_iter().map(|p| (key(st, p), st.atom(p).xyz)).collect()
-}
-
-fn library() -> MonLib {
-    MonLib::load(&MonLib::locate(None).expect("set REDUCE3_CHEM_DATA for the flip tests")).unwrap()
 }
 
 fn run(library: &MonLib, flip_states: &str, reride: bool) -> pipeline::Output {
@@ -82,7 +81,7 @@ fn flipped(output: &pipeline::Output, mover: &str) -> bool {
 
 #[test]
 fn optimizer_flips_place_ha_from_the_docked_side_chain() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let (keys, coef) = riding(&library);
     let new = run(&library, "", true);
     let old = run(&library, "", false);
@@ -111,7 +110,7 @@ fn optimizer_flips_place_ha_from_the_docked_side_chain() {
 
 #[test]
 fn forced_flips_place_ha_only_when_the_side_chain_is_docked() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let (keys, coef) = riding(&library);
     // Asn 828, which the optimizer leaves, flipped and docked when Movers are
     // placed; His 881 docked by the fix-up of its fixed Mover; Gln 725 flipped

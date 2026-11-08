@@ -4,11 +4,6 @@ mod chem_data;
 use reduce3::{hplace, mmcif, MonLib};
 use reduce3::model::Structure;
 
-fn library() -> Option<MonLib> {
-    let root = chem_data::locate()?;
-    Some(MonLib::load(&root).unwrap())
-}
-
 fn place(st: &mut Structure, library: &MonLib, compat: bool) -> hplace::Placed {
     hplace::place_hydrogens(st, library, &hplace::HPlaceParams {
         neutron: false, n_terminal_charge: hplace::NTermCharge::ResidueOne,
@@ -32,7 +27,7 @@ fn has(st: &Structure, chain: &str, seq: &str, name: &str) -> bool {
 
 #[test]
 fn declared_two_sulfur_product_removes_both_cysteine_thiol_h() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let mut st = mmcif::read_mmcif(include_str!("data/covalent_9b5a.cif")).unwrap();
     let original = heavy_sites(&st);
     let placed = place(&mut st, &library, false);
@@ -52,7 +47,7 @@ fn declared_two_sulfur_product_removes_both_cysteine_thiol_h() {
 
 #[test]
 fn declared_partial_glycine_cap_links_ca_to_cysteine_sg() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let mut st = mmcif::read_mmcif(include_str!("data/covalent_6wgn.cif")).unwrap();
     let original = heavy_sites(&st);
     let placed = place(&mut st, &library, false);
@@ -67,7 +62,7 @@ fn declared_partial_glycine_cap_links_ca_to_cysteine_sg() {
 
 #[test]
 fn matching_wpn_product_places_both_methylene_hydrogens_from_source_angles() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let mut st = mmcif::read_mmcif(include_str!("data/covalent_8qsc.cif")).unwrap();
     let original = heavy_sites(&st);
     let placed = place(&mut st, &library, false);
@@ -87,7 +82,7 @@ fn matching_wpn_product_places_both_methylene_hydrogens_from_source_angles() {
 
 #[test]
 fn wpn_without_a_valid_source_product_keeps_its_restraint_error() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     for invalid in 0..4 {
         let mut st = mmcif::read_mmcif(include_str!("data/covalent_8qsc.cif")).unwrap();
         match invalid {

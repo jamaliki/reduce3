@@ -1,13 +1,8 @@
 #[path = "common/chem_data.rs"]
 mod chem_data;
 
-use reduce3::{mmcif, pipeline, MonLib, Params};
+use reduce3::{mmcif, pipeline, Params};
 use reduce3::model::{Atom, Structure};
-
-fn library() -> Option<MonLib> {
-    let root = chem_data::locate()?;
-    Some(MonLib::load(&root).unwrap())
-}
 
 fn fixture() -> Structure {
     let mut st = mmcif::read_mmcif(include_str!("data/linked_9hj3.cif")).unwrap();
@@ -24,7 +19,7 @@ fn rows(st: &Structure, component: &str) -> Vec<u32> {
 
 #[test]
 fn only_context_unique_parents_allow_unplaced_hydrogens() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let input = fixture();
     let output = pipeline::run(input.clone(), &library, &Params {
         stop_on_any_missing_hydrogen: true,
@@ -57,7 +52,7 @@ fn only_context_unique_parents_allow_unplaced_hydrogens() {
 
 #[test]
 fn stale_duplicate_hydrogen_or_unsupported_parent_rows_fail() {
-    let Some(library) = library() else { return };
+    let Some(library) = chem_data::library() else { return };
     let input = fixture();
     let row = rows(&input, "CYS")[0];
     for rows in [vec![], vec![row, row], vec![Atom::NEW]] {

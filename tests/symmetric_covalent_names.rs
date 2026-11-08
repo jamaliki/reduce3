@@ -1,11 +1,9 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::{cif, hplace, mmcif, pipeline, MonLib, Params};
 use reduce3::model::{AtomPath, Structure};
 use reduce3::geom::v3;
-
-fn library() -> MonLib {
-    let root = MonLib::locate(None).expect("These source tests require REDUCE3_CHEM_DATA");
-    MonLib::load(&root).unwrap()
-}
 
 fn fixtures() -> Vec<Structure> {
     let document = cif::parse(include_str!("data/symmetric_covalent_anchors.cif"));
@@ -41,7 +39,7 @@ fn names<'a>(st: &'a Structure, component: &str) -> Vec<&'a str> {
 
 #[test]
 fn exact_source_links_keep_names_heavy_bits_charges_and_hydrogen_states() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     for input in fixtures() {
         assert_eq!(input.models.len(), 1);
         let model_id = input.models[0].id.clone();
@@ -73,7 +71,7 @@ fn exact_source_links_keep_names_heavy_bits_charges_and_hydrogen_states() {
 
 #[test]
 fn ordinary_unlinked_tyr_still_normalizes_its_symmetric_names() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixtures().remove(0);
     let (ce1, ce2) = (input.atom(atom(&input, "TYR", "CE1")).xyz, input.atom(atom(&input, "TYR", "CE2")).xyz);
     input.links.clear();
@@ -85,7 +83,7 @@ fn ordinary_unlinked_tyr_still_normalizes_its_symmetric_names() {
 
 #[test]
 fn compat_keeps_its_prior_symmetric_name_behavior() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixtures().remove(0);
     let original_ce1 = input.atom(atom(&input, "TYR", "CE1")).xyz;
     let original_ce2 = input.atom(atom(&input, "TYR", "CE2")).xyz;
@@ -96,7 +94,7 @@ fn compat_keeps_its_prior_symmetric_name_behavior() {
 
 #[test]
 fn a_backbone_link_does_not_protect_symmetric_sidechain_names() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixtures().remove(0);
     let original_ce1 = input.atom(atom(&input, "TYR", "CE1")).xyz;
     input.links[0].atom2.name = "N".into();
@@ -106,7 +104,7 @@ fn a_backbone_link_does_not_protect_symmetric_sidechain_names() {
 
 #[test]
 fn stale_geometry_keeps_anchor_names_without_creating_a_bond() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixtures().remove(0);
     for p in input.atom_paths() {
         if input.atom_group(p).resname == "CYS" { input.atom_mut(p).xyz += v3(30., 0., 0.); }
@@ -121,7 +119,7 @@ fn stale_geometry_keeps_anchor_names_without_creating_a_bond() {
 
 #[test]
 fn absent_ambiguous_and_incompatible_endpoints_do_not_choose_an_anchor() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     for invalid in 0..5 {
         let mut input = fixtures().remove(0);
         let original_ce1 = input.atom(atom(&input, "TYR", "CE1")).xyz;
@@ -148,7 +146,7 @@ fn absent_ambiguous_and_incompatible_endpoints_do_not_choose_an_anchor() {
 
 #[test]
 fn repeated_annotations_do_not_change_the_linked_hydrogen_states() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     let mut input = fixtures().remove(0);
     input.links.push(input.links[0].clone());
     let original = heavy(&input);

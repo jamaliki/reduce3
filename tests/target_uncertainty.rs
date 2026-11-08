@@ -1,3 +1,6 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::v3;
 use reduce3::interp::{target_uncertainty::{self, BondUncertainty, BondUncertaintyReason as Reason},
     FlatAtoms, ORIGIN_COVALENT, ORIGIN_MISC, ORIGIN_SS};
@@ -204,7 +207,7 @@ fn self_links_and_cross_model_endpoints_remain_ambiguous() {
 
 #[test]
 fn exact_source_products_preserve_supported_h_targets() {
-    let ml = reduce3::MonLib::load(&reduce3::MonLib::locate(None).expect("set REDUCE3_CHEM_DATA")).unwrap();
+    let Some(ml) = chem_data::library() else { return };
     for (name, cif) in [("9B5A", include_str!("data/covalent_9b5a.cif")), ("6WGN", include_str!("data/covalent_6wgn.cif")),
         ("8QSC", include_str!("data/covalent_8qsc.cif")), ("3PX7", include_str!("data/ptr_dt_3px7.cif"))] {
         let mut st = reduce3::mmcif::read_mmcif(cif).unwrap();

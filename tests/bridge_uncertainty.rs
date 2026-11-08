@@ -1,12 +1,11 @@
 //! Explicit metal hydrides keep both original parent rows.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::v3;
 use reduce3::model::{Atom, AtomPath, Structure};
-use reduce3::{mmcif, pipeline, MonLib, Params};
-
-fn library() -> MonLib {
-    MonLib::load(&MonLib::locate(None).expect("Bridge tests require REDUCE3_CHEM_DATA")).unwrap()
-}
+use reduce3::{mmcif, pipeline, Params};
 
 fn fixture(component: &str) -> Structure {
     let rows = match component {
@@ -52,7 +51,7 @@ fn params(st: &Structure) -> Params {
 
 #[test]
 fn exact_source_hydrides_keep_both_rows_without_inventing_coordinates() {
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     for component in ["NWN", "EJ2"] {
         let input = fixture(component);
         let output = pipeline::run(input.clone(), &ml, &params(&input)).unwrap();
@@ -83,7 +82,7 @@ fn exact_source_hydrides_keep_both_rows_without_inventing_coordinates() {
 
 #[test]
 fn observed_hydride_keeps_its_original_coordinate_charge_and_row() {
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     for (name, element) in [("H", "H"), ("H", "D"), ("D", "D")] {
     let mut input = fixture("EJ2");
     let mut hydrogen = Atom::new(name, element, v3(-3.806, -3.506, 26.700));
@@ -111,7 +110,7 @@ fn observed_hydride_keeps_its_original_coordinate_charge_and_row() {
 
 #[test]
 fn unsupported_or_ambiguous_bridge_isotopes_fail_before_placement() {
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     for isotopes in [vec![("T", "T")], vec![("H", "T")], vec![("D", "H")],
         vec![("H", "H"), ("D", "D")]] {
         let mut input = fixture("EJ2");
@@ -127,7 +126,7 @@ fn unsupported_or_ambiguous_bridge_isotopes_fail_before_placement() {
 
 #[test]
 fn invalid_hydride_source_declarations_stay_strict() {
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     for case in 0..12 {
         let mut input = fixture("EJ2");
         let mut policy = params(&input);

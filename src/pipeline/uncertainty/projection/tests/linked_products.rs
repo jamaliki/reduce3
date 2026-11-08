@@ -1,10 +1,6 @@
 use super::*;
 use crate::hplace::{self, HPlaceParams, NTermCharge, Placed};
 
-fn library() -> MonLib {
-    MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap()
-}
-
 fn input() -> Structure {
     crate::mmcif::read_mmcif(include_str!("../../../../../tests/data/frame_3e6p.cif")).unwrap()
 }
@@ -20,7 +16,7 @@ fn site(st: &Structure, name: &str) -> Option<usize> {
 
 #[test]
 fn exact_3e6p_product_keeps_both_fixed_methylene_h_sites_and_accepted_graph() {
-    let ml = library();
+    let Some(ml) = crate::test_chem_data::library() else { return };
     let mut st = input();
     assert!(st.atom_paths().into_iter().all(|p| !st.atom(p).is_hydrogen()));
     let original_heavy = st.atom_paths().into_iter().map(|p| (st.atom(p).src, st.atom(p).xyz)).collect::<Vec<_>>();
@@ -60,7 +56,7 @@ fn exact_3e6p_product_keeps_both_fixed_methylene_h_sites_and_accepted_graph() {
 
 #[test]
 fn absent_or_ambiguous_product_links_keep_three_h_prop_recipes() {
-    let ml = library();
+    let Some(ml) = crate::test_chem_data::library() else { return };
     for invalid in 0..3 {
         let mut st = input();
         let index = st.links.iter().position(|link| link.atom1.name == "CH2" || link.atom2.name == "CH2").unwrap();
@@ -79,7 +75,7 @@ fn absent_or_ambiguous_product_links_keep_three_h_prop_recipes() {
 
 #[test]
 fn compatibility_mode_keeps_its_existing_product_recipes() {
-    let ml = library();
+    let Some(ml) = crate::test_chem_data::library() else { return };
     let mut st = input();
     let placed = place(&mut st, &ml, true);
     for name in ["HH21", "HH22"] {

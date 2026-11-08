@@ -1,16 +1,16 @@
 use super::*;
 
-fn fixture() -> (MonLib, Comp, crate::monlib::CompBond) {
-    let library = MonLib::load(&MonLib::locate(None).expect("set REDUCE3_CHEM_DATA for source-order tests")).unwrap();
+fn fixture() -> Option<(MonLib, Comp, crate::monlib::CompBond)> {
+    let library = crate::test_chem_data::library()?;
     let comp = (*library.comp("TD").unwrap()).clone();
     let bond = comp.bonds.iter().find(|b| b.a1 == "C5'" && b.a2 == "O5'").unwrap().clone();
     assert_eq!(bond.type_, "coval");
-    (library, comp, bond)
+    Some((library, comp, bond))
 }
 
 #[test]
 fn actual_dt_proves_aliased_coval_bonds_without_changing_the_dictionary() {
-    let (library, comp, bond) = fixture();
+    let Some((library, comp, bond)) = fixture() else { return };
     assert_eq!(source_bond_order(&library, &comp, &bond, "DT"), Some(2));
     let terminal = library.apply_mod(&comp, "5*END").unwrap();
     assert!(terminal.test_for_rna_dna().is_none());
@@ -25,7 +25,7 @@ fn actual_dt_proves_aliased_coval_bonds_without_changing_the_dictionary() {
 #[test]
 fn unknown_components_atoms_elements_or_orders_cannot_prove_a_single_bond() {
     for invalid in 0..9 {
-        let (library, mut comp, mut bond) = fixture();
+        let Some((library, mut comp, mut bond)) = fixture() else { return };
         let actual = match invalid {
             0 => "TD",
             1 => "UNKNOWN",

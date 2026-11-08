@@ -21,3 +21,9 @@ pub fn locate() -> Option<PathBuf> {
     }
     root
 }
+
+/// The monomer library from chem_data, or None to skip the test.
+#[allow(dead_code)] // tests/golden.rs checks the pinned files before loading
+pub fn library() -> Option<reduce3::MonLib> {
+    Some(reduce3::MonLib::load(&locate()?).unwrap())
+}

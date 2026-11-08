@@ -1,8 +1,11 @@
-use reduce3::{mmcif, pipeline, MonLib, Params};
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
+use reduce3::{mmcif, pipeline, Params};
 
 #[test]
 fn long_embedded_magnesium_contacts_keep_the_other_histidine_ring_h() {
-    let library = MonLib::load(&MonLib::locate(None).expect("set REDUCE3_CHEM_DATA for the exact histidine test")).unwrap();
+    let Some(library) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/his_embedded_7vzg.cif")).unwrap();
     let required = input.atom_paths().into_iter().filter(|&p| input.atom_group(p).resname == "HIS")
         .map(|p| input.atom(p).src).collect();

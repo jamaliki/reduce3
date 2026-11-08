@@ -1,6 +1,9 @@
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::interp::target_uncertainty::BondUncertaintyReason;
 use reduce3::model::{Atom, AtomPath, Structure};
-use reduce3::{cif, mmcif, pipeline, MonLib, Params};
+use reduce3::{cif, mmcif, pipeline, Params};
 
 // Checked binding input SHA256: ddd3b8d5d99dbb213b8698da2d764197202b12780a9ad003cfd379b6c7fb08f8.
 // The added observed HG follows the original 52 heavy rows from the 9HJ3 fixture.
@@ -77,7 +80,7 @@ fn interleaved_heavy_and_h_rows_match_the_contiguous_layout_with_exact_source_ro
 
 #[test]
 fn both_observed_h_orders_preserve_targets_without_relaxing_strict_defaults() {
-    let ml = MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap();
+    let Some(ml) = chem_data::library() else { return };
     let contiguous = (0..6).chain([52]).chain(6..52).collect::<Vec<_>>();
     for input in [mmcif::read_mmcif(OBSERVED).unwrap(), reordered(&contiguous)] {
         let sg = input.atom_paths().into_iter().find(|p| input.atom(*p).name.trim() == "SG").unwrap();
@@ -173,7 +176,7 @@ fn repeated_atom_identity_remains_visible_and_cannot_authorize_observed_h() {
     let input = reordered(&order);
     let group = input.atom_group(source(&input, 5));
     assert_eq!(group.atoms.iter().filter(|atom| atom.name.trim() == "HG").map(|atom| atom.src).collect::<Vec<_>>(), [52, 53]);
-    let ml = MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap();
+    let Some(ml) = chem_data::library() else { return };
     let error = pipeline::run(input, &ml, &Params { stop_on_any_missing_hydrogen: true,
         allow_unresolved_bond_targets: true, ..Params::default() }).err().unwrap();
     assert!(error.contains("no unique retained dictionary parent"), "{error}");

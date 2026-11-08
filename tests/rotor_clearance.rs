@@ -12,7 +12,7 @@ mod chem_data;
 
 use reduce3::geom::{rotate_deg_axis_dir, v3, Vec3};
 use reduce3::hplace::NTermCharge;
-use reduce3::{mmcif, pipeline, MonLib, Params};
+use reduce3::{mmcif, pipeline, Params};
 
 const SLICE: &str = include_str!("data/1qvc_b289_293.cif");
 
@@ -30,8 +30,7 @@ const SER_CB: Vec3 = v3(-2.224, 11.447, 25.877);
 const SER_OG: Vec3 = v3(-2.349, 10.21, 25.206);
 
 fn run(text: &str, params: &Params) -> Option<pipeline::Output> {
-    let root = chem_data::locate()?;
-    let library = MonLib::load(&root).unwrap();
+    let library = chem_data::library()?;
     Some(pipeline::run(mmcif::read_mmcif(text).unwrap(), &library, params).unwrap())
 }
 

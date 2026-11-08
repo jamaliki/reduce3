@@ -7,7 +7,7 @@
 mod chem_data;
 
 use reduce3::geom::{dihedral_deg, Vec3};
-use reduce3::{mmcif, pipeline, MonLib, Params};
+use reduce3::{mmcif, pipeline, Params};
 
 /// Tyr 7 and the 4-mercuribenzoic acid (MBO) of 2QO8, about 25 A apart.
 const MODEL: &str = "\
@@ -59,8 +59,7 @@ HETATM 2127 O  OZ2 . MBO C 3 . ? 0.280  12.067 30.897 1.00 19.62 ? 263 MBO B OZ2
 ";
 
 fn run(params: &Params) -> Option<Vec<(String, Vec3)>> {
-    let root = chem_data::locate()?;
-    let ml = MonLib::load(&root).unwrap();
+    let ml = chem_data::library()?;
     let out = pipeline::run(mmcif::read_mmcif(MODEL).unwrap(), &ml, params).unwrap();
     let mut atoms = Vec::new();
     for chain in &out.structure.models[0].chains {
@@ -104,8 +103,7 @@ fn without_the_preferences_the_acid_is_not_syn() {
 
 #[test]
 fn crowded_6tbr_tyr224_keeps_its_gln_contact_without_large_hydrogen_tilt() {
-    let Some(root) = chem_data::locate() else { return };
-    let ml = MonLib::load(&root).unwrap();
+    let Some(ml) = chem_data::library() else { return };
     let input = mmcif::read_mmcif(include_str!("data/6tbr_tyr224.cif")).unwrap();
     let original = reduce3::world::World::from_structure(&input);
     // Even an excessive contact reward cannot override the geometry guard.

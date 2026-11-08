@@ -112,13 +112,7 @@ mod tests {
 
     #[test]
     fn private_names_keep_internal_source_atoms_and_restraints() {
-        let Some(root) = MonLib::locate(None) else {
-            // as tests/common/chem_data.rs: fail rather than skip when asked to
-            assert!(std::env::var_os("REDUCE3_REQUIRE_CHEM_DATA").is_none_or(|v| v.is_empty() || v == "0"),
-                "chem_data not found and REDUCE3_REQUIRE_CHEM_DATA is set: set REDUCE3_CHEM_DATA");
-            return;
-        };
-        let ml = MonLib::load(&root).unwrap();
+        let Some(ml) = crate::test_chem_data::library() else { return };
         let source = ml.comp("0G7").unwrap();
         assert!(collision(&source));
         let names = ["HNT1", "HNT2", "HNT3"].map(String::from);

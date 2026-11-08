@@ -1,13 +1,12 @@
 //! Exact deposited bond failures retain heavy atoms and observed H.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::v3;
 use reduce3::interp::target_uncertainty::{self, BondUncertaintyReason as Reason};
 use reduce3::model::{Atom, AtomPath, Structure};
-use reduce3::{mmcif, pipeline, MonLib, Params};
-
-fn library() -> MonLib {
-    MonLib::load(&MonLib::locate(None).expect("Set REDUCE3_CHEM_DATA")).unwrap()
-}
+use reduce3::{mmcif, pipeline, Params};
 
 fn find(st: &Structure, component: &str, name: &str) -> AtomPath {
     st.atom_paths().into_iter().find(|p| st.atom_group(*p).resname.trim() == component
@@ -55,7 +54,7 @@ fn assert_observed(st: &Structure, original: &Atom) {
 
 #[test]
 fn accepted_deposited_sg_link_retains_observed_hg_as_chemical_only_uncertainty() {
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     let mut input = mmcif::read_mmcif(include_str!("data/linked_9hj3.cif")).unwrap();
     let hydrogen = observed(&mut input, "CYS", "SG", "HG");
     let sg = input.atom(find(&input, "CYS", "SG")).src;
@@ -99,7 +98,7 @@ fn degenerate_fixture() -> Structure {
 
 #[test]
 fn exact_1nlm_coincident_intrinsic_bonds_mask_only_four_original_rows() {
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     let input = degenerate_fixture();
     let params = policy(&input);
     let output = pipeline::run(input.clone(), &ml, &params).unwrap();
@@ -154,7 +153,7 @@ fn coincident_helper_requires_an_accepted_finite_original_heavy_pair() {
         assert!(reports.is_empty(), "case {case}");
     }
     st.atom_mut(cg).xyz.x += 1.0;
-    let ml = library();
+    let Some(ml) = chem_data::library() else { return };
     st.atom_mut(find(&st.clone(), "ASP", "CG")).xyz.x += 1.0;
     let output = pipeline::run(st.clone(), &ml, &policy(&st)).unwrap();
     assert!(output.bond_uncertainties.is_empty());

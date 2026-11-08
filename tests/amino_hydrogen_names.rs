@@ -4,6 +4,9 @@
 //! flips. H21 of G and DG is cis to N1, as H61 of A and H41 of C are.
 //! `--compat` keeps Reduce2's names, which tools/compare_outputs.sh checks.
 
+#[path = "common/chem_data.rs"]
+mod chem_data;
+
 use reduce3::geom::{dihedral_deg, Vec3};
 use reduce3::model::Structure;
 use reduce3::{mmcif, pipeline, MonLib, Params};
@@ -29,10 +32,6 @@ fn groups(resname: &str) -> &'static [Group] {
         "C" | "DC" => &[("N3", "C4", "N4", "H41", "H42")],
         _ => &[],
     }
-}
-
-fn library() -> MonLib {
-    MonLib::load(&MonLib::locate(None).expect("set REDUCE3_CHEM_DATA for the amino hydrogen tests")).unwrap()
 }
 
 fn run(library: &MonLib, model: &str, flips: bool) -> pipeline::Output {
@@ -77,7 +76,7 @@ fn flipped(output: &pipeline::Output, mover: &str) -> bool {
 
 #[test]
 fn amide_and_guanidinium_names_do_not_depend_on_flips() {
-    let library = library();
+    let Some(library) = chem_data::library() else { return };
     for flips in [true, false] {
         let output = run(&library, PROTEIN, flips);
         assert_eq!(check_names(&output.structure), ["ASN 689", "ARG 724", "GLN 725", "ARG 766", "ASN 828"]);
@@ -90,6 +89,7 @@ fn amide_and_guanidinium_names_do_not_depend_on_flips() {
 
 #[test]
 fn base_amino_names_match_in_rna_and_dna() {
-    let output = run(&library(), BASES, true);
+    let Some(library) = chem_data::library() else { return };
+    let output = run(&library, BASES, true);
     assert_eq!(check_names(&output.structure), ["G 1", "DG 1", "A 1", "DA 1", "C 1", "DC 1"]);
 }
