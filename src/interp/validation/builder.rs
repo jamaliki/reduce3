@@ -1,3 +1,6 @@
+//! Builds the validation graph: checks the input, then adds residue, chain,
+//! link, metal and symmetry restraints.
+
 use super::*;
 
 mod automatic;

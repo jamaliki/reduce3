@@ -1,3 +1,6 @@
+//! Bond orders from the source dictionary (the CCD for generic `coval` bonds)
+//! and the declared thioether links fixed mode adds before automatic linking.
+
 use super::*;
 use crate::monlib::CompBond;
 

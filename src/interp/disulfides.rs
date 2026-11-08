@@ -1,3 +1,6 @@
+//! Fixed mode: deposited (`struct_conn` disulf) Cys SG-SG bonds, kept even
+//! when one sulfur is near a metal.
+
 use super::*;
 
 fn matches(st: &Structure, flat: &FlatAtoms, i: u32, label: &AtomLabel) -> bool {

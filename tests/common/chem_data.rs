@@ -1,7 +1,8 @@
 //! Where the tests find chem_data (`REDUCE3_CHEM_DATA`, see
 //! [`reduce3::MonLib::locate`]). A test that needs it is skipped when it is
 //! absent, unless `REDUCE3_REQUIRE_CHEM_DATA` is set: then the test fails, so
-//! a run that is meant to cover them (CI) cannot pass by skipping them.
+//! a run that is meant to cover them (CI) cannot pass by skipping them. The
+//! unit tests include this file too, as `crate::test_chem_data`.
 
 use std::path::PathBuf;
 

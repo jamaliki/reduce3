@@ -1,3 +1,6 @@
+//! Restraints for automatic links: the selected link dictionary without its
+//! mods, or default distance targets.
+
 use super::*;
 
 mod metal_defaults;

@@ -1,3 +1,6 @@
+//! Nonbonded metal-ligand candidate pairs, symmetry images included, shared
+//! by both Metal Coordination Library hooks.
+
 use super::*;
 use crate::cell::SymOp;
 use crate::clashcheck::neighbors::Query;

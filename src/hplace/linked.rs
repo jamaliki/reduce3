@@ -1,3 +1,7 @@
+//! Fixed mode at deposited covalent links (`struct_conn` covale): angle
+//! targets for the hydrogens of a linked carbon whose partner takes a leaving
+//! atom's place, and the N-H of tertiary amides.
+
 use super::*;
 
 fn residue(flat: &FlatAtoms, i: u32) -> (u32, u32, u32) {

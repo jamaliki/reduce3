@@ -1,3 +1,6 @@
+//! Caller-supplied validation CIF dictionaries, loaded into a private overlay
+//! of the monomer library.
+
 use super::*;
 
 impl MonLib {

@@ -1,3 +1,5 @@
+//! Formal charges as CCTBX's scattering-label normalization leaves them.
+
 #[path = "charge_labels.rs"]
 mod charge_labels;
 

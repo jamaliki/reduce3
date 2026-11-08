@@ -1,3 +1,7 @@
+//! Probe2's preparation of the typed graph: phantom hydrogens on waters, donor
+//! flags from explicit hydrogens, and bonds from positive ions to atoms at
+//! contact distance.
+
 use super::Options;
 use crate::atomtypes::is_aromatic_acceptor;
 use crate::probe::AtomInfo;

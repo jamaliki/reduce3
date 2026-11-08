@@ -1,3 +1,6 @@
+//! Fixed mode: whether a trigonal carbon's single hydrogen can ride on its
+//! plane, which needs the carbon's full connectivity from its own dictionary.
+
 use super::*;
 use std::sync::Arc;
 

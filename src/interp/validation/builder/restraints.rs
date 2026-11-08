@@ -1,3 +1,6 @@
+//! A residue's own dictionary restraints (bonds, angles, chiralities and
+//! planes) in the validation graph.
+
 use super::*;
 
 pub(super) fn residue(

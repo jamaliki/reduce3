@@ -1,3 +1,6 @@
+//! Peptide imidic acids: the HNO hydrogen on the carbonyl oxygen, and the
+//! next residue's N-H that it replaces.
+
 use super::*;
 
 pub(super) fn prepare(
