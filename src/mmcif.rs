@@ -2,7 +2,7 @@
 //! (`iotbx.pdb.mmcif.pdb_hierarchy_builder` and `hierarchy.as_cif_block`).
 
 use crate::cell::{space_group_info, UnitCell};
-use crate::cif;
+use crate::cif::{self, trim};
 use crate::cifsource::{CifCell, CifSink, CifSource, CifTable, CifText, ColumnValue};
 use crate::geom::v3;
 use crate::model::*;
@@ -1016,19 +1016,6 @@ pub struct SourceNumbers([Vec<f64>; 5]);
 
 /// The items of [`SourceNumbers`], as `structure_from_cif` finds their columns.
 const NUMBER_ITEMS: [&str; 5] = ["Cartn_x", "Cartn_y", "Cartn_z", "occupancy", "B_iso_or_equiv"];
-
-/// `s.trim()`, with a byte loop for ASCII ends.
-fn trim(s: &str) -> &str {
-    // the ASCII characters `char::is_whitespace` accepts
-    let blank = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
-    let b = s.as_bytes();
-    let start = b.iter().position(|c| !blank(c)).unwrap_or(b.len());
-    let end = b.iter().rposition(|c| !blank(c)).map_or(start, |i| i + 1);
-    match s.get(start..end) {
-        Some(t) if t.as_bytes().first().is_none_or(u8::is_ascii) && t.as_bytes().last().is_none_or(u8::is_ascii) => t,
-        _ => s.trim(),
-    }
-}
 
 /// Chooses each value of the output `_atom_site` loop.
 struct AtomSiteValues<'s, T: ?Sized> {

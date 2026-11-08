@@ -4,6 +4,7 @@
 //! coordination and automatic links, producing bond/angle/dihedral/plane
 //! proxies in cctbx's registry order, plus energy types.
 
+use crate::cif::trim;
 use crate::geom::*;
 use crate::model::*;
 use crate::monlib::{Comp, MonLib};
@@ -16,26 +17,6 @@ pub mod validation;
 pub mod target_uncertainty;
 mod disulfides;
 mod covalent;
-
-/// The result of `str::trim`, found with a byte loop when the ends are ASCII.
-#[inline]
-fn trim(s: &str) -> &str {
-    let b = s.as_bytes();
-    // the ASCII characters that `char::is_whitespace` accepts
-    let ws = |c: u8| c == b' ' || (b'\t'..=b'\r').contains(&c);
-    let mut i = 0;
-    while i < b.len() && ws(b[i]) {
-        i += 1;
-    }
-    let mut j = b.len();
-    while j > i && ws(b[j - 1]) {
-        j -= 1;
-    }
-    if i < j && (b[i] >= 0x80 || b[j - 1] >= 0x80) {
-        return s.trim();
-    }
-    &s[i..j]
-}
 
 /// Resolve generic bond types against the component present in the model.
 pub(crate) fn source_bond_order(ml: &MonLib, comp: &Comp, bond: &crate::monlib::CompBond, actual_component: &str) -> Option<u8> {
@@ -70,6 +51,12 @@ pub const ORIGIN_SS: u16 = 1;
 pub const ORIGIN_METAL: u16 = 3;
 pub const ORIGIN_GLYCO_CUSTOM: u16 = 5;
 pub const ORIGIN_MISC: u16 = 10;
+
+/// Peptide bonds: polymer bonds and the CIS, NMCIS, NMTRANS, PCIS, PTRANS and
+/// TRANS link dictionaries.
+pub(crate) fn is_peptide_origin(origin: u16) -> bool {
+    matches!(origin, ORIGIN_COVALENT | 35 | 63 | 65 | 66 | 70 | 79)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct BondProxy {
@@ -489,7 +476,6 @@ impl Interp {
 struct ConfResidue {
     atoms: Vec<u32>,
     resname: String,
-    #[allow(dead_code)]
     rg: (usize, usize, usize), // model, chain, residue group
     link_to_previous: bool,
 }

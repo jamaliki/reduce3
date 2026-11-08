@@ -271,7 +271,4 @@ fn fixup_explicit_donors(w: &mut World, atoms: &[u32]) {
     }
 }
 
-/// Aromatic-ring atoms treated as acceptors (`AtomTypes.IsAromaticAcceptor`).
-pub fn is_aromatic_acceptor(resname: &str, atom_name: &str) -> bool {
-    crate::atomtypes::is_aromatic_acceptor(resname, atom_name)
-}
+pub use crate::atomtypes::is_aromatic_acceptor;

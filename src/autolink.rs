@@ -13,7 +13,7 @@
 //! model and atom groups.
 
 use crate::geom::*;
-use crate::interp::{FlatAtoms, Interp, ORIGIN_GLYCO_CUSTOM, ORIGIN_METAL, ORIGIN_MISC};
+use crate::interp::{is_peptide_origin, FlatAtoms, Interp, ORIGIN_GLYCO_CUSTOM, ORIGIN_METAL, ORIGIN_MISC};
 use crate::linkdata;
 use crate::model::*;
 use crate::monlib::{ChemLink, MonLib};
@@ -687,10 +687,10 @@ impl<'a> Ctx<'a> {
         };
         // peptide bonds made before linking
         initial.of(atom).iter().zip(initial.bonds_of(atom)).any(|(&other, &k)|
-            peptide_origin(it.bonds[k as usize].origin) && self.peptide_pair(it, atom, other) && compatible(other))
+            is_peptide_origin(it.bonds[k as usize].origin) && self.peptide_pair(it, atom, other) && compatible(other))
             || it.bonds[initial_bonds..].iter().any(|bond| {
                 let other = if bond.i == atom { bond.j } else if bond.j == atom { bond.i } else { return false };
-                peptide_origin(bond.origin) && self.peptide_pair(it, atom, other) && compatible(other)
+                is_peptide_origin(bond.origin) && self.peptide_pair(it, atom, other) && compatible(other)
             })
     }
 
@@ -1615,11 +1615,6 @@ fn declared_covalent_pairs(st: &Structure, flat: &FlatAtoms) -> (FxHashSet<(u32,
         }
     }
     (unique, resolved)
-}
-
-fn peptide_origin(origin: u16) -> bool {
-    // Polymer bonds and the CIS, NMCIS, NMTRANS, PCIS, PTRANS and TRANS dictionaries.
-    matches!(origin, crate::interp::ORIGIN_COVALENT | 35 | 63 | 65 | 66 | 70 | 79)
 }
 
 /// Make the automatic links. Bonds (with their angles, dihedrals and planes)

@@ -1,6 +1,6 @@
 //! Report deposited bonds whose targets lack a supported chemical environment.
 
-use super::ORIGIN_COVALENT;
+use super::{is_peptide_origin, ORIGIN_COVALENT};
 use crate::model::{Atom, AtomLabel, AtomPath, EndpointResolver, Structure};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -58,11 +58,6 @@ fn peptide(st: &Structure, paths: &[AtomPath], first: u32, second: u32) -> bool 
     let names = (atom(st, paths, first).name.trim(), atom(st, paths, second).name.trim());
     !same_residue(paths, first, second) && matches!(names, ("N", "C") | ("C", "N")) && [first, second].iter().all(|&index|
         crate::resclass::get_class(st.atom_group(paths[index as usize]).resname.trim()).is_amino_acid())
-}
-
-fn peptide_origin(origin: Option<u16>) -> bool {
-    // Named CIS, NMCIS, NMTRANS, PCIS, PTRANS and TRANS links use dictionary origins.
-    matches!(origin, Some(ORIGIN_COVALENT | 35 | 63 | 65 | 66 | 70 | 79))
 }
 
 fn pair(a: u32, b: u32) -> (u32, u32) { (a.min(b), a.max(b)) }
@@ -141,7 +136,7 @@ fn report_pair(st: &Structure, paths: &[AtomPath], edge: (u32, u32), origin: Opt
     } else if origin.is_none() { Some(BondUncertaintyReason::UninterpretedBond) } else { None };
     if let Some(reason) = reason {
         for index in [a, b] { add(result, st, paths, index, true, reason); }
-    } else if !peptide_origin(origin) || !peptide(st, paths, a, b) {
+    } else if !origin.is_some_and(is_peptide_origin) || !peptide(st, paths, a, b) {
         for index in [a, b] {
             if canonical(st.atom_group(paths[index as usize]).resname.trim()) {
                 let sulfur = cysteine_sulfur(st, paths, index);
